@@ -8,6 +8,8 @@ struct ContentView: View {
     @State private var showAdd = false
     @State private var showImporter = false
     @State private var playing: VideoItem?
+    @State private var selectionMode = false
+    @State private var selected: Set<UUID> = []
 
     var body: some View {
         NavigationStack {
@@ -21,7 +23,7 @@ struct ContentView: View {
                     }
                 }
                 if !downloads.tasks.isEmpty {
-                    Section("下载中") {
+                    Section("下载任务 (\(downloads.activeCount)/\(downloads.maxConcurrent))") {
                         ForEach(downloads.tasks) { task in
                             DownloadRow(task: task)
                                 .swipeActions {
@@ -34,21 +36,56 @@ struct ContentView: View {
                 }
                 Section("视频库 (\(library.items.count))") {
                     ForEach(library.items) { item in
-                        LibraryRow(item: item, isMissing: library.isMissing(item))
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                if !library.isMissing(item) { playing = item }
+                        HStack(spacing: 12) {
+                            if selectionMode {
+                                Image(systemName: selected.contains(item.id) ? "checkmark.circle.fill" : "circle")
+                                    .foregroundStyle(selected.contains(item.id) ? Color.accentColor : .secondary)
                             }
-                            .swipeActions {
-                                Button("删除", role: .destructive) {
-                                    library.remove(item)
-                                }
+                            LibraryRow(item: item, isMissing: library.isMissing(item))
+                        }
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            if selectionMode {
+                                toggleSelection(item)
+                            } else if !library.isMissing(item) {
+                                playing = item
                             }
+                        }
+                        .swipeActions {
+                            Button("删除", role: .destructive) {
+                                library.remove(item)
+                            }
+                        }
                     }
                 }
             }
             .navigationTitle("PlaneM3U8")
             .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button(selectionMode ? "取消" : "选择") {
+                        selectionMode.toggle()
+                        if !selectionMode { selected.removeAll() }
+                    }
+                    .disabled(library.items.isEmpty)
+                }
+                ToolbarItem(placement: .bottomBar) {
+                    if selectionMode {
+                        HStack {
+                            Button(selected.count == library.items.count ? "取消全选" : "全选") {
+                                if selected.count == library.items.count {
+                                    selected.removeAll()
+                                } else {
+                                    selected = Set(library.items.map { $0.id })
+                                }
+                            }
+                            Spacer()
+                            Button("删除 \(selected.count) 项", role: .destructive) {
+                                deleteSelected()
+                            }
+                            .disabled(selected.isEmpty)
+                        }
+                    }
+                }
                 ToolbarItem(placement: .primaryAction) {
                     Menu {
                         Button { showAdd = true } label: {
@@ -111,6 +148,20 @@ struct ContentView: View {
             }
         }
     }
+
+    private func toggleSelection(_ item: VideoItem) {
+        if selected.contains(item.id) {
+            selected.remove(item.id)
+        } else {
+            selected.insert(item.id)
+        }
+    }
+
+    private func deleteSelected() {
+        library.remove(ids: selected)
+        selected.removeAll()
+        selectionMode = false
+    }
 }
 
 private struct DownloadRow: View {
@@ -120,6 +171,9 @@ private struct DownloadRow: View {
         VStack(alignment: .leading, spacing: 6) {
             Text(task.title).font(.headline).lineLimit(1)
             switch task.status {
+            case .queued:
+                Text("排队等待中（当前已有 5 个任务在下载）")
+                    .font(.caption).foregroundStyle(.secondary)
             case .downloading:
                 ProgressView(value: task.progress)
                 Text("\(Int(task.progress * 100))%")

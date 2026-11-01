@@ -9,6 +9,7 @@ struct DownloadTaskInfo: Identifiable, Equatable {
     var status: Status
 
     enum Status: Equatable {
+        case queued
         case downloading
         case failed(String)
     }
@@ -20,10 +21,14 @@ final class DownloadManager: NSObject, ObservableObject {
     /// 后台传输完成后由 AppDelegate 回填，事件处理完后调用
     static var backgroundCompletionHandler: (() -> Void)?
 
+    /// 同时下载上限，超出后排队
+    let maxConcurrent = 5
+
     weak var library: VideoLibrary?
     @Published private(set) var tasks: [DownloadTaskInfo] = []
 
-    /// taskDescription（源 URL）-> 标题，跨进程重启仍可查
+    /// 等待中的任务（按加入顺序）
+    private var pending: [(url: URL, title: String)] = []
     private var pendingTitles: [String: String] = [:]
     private var durations: [String: Double] = [:]
 
@@ -43,31 +48,71 @@ final class DownloadManager: NSObject, ObservableObject {
                     self.tasks.append(DownloadTaskInfo(id: desc, url: url, title: url.lastPathComponent, progress: 0, status: .downloading))
                 }
             }
+            self.startNextIfNeeded()
         }
     }
 
+    var activeCount: Int {
+        tasks.filter { $0.status == .downloading }.count
+    }
+
     var isBusy: Bool {
-        tasks.contains { $0.status == .downloading }
+        tasks.contains { $0.status == .downloading || $0.status == .queued }
     }
 
     func start(url: URL, title: String) {
         let id = url.absoluteString
         guard !tasks.contains(where: { $0.id == id }) else { return }
-        let asset = AVURLAsset(url: url)
-        guard let task = session.makeAssetDownloadTask(asset: asset, assetTitle: title, assetArtworkData: nil, options: nil) else { return }
-        task.taskDescription = id
-        pendingTitles[id] = title
-        tasks.append(DownloadTaskInfo(id: id, url: url, title: title, progress: 0, status: .downloading))
-        task.resume()
+
+        if activeCount < maxConcurrent {
+            begin(url: url, title: title)
+        } else {
+            pending.append((url, title))
+            tasks.append(DownloadTaskInfo(id: id, url: url, title: title, progress: 0, status: .queued))
+        }
     }
 
     func cancel(_ info: DownloadTaskInfo) {
+        if let index = pending.firstIndex(where: { $0.url.absoluteString == info.id }) {
+            pending.remove(at: index)
+            tasks.removeAll { $0.id == info.id }
+            return
+        }
         Task { @MainActor in
             let all = (try? await self.session.allTasks) ?? []
             for case let task as AVAssetDownloadTask in all where task.taskDescription == info.id {
                 task.cancel()
             }
             self.tasks.removeAll { $0.id == info.id }
+            self.startNextIfNeeded()
+        }
+    }
+
+    // MARK: 队列调度
+
+    private func begin(url: URL, title: String) {
+        let id = url.absoluteString
+        let asset = AVURLAsset(url: url)
+        guard let task = session.makeAssetDownloadTask(asset: asset,
+                                                       assetTitle: title,
+                                                       assetArtworkData: nil,
+                                                       options: nil) else { return }
+        task.taskDescription = id
+        pendingTitles[id] = title
+
+        if let index = tasks.firstIndex(where: { $0.id == id }) {
+            tasks[index].status = .downloading
+            tasks[index].progress = 0
+        } else {
+            tasks.append(DownloadTaskInfo(id: id, url: url, title: title, progress: 0, status: .downloading))
+        }
+        task.resume()
+    }
+
+    private func startNextIfNeeded() {
+        while activeCount < maxConcurrent, !pending.isEmpty {
+            let next = pending.removeFirst()
+            begin(url: next.url, title: next.title)
         }
     }
 
@@ -89,6 +134,7 @@ final class DownloadManager: NSObject, ObservableObject {
         tasks.removeAll { $0.id == id }
         pendingTitles.removeValue(forKey: id)
         durations.removeValue(forKey: id)
+        startNextIfNeeded()
     }
 }
 
@@ -123,6 +169,7 @@ extension DownloadManager: AVAssetDownloadDelegate {
                 self.finishTask(id: id)
             } catch {
                 self.update(id) { $0.status = .failed(error.localizedDescription) }
+                self.startNextIfNeeded()
             }
         }
     }
@@ -136,6 +183,7 @@ extension DownloadManager: AVAssetDownloadDelegate {
                 self.finishTask(id: id)
             } else {
                 self.update(id) { $0.status = .failed(error.localizedDescription) }
+                self.startNextIfNeeded()
             }
         }
     }

@@ -75,8 +75,16 @@ final class VideoLibrary: ObservableObject {
 
     /// 仅删除台账条目；文件不存在时也能正常移除
     func remove(_ item: VideoItem) {
-        items.removeAll { $0.id == item.id }
-        try? FileManager.default.removeItem(at: localURL(for: item))
+        remove(ids: [item.id])
+    }
+
+    /// 批量删除
+    func remove(ids: Set<UUID>) {
+        guard !ids.isEmpty else { return }
+        for item in items where ids.contains(item.id) {
+            try? FileManager.default.removeItem(at: localURL(for: item))
+        }
+        items.removeAll { ids.contains($0.id) }
         save()
     }
 
