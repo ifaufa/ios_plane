@@ -36,7 +36,7 @@ final class DownloadManager: NSObject, ObservableObject {
         super.init()
         // 应用重启后恢复仍在进行的后台任务
         Task { @MainActor in
-            let all = try? await self.session.allTasks
+            let all = (try? await self.session.allTasks) ?? []
             for case let task as AVAssetDownloadTask in all {
                 guard let desc = task.taskDescription, let url = URL(string: desc) else { continue }
                 if !self.tasks.contains(where: { $0.id == desc }) {
@@ -54,7 +54,7 @@ final class DownloadManager: NSObject, ObservableObject {
         let id = url.absoluteString
         guard !tasks.contains(where: { $0.id == id }) else { return }
         let asset = AVURLAsset(url: url)
-        let task = session.makeAssetDownloadTask(asset: asset, assetTitle: title, assetArtworkData: nil, options: nil)
+        guard let task = session.makeAssetDownloadTask(asset: asset, assetTitle: title, assetArtworkData: nil, options: nil) else { return }
         task.taskDescription = id
         pendingTitles[id] = title
         tasks.append(DownloadTaskInfo(id: id, url: url, title: title, progress: 0, status: .downloading))
@@ -63,7 +63,7 @@ final class DownloadManager: NSObject, ObservableObject {
 
     func cancel(_ info: DownloadTaskInfo) {
         Task { @MainActor in
-            let all = try? await self.session.allTasks
+            let all = (try? await self.session.allTasks) ?? []
             for case let task as AVAssetDownloadTask in all where task.taskDescription == info.id {
                 task.cancel()
             }
