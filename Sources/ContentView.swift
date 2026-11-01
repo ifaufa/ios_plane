@@ -45,7 +45,7 @@ struct ContentView: View {
             .sheet(isPresented: $showAdd) {
                 AddDownloadView()
             }
-            .sheet(item: $playing) { item in
+            .fullScreenCover(item: $playing) { item in
                 PlayerView(url: library.localURL(for: item), title: item.title)
             }
         }
