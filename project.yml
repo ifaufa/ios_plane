@@ -1,0 +1,30 @@
+name: PlaneM3U8
+options:
+  bundleIdPrefix: com.local
+  deploymentTarget:
+    iOS: "16.0"
+targets:
+  PlaneM3U8:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+    info:
+      path: Support/Info.plist
+      properties:
+        CFBundleName: PlaneM3U8
+        CFBundleDisplayName: PlaneM3U8
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.local.planem3u8
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SWIFT_VERSION: "5.9"
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
