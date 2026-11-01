@@ -27,8 +27,15 @@ enum BackupService {
         var errorDescription: String? { message }
     }
 
-    /// 打包 Documents/Assets 下的全部文件 + 台账，返回临时归档文件
-    static func makeArchive(items: [VideoItem]) throws -> URL {
+    struct RestoreResult {
+        var restored: Int
+        var total: Int
+        var skipped: [String]
+        var library: [VideoItem]
+    }
+
+    /// 打包 Documents/Assets 下的全部文件 + 台账，返回临时归档文件与打包文件数
+    static func makeArchive(items: [VideoItem]) throws -> (url: URL, files: Int) {
         let fm = FileManager.default
         let tmpDir = fm.temporaryDirectory.appendingPathComponent("PlaneBackup-\(UUID().uuidString)", isDirectory: true)
         try fm.createDirectory(at: tmpDir, withIntermediateDirectories: true)
@@ -77,11 +84,11 @@ enum BackupService {
         try inHandle.close()
         try out.close()
         try? fm.removeItem(at: payloadURL)
-        return archiveURL
+        return (archiveURL, entries.count)
     }
 
     /// 解包恢复到 Documents，返回恢复的文件数与台账条目
-    static func restore(from archive: URL) throws -> (files: Int, items: [VideoItem]) {
+    static func restore(from archive: URL) throws -> RestoreResult {
         let data = try Data(contentsOf: archive, options: .mappedIfSafe)
         guard data.count > magic.count + 8, data.prefix(magic.count) == magic else {
             throw ArchiveError(message: "不是有效的备份文件")
@@ -102,26 +109,54 @@ enum BackupService {
         let fm = FileManager.default
         let docs = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
         var restored = 0
+        var skipped: [String] = []
 
         for entry in manifest.entries {
-            guard !entry.path.contains(".."), !entry.path.hasPrefix("/") else { continue }
-            let dest = docs.appendingPathComponent(entry.path)
-            try fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
-            guard fm.createFile(atPath: dest.path, contents: nil) else { continue }
-            let writer = try FileHandle(forWritingTo: dest)
-            var remaining = Int(entry.length)
-            var cursor = manifestEnd + Int(entry.offset)
-            while remaining > 0 {
-                let size = min(chunk, remaining)
-                let slice = data.subdata(in: cursor..<(cursor + size))
-                try writer.write(contentsOf: slice)
-                cursor += size
-                remaining -= size
+            guard let relative = normalize(entry.path) else {
+                skipped.append("\(entry.path)（路径非法）")
+                continue
             }
-            try writer.close()
-            restored += 1
+            let dest = docs.appendingPathComponent(relative)
+            do {
+                try fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
+                if fm.fileExists(atPath: dest.path) {
+                    try fm.removeItem(at: dest)
+                }
+                guard fm.createFile(atPath: dest.path, contents: nil) else {
+                    skipped.append("\(relative)（无法创建文件）")
+                    continue
+                }
+                let writer = try FileHandle(forWritingTo: dest)
+                var remaining = Int(entry.length)
+                var cursor = manifestEnd + Int(entry.offset)
+                while remaining > 0 {
+                    let size = min(chunk, remaining)
+                    let slice = data.subdata(in: cursor..<(cursor + size))
+                    try writer.write(contentsOf: slice)
+                    cursor += size
+                    remaining -= size
+                }
+                try writer.close()
+                restored += 1
+            } catch {
+                skipped.append("\(relative)（\(error.localizedDescription)）")
+            }
         }
-        return (restored, manifest.library)
+        return RestoreResult(restored: restored,
+                             total: manifest.entries.count,
+                             skipped: skipped,
+                             library: manifest.library)
+    }
+
+    /// 兼容历史备份中的绝对路径（/private/var/... 或 /var/... 前缀差异）
+    private static func normalize(_ rawPath: String) -> String? {
+        var path = rawPath
+        if let range = path.range(of: "/Documents/") {
+            path = String(path[range.upperBound...])
+        }
+        path = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !path.isEmpty, !path.contains("..") else { return nil }
+        return path
     }
 
     // MARK: 私有
@@ -130,17 +165,15 @@ enum BackupService {
 
     private static func collectFiles() throws -> [SourceFile] {
         let fm = FileManager.default
-        let docs = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let assets = VideoLibrary.assetsDir
-        guard let enumerator = fm.enumerator(at: assets,
-                                             includingPropertiesForKeys: [.isRegularFileKey],
-                                             options: [.skipsHiddenFiles]) else { return [] }
+        // 用相对路径枚举，避免 /var 与 /private/var 前缀不一致导致相对路径算错
+        guard let enumerator = fm.enumerator(atPath: assets.path) else { return [] }
         var result: [SourceFile] = []
-        for case let url as URL in enumerator {
-            let values = try url.resourceValues(forKeys: [.isRegularFileKey])
-            guard values.isRegularFile == true else { continue }
-            let relative = url.path.replacingOccurrences(of: docs.path + "/", with: "")
-            result.append(SourceFile(path: relative, url: url))
+        for case let subPath as String in enumerator {
+            let url = assets.appendingPathComponent(subPath)
+            let values = try? url.resourceValues(forKeys: [.isRegularFileKey])
+            guard values?.isRegularFile == true else { continue }
+            result.append(SourceFile(path: "Assets/" + subPath, url: url))
         }
         return result.sorted { $0.path < $1.path }
     }
@@ -201,10 +234,15 @@ final class BackupManager: ObservableObject {
         progressText = "正在打包备份…"
         Task {
             do {
-                let url = try await Task.detached(priority: .userInitiated) {
+                let result = try await Task.detached(priority: .userInitiated) {
                     try BackupService.makeArchive(items: items)
                 }.value
-                exportURL = url
+                if result.files == 0, !items.isEmpty {
+                    alert = AlertInfo(title: "备份未包含视频",
+                                      message: "未在 Documents/Assets 中找到任何视频文件，本次备份只含台账，请确认视频仍在列表中没有显示「文件已丢失」。")
+                } else {
+                    exportURL = result.url
+                }
             } catch {
                 alert = AlertInfo(title: "备份失败", message: error.localizedDescription)
             }
@@ -222,9 +260,18 @@ final class BackupManager: ObservableObject {
                 let result = try await Task.detached(priority: .userInitiated) {
                     try BackupService.restore(from: pickedURL)
                 }.value
-                library.merge(result.items)
-                alert = AlertInfo(title: "恢复完成",
-                                  message: "已恢复 \(result.files) 个文件、\(result.items.count) 条记录。")
+                library.merge(result.library)
+
+                var message = "共 \(result.total) 个文件条目，成功恢复 \(result.restored) 个，合并 \(result.library.count) 条记录。"
+                if !result.skipped.isEmpty {
+                    let preview = result.skipped.prefix(3).joined(separator: "；")
+                    message += "\n\n跳过 \(result.skipped.count) 个：\(preview)"
+                }
+                if result.restored == 0, result.total > 0 {
+                    message += "\n\n未恢复任何文件，请把这条信息反馈给我。"
+                }
+                alert = AlertInfo(title: result.restored > 0 ? "恢复完成" : "恢复不完整",
+                                  message: message)
             } catch {
                 alert = AlertInfo(title: "恢复失败", message: error.localizedDescription)
             }
