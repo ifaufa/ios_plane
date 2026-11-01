@@ -1,9 +1,12 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @EnvironmentObject private var library: VideoLibrary
     @EnvironmentObject private var downloads: DownloadManager
+    @StateObject private var backup = BackupManager()
     @State private var showAdd = false
+    @State private var showImporter = false
     @State private var playing: VideoItem?
 
     var body: some View {
@@ -47,9 +50,51 @@ struct ContentView: View {
             .navigationTitle("PlaneM3U8")
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
-                    Button { showAdd = true } label: {
-                        Image(systemName: "plus")
+                    Menu {
+                        Button { showAdd = true } label: {
+                            Label("新建下载", systemImage: "plus")
+                        }
+                        Divider()
+                        Button { backup.backup(items: library.items) } label: {
+                            Label("备份到文件…", systemImage: "square.and.arrow.up")
+                        }
+                        Button { showImporter = true } label: {
+                            Label("从备份恢复…", systemImage: "square.and.arrow.down")
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
                     }
+                }
+            }
+            .fileImporter(isPresented: $showImporter, allowedContentTypes: [.data]) { result in
+                switch result {
+                case .success(let url):
+                    backup.restore(from: url, library: library)
+                case .failure(let error):
+                    backup.alert = .init(title: "选择文件失败", message: error.localizedDescription)
+                }
+            }
+            .sheet(isPresented: Binding(
+                get: { backup.exportURL != nil },
+                set: { if !$0 { backup.exportURL = nil } }
+            )) {
+                if let url = backup.exportURL {
+                    DocumentExporter(url: url) { backup.exportURL = nil }
+                }
+            }
+            .alert(backup.alert?.title ?? "", isPresented: Binding(
+                get: { backup.alert != nil },
+                set: { if !$0 { backup.alert = nil } }
+            ), presenting: backup.alert) { _ in
+                Button("好", role: .cancel) {}
+            } message: { info in
+                Text(info.message)
+            }
+            .overlay {
+                if backup.isWorking {
+                    ProgressView(backup.progressText)
+                        .padding(24)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
                 }
             }
             .sheet(isPresented: $showAdd) {

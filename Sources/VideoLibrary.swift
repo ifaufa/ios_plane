@@ -53,6 +53,16 @@ final class VideoLibrary: ObservableObject {
         save()
     }
 
+    /// 合并备份里的条目（按 fileName 去重），文件已恢复则重新可见
+    func merge(_ incoming: [VideoItem]) {
+        let existing = Set(items.map { $0.fileName })
+        let added = incoming.filter { !existing.contains($0.fileName) }
+        guard !added.isEmpty else { return }
+        items.append(contentsOf: added)
+        items.sort { $0.createdAt > $1.createdAt }
+        save()
+    }
+
     /// 仅删除台账条目；文件不存在时也能正常移除
     func remove(_ item: VideoItem) {
         items.removeAll { $0.id == item.id }
