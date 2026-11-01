@@ -48,7 +48,7 @@ jobs:
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
           chmod +x "Payload/$(basename "$APP_PATH")/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_PATH/Info.plist")" || true
-          ditto -c -k --sequesterRsrc Payload PlaneM3U8.ipa
+          ditto -c -k --sequesterRsrc --keepParent Payload PlaneM3U8.ipa
           echo "--- IPA 内容 ---"
           unzip -l PlaneM3U8.ipa
 
