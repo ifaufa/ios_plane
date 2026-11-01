@@ -33,13 +33,24 @@ jobs:
             ONLY_ACTIVE_ARCH=NO \
             build
 
+      - name: Ad-hoc sign app
+        run: |
+          APP_PATH=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' | head -1)
+          echo "Signing: $APP_PATH"
+          codesign --force --sign - --timestamp=none "$APP_PATH" || echo "ad-hoc sign failed (continuing)"
+          codesign -dv "$APP_PATH" 2>&1 || true
+
       - name: Package IPA
         run: |
           APP_PATH=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' | head -1)
           echo "Found app: $APP_PATH"
+          rm -rf Payload PlaneM3U8.ipa
           mkdir -p Payload
-          cp -r "$APP_PATH" Payload/
-          zip -qr PlaneM3U8.ipa Payload
+          cp -R "$APP_PATH" Payload/
+          chmod +x "Payload/$(basename "$APP_PATH")/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_PATH/Info.plist")" || true
+          ditto -c -k --sequesterRsrc Payload PlaneM3U8.ipa
+          echo "--- IPA 内容 ---"
+          unzip -l PlaneM3U8.ipa
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
