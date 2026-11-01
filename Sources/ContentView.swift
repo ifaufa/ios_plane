@@ -101,7 +101,13 @@ struct ContentView: View {
                 AddDownloadView()
             }
             .fullScreenCover(item: $playing) { item in
-                PlayerView(url: library.localURL(for: item), title: item.title)
+                PlayerView(
+                    url: library.localURL(for: item),
+                    title: item.title,
+                    startPosition: item.lastPosition ?? 0
+                ) { seconds in
+                    library.updateProgress(id: item.id, seconds: seconds)
+                }
             }
         }
     }
@@ -143,6 +149,11 @@ private struct LibraryRow: View {
                 Text(item.createdAt, style: .date)
             }
             .font(.caption).foregroundStyle(.secondary)
+            if let position = item.lastPosition, position > 5,
+               item.duration <= 0 || position < item.duration - 5 {
+                Text("上次看到 \(Self.formatDuration(position))")
+                    .font(.caption2).foregroundStyle(.blue)
+            }
             if isMissing {
                 Text("文件已丢失（重装 App 会清空本地数据），需重新下载")
                     .font(.caption).foregroundStyle(.red)

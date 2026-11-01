@@ -5,11 +5,14 @@ import UIKit
 struct PlayerView: View {
     let url: URL
     let title: String
+    let startPosition: Double
+    let onProgress: (Double) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var player = AVPlayer()
     @State private var immersive = false
     @State private var chromeVisible = true
+    @State private var timeObserver: Any?
 
     var body: some View {
         ZStack {
@@ -63,15 +66,41 @@ struct PlayerView: View {
         .onTapGesture {
             withAnimation(.easeInOut(duration: 0.2)) { chromeVisible.toggle() }
         }
-        .onAppear {
-            UIApplication.shared.isIdleTimerDisabled = true
-            player.replaceCurrentItem(with: AVPlayerItem(url: url))
-            player.play()
+        .onAppear { startPlayback() }
+        .onDisappear { stopPlayback() }
+    }
+
+    private func startPlayback() {
+        UIApplication.shared.isIdleTimerDisabled = true
+        OrientationLock.apply(.landscape)
+
+        player.replaceCurrentItem(with: AVPlayerItem(url: url))
+        if startPosition > 3 {
+            player.seek(to: CMTime(seconds: startPosition, preferredTimescale: 600),
+                        toleranceBefore: .zero,
+                        toleranceAfter: .zero)
         }
-        .onDisappear {
-            player.pause()
-            UIApplication.shared.isIdleTimerDisabled = false
+        player.play()
+
+        let interval = CMTime(seconds: 5, preferredTimescale: 600)
+        timeObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { time in
+            let seconds = time.seconds
+            guard seconds.isFinite else { return }
+            onProgress(seconds)
         }
+    }
+
+    private func stopPlayback() {
+        if let timeObserver {
+            player.removeTimeObserver(timeObserver)
+            self.timeObserver = nil
+        }
+        let current = player.currentTime().seconds
+        if current.isFinite { onProgress(current) }
+
+        player.pause()
+        UIApplication.shared.isIdleTimerDisabled = false
+        OrientationLock.apply(.all)
     }
 }
 

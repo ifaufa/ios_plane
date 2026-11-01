@@ -8,6 +8,8 @@ struct VideoItem: Identifiable, Codable, Equatable {
     var duration: Double   // 秒
     var fileSize: Int64
     var createdAt: Date
+    /// 上次播放位置（秒），旧台账无此字段时为 nil
+    var lastPosition: Double?
 }
 
 @MainActor
@@ -50,6 +52,14 @@ final class VideoLibrary: ObservableObject {
 
     func add(_ item: VideoItem) {
         items.insert(item, at: 0)
+        save()
+    }
+
+    /// 记录播放进度（每秒节流由调用方保证）
+    func updateProgress(id: UUID, seconds: Double) {
+        guard let idx = items.firstIndex(where: { $0.id == id }) else { return }
+        guard abs((items[idx].lastPosition ?? 0) - seconds) >= 1 else { return }
+        items[idx].lastPosition = seconds
         save()
     }
 

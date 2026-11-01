@@ -22,4 +22,9 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
                      completionHandler: @escaping () -> Void) {
         DownloadManager.backgroundCompletionHandler = completionHandler
     }
+
+    func application(_ application: UIApplication,
+                     supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
+        OrientationLock.mask
+    }
 }
