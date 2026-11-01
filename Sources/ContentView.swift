@@ -9,6 +9,14 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             List {
+                if !library.missingItems.isEmpty {
+                    Section {
+                        Label("有 \(library.missingItems.count) 个视频文件已丢失，条目仅作记录，可左滑删除。",
+                              systemImage: "exclamationmark.triangle")
+                            .font(.footnote)
+                            .foregroundStyle(.orange)
+                    }
+                }
                 if !downloads.tasks.isEmpty {
                     Section("下载中") {
                         ForEach(downloads.tasks) { task in
@@ -23,9 +31,11 @@ struct ContentView: View {
                 }
                 Section("视频库 (\(library.items.count))") {
                     ForEach(library.items) { item in
-                        LibraryRow(item: item)
+                        LibraryRow(item: item, isMissing: library.isMissing(item))
                             .contentShape(Rectangle())
-                            .onTapGesture { playing = item }
+                            .onTapGesture {
+                                if !library.isMissing(item) { playing = item }
+                            }
                             .swipeActions {
                                 Button("删除", role: .destructive) {
                                     library.remove(item)
@@ -74,16 +84,24 @@ private struct DownloadRow: View {
 
 private struct LibraryRow: View {
     let item: VideoItem
+    let isMissing: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(item.title).font(.headline).lineLimit(1)
+            Text(item.title)
+                .font(.headline)
+                .lineLimit(1)
+                .foregroundStyle(isMissing ? .secondary : .primary)
             HStack {
                 Text(item.duration > 0 ? Self.formatDuration(item.duration) : "--:--")
                 Text(Self.formatSize(item.fileSize))
                 Text(item.createdAt, style: .date)
             }
             .font(.caption).foregroundStyle(.secondary)
+            if isMissing {
+                Text("文件已丢失（重装 App 会清空本地数据），需重新下载")
+                    .font(.caption).foregroundStyle(.red)
+            }
         }
         .padding(.vertical, 4)
     }

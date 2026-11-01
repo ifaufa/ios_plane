@@ -21,6 +21,8 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.local.planem3u8
