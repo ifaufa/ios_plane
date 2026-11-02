@@ -16,9 +16,32 @@ struct PlayerHUD: Equatable {
 @MainActor
 final class PlayerGestureModel: ObservableObject {
     @Published var hud: PlayerHUD?
-    @Published var isPlaying = true
+    @Published var isPlaying = false
+    /// 自绘控制层是否可见
+    @Published var chromeVisible = true
 
     private var hideTask: Task<Void, Never>?
+    private var autoHideTask: Task<Void, Never>?
+
+    func toggleChrome() {
+        chromeVisible.toggle()
+        if chromeVisible { scheduleAutoHide() }
+    }
+
+    func pokeChrome() {
+        chromeVisible = true
+        scheduleAutoHide()
+    }
+
+    func scheduleAutoHide() {
+        autoHideTask?.cancel()
+        guard chromeVisible, isPlaying else { return }
+        autoHideTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 3_500_000_000)
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeOut(duration: 0.25)) { chromeVisible = false }
+        }
+    }
 
     func show(_ hud: PlayerHUD) {
         hideTask?.cancel()
@@ -112,6 +135,7 @@ final class PlayerHostViewController: UIViewController, UIGestureRecognizerDeleg
 
     private var pan: UIPanGestureRecognizer!
     private var doubleTap: UITapGestureRecognizer!
+    private var singleTap: UITapGestureRecognizer!
 
     private enum PanMode { case undecided, seek, volume, brightness }
     private var mode: PanMode = .undecided
@@ -140,7 +164,7 @@ final class PlayerHostViewController: UIViewController, UIGestureRecognizerDeleg
         playerViewController.view.frame = view.bounds
         playerViewController.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         playerViewController.player = player
-        playerViewController.showsPlaybackControls = true
+        playerViewController.showsPlaybackControls = false
         playerViewController.videoGravity = .resizeAspect
         playerViewController.allowsPictureInPicturePlayback = true
         playerViewController.updatesNowPlayingInfoCenter = true
@@ -155,6 +179,15 @@ final class PlayerHostViewController: UIViewController, UIGestureRecognizerDeleg
         doubleTap = UITapGestureRecognizer(target: self, action: #selector(handleDoubleTap(_:)))
         doubleTap.numberOfTapsRequired = 2
         view.addGestureRecognizer(doubleTap)
+
+        singleTap = UITapGestureRecognizer(target: self, action: #selector(handleSingleTap(_:)))
+        singleTap.numberOfTapsRequired = 1
+        singleTap.require(toFail: doubleTap)
+        view.addGestureRecognizer(singleTap)
+    }
+
+    @objc private func handleSingleTap(_ gesture: UITapGestureRecognizer) {
+        model.toggleChrome()
     }
 
     // 让我们的手势与 AVKit 内部手势并行，保证控制条仍可点按

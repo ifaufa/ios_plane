@@ -41,8 +41,8 @@ struct ContentView: View {
                         ForEach(downloads.tasks) { task in
                             DownloadRow(task: task)
                                 .swipeActions {
-                                    Button("取消", role: .destructive) {
-                                        downloads.cancel(task)
+                                    Button("删除", role: .destructive) {
+                                        downloads.remove(task)
                                     }
                                 }
                         }
@@ -195,22 +195,47 @@ struct ContentView: View {
 
 private struct DownloadRow: View {
     let task: DownloadTaskInfo
+    @EnvironmentObject private var downloads: DownloadManager
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(task.title).font(.headline).lineLimit(1)
+
             switch task.status {
             case .queued:
-                Text("排队等待中（当前已有 5 个任务在下载）")
+                Text("排队等待中（已有 5 个任务在下载）")
                     .font(.caption).foregroundStyle(.secondary)
             case .downloading:
                 ProgressView(value: task.progress)
                 Text("\(Int(task.progress * 100))%")
                     .font(.caption).foregroundStyle(.secondary)
+            case .paused:
+                Text("已暂停 · \(Int(task.progress * 100))%")
+                    .font(.caption).foregroundStyle(.orange)
             case .failed(let message):
                 Text("失败：\(message)")
                     .font(.caption).foregroundStyle(.red)
             }
+
+            if task.stalled {
+                Label("进度 \(Int(downloads.stallTimeout)) 秒无变化，疑似卡住，可重试", systemImage: "exclamationmark.triangle")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
+
+            HStack(spacing: 18) {
+                switch task.status {
+                case .downloading, .queued:
+                    Button("暂停") { downloads.pause(task) }
+                case .paused:
+                    Button("继续") { downloads.resume(task) }
+                case .failed:
+                    Button("重试") { downloads.resume(task) }
+                }
+                Button("删除", role: .destructive) { downloads.remove(task) }
+            }
+            .font(.caption)
+            .buttonStyle(.borderless)
         }
         .padding(.vertical, 4)
     }
