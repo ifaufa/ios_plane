@@ -10,16 +10,23 @@ struct PlayerView: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var player = AVPlayer()
+    @StateObject private var gestures = PlayerGestureModel()
     @State private var immersive = false
     @State private var chromeVisible = true
     @State private var timeObserver: Any?
+    @State private var initialBrightness: CGFloat = -1
 
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
 
-            PlayerViewControllerRepresentable(player: player)
+            PlayerHostView(player: player, model: gestures)
                 .ignoresSafeArea()
+
+            if let hud = gestures.hud {
+                PlayerHUDView(hud: hud)
+                    .allowsHitTesting(false)
+            }
 
             if chromeVisible {
                 VStack(spacing: 0) {
@@ -72,6 +79,7 @@ struct PlayerView: View {
 
     private func startPlayback() {
         UIApplication.shared.isIdleTimerDisabled = true
+        initialBrightness = ScreenBrightness.current
         OrientationLock.apply(.landscape)
 
         player.replaceCurrentItem(with: AVPlayerItem(url: url))
@@ -99,30 +107,11 @@ struct PlayerView: View {
         if current.isFinite { onProgress(current) }
 
         player.pause()
+        if initialBrightness >= 0 {
+            ScreenBrightness.set(initialBrightness)
+            initialBrightness = -1
+        }
         UIApplication.shared.isIdleTimerDisabled = false
         OrientationLock.apply(.all)
-    }
-}
-
-/// 用 AVPlayerViewController 承载原生控制条（进度、音量、字幕、画中画）
-private struct PlayerViewControllerRepresentable: UIViewControllerRepresentable {
-    let player: AVPlayer
-
-    func makeUIViewController(context: Context) -> AVPlayerViewController {
-        let controller = AVPlayerViewController()
-        controller.player = player
-        controller.showsPlaybackControls = true
-        controller.videoGravity = .resizeAspect
-        controller.allowsPictureInPicturePlayback = true
-        controller.updatesNowPlayingInfoCenter = true
-        controller.entersFullScreenWhenPlaybackBegins = false
-        controller.view.backgroundColor = .black
-        return controller
-    }
-
-    func updateUIViewController(_ controller: AVPlayerViewController, context: Context) {
-        if controller.player !== player {
-            controller.player = player
-        }
     }
 }
