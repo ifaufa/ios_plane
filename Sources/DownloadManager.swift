@@ -10,6 +10,8 @@ struct DownloadTaskInfo: Identifiable, Equatable {
     var status: Status
     /// 进度长时间无变化
     var stalled: Bool = false
+    /// 继续后进度回退，说明该源不支持断点续传
+    var restartedFromZero: Bool = false
 
     enum Status: Equatable {
         case queued
@@ -38,6 +40,8 @@ final class DownloadManager: NSObject, ObservableObject {
     private var pendingTitles: [String: String] = [:]
     private var durations: [String: Double] = [:]
     private var progressMarks: [String: CFTimeInterval] = [:]
+    /// 继续下载时记录的基线进度，用于判断是否从头开始
+    private var resumeBaseline: [String: Double] = [:]
     private var stallTimer: Timer?
 
     private lazy var session: AVAssetDownloadURLSession = {
@@ -95,6 +99,7 @@ final class DownloadManager: NSObject, ObservableObject {
 
     func resume(_ info: DownloadTaskInfo) {
         guard info.status == .paused || isFailed(info.status) else { return }
+        resumeBaseline[info.id] = info.progress
         update(info.id) { $0.status = .queued; $0.stalled = false }
         if activeCount < maxConcurrent {
             begin(url: info.url, title: info.title)
@@ -208,6 +213,17 @@ extension DownloadManager: AVAssetDownloadDelegate {
                                 didFinishDownloadingTo location: URL) {
         Task { @MainActor in
             let id = assetDownloadTask.taskDescription ?? assetDownloadTask.urlAsset.url.absoluteString
+
+            // 关键：暂停/删除时 AVFoundation 也会回调“下载完成”并给出残缺资产，
+            // 只有任务仍处于下载中才算真正完成，否则清理残片、不写入视频库。
+            let known = self.tasks.first(where: { $0.id == id })
+            guard let known, known.status.isActive else {
+                try? FileManager.default.removeItem(at: location)
+                self.progressMarks.removeValue(forKey: id)
+                self.resumeBaseline.removeValue(forKey: id)
+                return
+            }
+
             let fileName = UUID().uuidString + ".movpkg"
             let dest = VideoLibrary.assetsDir.appendingPathComponent(fileName)
             do {
@@ -268,6 +284,17 @@ extension DownloadManager: AVAssetDownloadDelegate {
             guard denominator > 0 else { return }
             let progress = min(1.0, loaded / denominator)
             self.progressMarks[id] = CACurrentMediaTime()
+
+            if let baseline = self.resumeBaseline[id], baseline > 0.02 {
+                if progress + 0.05 < baseline {
+                    self.resumeBaseline.removeValue(forKey: id)
+                    self.update(id) { $0.restartedFromZero = true }
+                } else if progress >= baseline {
+                    self.resumeBaseline.removeValue(forKey: id)
+                    self.update(id) { $0.restartedFromZero = false }
+                }
+            }
+
             self.update(id) { $0.progress = progress; $0.stalled = false }
         }
     }

@@ -223,6 +223,12 @@ private struct DownloadRow: View {
                     .foregroundStyle(.orange)
             }
 
+            if task.restartedFromZero {
+                Label("该源不支持断点续传，已从头开始下载", systemImage: "arrow.counterclockwise")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
+
             HStack(spacing: 18) {
                 switch task.status {
                 case .downloading, .queued:
