@@ -14,6 +14,20 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             List {
+                if let message = library.errorMessage {
+                    Section {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Label(message, systemImage: "exclamationmark.triangle.fill")
+                                .font(.footnote)
+                                .foregroundStyle(.red)
+                            HStack(spacing: 20) {
+                                Button("重新读取") { library.reload() }
+                                Button("扫描本地文件重建") { rebuildLibrary() }
+                            }
+                            .font(.footnote)
+                        }
+                    }
+                }
                 if !library.missingItems.isEmpty {
                     Section {
                         Label("有 \(library.missingItems.count) 个视频文件已丢失，条目仅作记录，可左滑删除。",
@@ -98,6 +112,13 @@ struct ContentView: View {
                         Button { showImporter = true } label: {
                             Label("从备份恢复…", systemImage: "square.and.arrow.down")
                         }
+                        Divider()
+                        Button { library.reload() } label: {
+                            Label("重新读取台账", systemImage: "arrow.clockwise")
+                        }
+                        Button { rebuildLibrary() } label: {
+                            Label("扫描本地文件重建台账", systemImage: "wand.and.stars")
+                        }
                     } label: {
                         Image(systemName: "ellipsis.circle")
                     }
@@ -155,6 +176,14 @@ struct ContentView: View {
         } else {
             selected.insert(item.id)
         }
+    }
+
+    private func rebuildLibrary() {
+        let count = library.rebuildFromAssets()
+        backup.alert = .init(
+            title: "重建完成",
+            message: count > 0 ? "扫描本地文件，新登记 \(count) 个视频。" : "没有发现未登记的视频文件。"
+        )
     }
 
     private func deleteSelected() {
