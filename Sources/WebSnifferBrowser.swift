@@ -409,7 +409,14 @@ struct WebSnifferBrowser: View {
             .sheet(isPresented: $showBookmarks) {
                 BookmarksSheet(store: bookmarks) { url in
                     address = url
-                    if let parsed = URL(string: url) {
+                    guard let parsed = URL(string: url) else { return }
+                    if url.lowercased().contains(".m3u8") {
+                        // 收藏的是直链：直接进候选，而不是把播放列表当网页显示
+                        model.addManual(parsed)
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                            showCandidates = true
+                        }
+                    } else {
                         model.load(parsed)
                     }
                 }
