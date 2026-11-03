@@ -38,35 +38,38 @@ enum BackupService {
     }
 
     /// 打包 Documents/Assets 下的全部文件 + 台账 + 收藏夹
+    /// 直接写最终归档（不再生成中间 payload），峰值占用从 3 份降到 2 份
     static func makeArchive(items: [VideoItem], bookmarks: [Bookmark]) throws -> (url: URL, files: Int) {
         let fm = FileManager.default
-        let tmpDir = fm.temporaryDirectory.appendingPathComponent("PlaneBackup-\(UUID().uuidString)", isDirectory: true)
-        try fm.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        cleanupStaleTemps()
 
-        let payloadURL = tmpDir.appendingPathComponent("payload.bin")
-        guard fm.createFile(atPath: payloadURL.path, contents: nil) else {
-            throw ArchiveError(message: "无法创建临时文件")
-        }
-        let payloadHandle = try FileHandle(forWritingTo: payloadURL)
+        // 先扫描一遍，拿到路径与大小，才能把偏移量写进清单
+        let sources = try collectFiles()
         var entries: [BackupManifest.Entry] = []
         var offset: UInt64 = 0
-
-        for file in try collectFiles() {
-            let size = try fileSize(at: file.url)
-            let reader = try FileHandle(forReadingFrom: file.url)
-            while let data = try reader.read(upToCount: chunk), !data.isEmpty {
-                try payloadHandle.write(contentsOf: data)
-            }
-            try reader.close()
-            entries.append(.init(path: file.path, offset: offset, length: size))
-            offset += size
+        for source in sources {
+            entries.append(.init(path: source.path, offset: offset, length: source.size))
+            offset += source.size
         }
-        try payloadHandle.close()
+        let payloadSize = offset
 
-        let manifest = BackupManifest(version: 1, createdAt: Date(), library: items, entries: entries, bookmarks: bookmarks)
+        let manifest = BackupManifest(version: 1,
+                                      createdAt: Date(),
+                                      library: items,
+                                      entries: entries,
+                                      bookmarks: bookmarks)
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         let manifestData = try encoder.encode(manifest)
+
+        // 空间预检：只保留一份归档 + 少量余量
+        let required = payloadSize + UInt64(manifestData.count) + 256 * 1024 * 1024
+        if let available = availableCapacity(), available < Int64(required) {
+            throw ArchiveError(message: "可用空间不足：需要约 \(Self.gb(required))，当前仅剩 \(Self.gb(UInt64(available)))。请清理空间或删除部分视频后重试。")
+        }
+
+        let tmpDir = fm.temporaryDirectory.appendingPathComponent("PlaneBackup-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: tmpDir, withIntermediateDirectories: true)
 
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd-HHmm"
@@ -75,19 +78,55 @@ enum BackupService {
             throw ArchiveError(message: "无法创建备份文件")
         }
         let out = try FileHandle(forWritingTo: archiveURL)
-        try out.write(contentsOf: magic)
-        var length = UInt64(manifestData.count).littleEndian
-        try out.write(contentsOf: withUnsafeBytes(of: &length) { Data($0) })
-        try out.write(contentsOf: manifestData)
 
-        let inHandle = try FileHandle(forReadingFrom: payloadURL)
-        while let data = try inHandle.read(upToCount: chunk), !data.isEmpty {
-            try out.write(contentsOf: data)
+        do {
+            try out.write(contentsOf: magic)
+            var length = UInt64(manifestData.count).littleEndian
+            try out.write(contentsOf: withUnsafeBytes(of: &length) { Data($0) })
+            try out.write(contentsOf: manifestData)
+
+            var written: UInt64 = 0
+            for source in sources {
+                let reader = try FileHandle(forReadingFrom: source.url)
+                while let data = try reader.read(upToCount: chunk), !data.isEmpty {
+                    try out.write(contentsOf: data)
+                    written += UInt64(data.count)
+                }
+                try reader.close()
+            }
+            try out.close()
+
+            guard written == payloadSize else {
+                try? fm.removeItem(at: archiveURL)
+                throw ArchiveError(message: "备份期间素材发生变化（预期 \(payloadSize) 字节，实际 \(written) 字节），已放弃本次备份。")
+            }
+        } catch {
+            try? out.close()
+            try? fm.removeItem(at: tmpDir)
+            throw error
         }
-        try inHandle.close()
-        try out.close()
-        try? fm.removeItem(at: payloadURL)
+
         return (archiveURL, entries.count)
+    }
+
+    /// 清理历史失败遗留的临时备份目录（每次可能残留数 GB）
+    static func cleanupStaleTemps() {
+        let fm = FileManager.default
+        let tmp = fm.temporaryDirectory
+        guard let items = try? fm.contentsOfDirectory(at: tmp, includingPropertiesForKeys: nil) else { return }
+        for item in items where item.lastPathComponent.hasPrefix("PlaneBackup-") {
+            try? fm.removeItem(at: item)
+        }
+    }
+
+    private static func availableCapacity() -> Int64? {
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let values = try? docs.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        return values?.volumeAvailableCapacityForImportantUsage
+    }
+
+    private static func gb(_ bytes: UInt64) -> String {
+        String(format: "%.1f GB", Double(bytes) / 1_073_741_824)
     }
 
     /// 解包恢复到 Documents，返回恢复的文件数与台账条目
@@ -111,6 +150,13 @@ enum BackupService {
 
         let fm = FileManager.default
         let docs = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
+
+        // 恢复同样做空间预检，避免写到一半失败
+        let needed = manifest.entries.reduce(UInt64(0)) { $0 + $1.length } + 256 * 1024 * 1024
+        if let available = availableCapacity(), available < Int64(needed) {
+            throw ArchiveError(message: "可用空间不足：恢复需要约 \(gb(needed))，当前仅剩 \(gb(UInt64(available)))。")
+        }
+
         var restored = 0
         var skipped: [String] = []
 
@@ -165,7 +211,7 @@ enum BackupService {
 
     // MARK: 私有
 
-    private struct SourceFile { let path: String; let url: URL }
+    private struct SourceFile { let path: String; let url: URL; let size: UInt64 }
 
     private static func collectFiles() throws -> [SourceFile] {
         let fm = FileManager.default
@@ -175,9 +221,11 @@ enum BackupService {
         var result: [SourceFile] = []
         for case let subPath as String in enumerator {
             let url = assets.appendingPathComponent(subPath)
-            let values = try? url.resourceValues(forKeys: [.isRegularFileKey])
+            let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
             guard values?.isRegularFile == true else { continue }
-            result.append(SourceFile(path: "Assets/" + subPath, url: url))
+            result.append(SourceFile(path: "Assets/" + subPath,
+                                     url: url,
+                                     size: UInt64(values?.fileSize ?? 0)))
         }
         return result.sorted { $0.path < $1.path }
     }
@@ -232,6 +280,21 @@ final class BackupManager: ObservableObject {
     @Published var progressText = ""
     @Published var alert: AlertInfo?
     @Published var exportURL: URL?
+    private var exportDirectory: URL?
+
+    init() {
+        // 启动即清理上次失败遗留的临时备份，避免占用数 GB 空间
+        BackupService.cleanupStaleTemps()
+    }
+
+    /// 导出结束（无论成功或取消）后清理临时归档
+    func finishExport() {
+        if let directory = exportDirectory {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        exportDirectory = nil
+        exportURL = nil
+    }
 
     func backup(items: [VideoItem], bookmarks: [Bookmark]) {
         isWorking = true
@@ -245,6 +308,7 @@ final class BackupManager: ObservableObject {
                     alert = AlertInfo(title: "备份未包含视频",
                                       message: "未在 Documents/Assets 中找到任何视频文件，本次备份只含台账，请确认视频仍在列表中没有显示「文件已丢失」。")
                 } else {
+                    exportDirectory = result.url.deletingLastPathComponent()
                     exportURL = result.url
                 }
             } catch {

@@ -145,7 +145,7 @@ struct ContentView: View {
                 set: { if !$0 { backup.exportURL = nil } }
             )) {
                 if let url = backup.exportURL {
-                    DocumentExporter(url: url) { backup.exportURL = nil }
+                    DocumentExporter(url: url) { backup.finishExport() }
                 }
             }
             .alert(backup.alert?.title ?? "", isPresented: Binding(
