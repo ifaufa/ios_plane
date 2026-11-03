@@ -159,7 +159,9 @@ struct PlayerView: View {
         initialBrightness = ScreenBrightness.current
         OrientationLock.apply(.landscape)
 
-        player.replaceCurrentItem(with: AVPlayerItem(url: url))
+        let item = AVPlayerItem(url: url)
+        item.audioTimePitchAlgorithm = .timeDomain   // 倍速播放时保持音调不变
+        player.replaceCurrentItem(with: item)
         if startPosition > 3 {
             player.seek(to: CMTime(seconds: startPosition, preferredTimescale: 600),
                         toleranceBefore: .zero,

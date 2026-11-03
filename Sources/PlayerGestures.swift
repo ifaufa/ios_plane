@@ -6,7 +6,18 @@ import SwiftUI
 // MARK: - HUD 状态
 
 struct PlayerHUD: Equatable {
-    enum Kind: Equatable { case volume, brightness, seek }
+    enum Kind: Equatable {
+        case volume
+        case brightness
+        case seek
+        case stepForward
+        case stepBackward
+        case fastForward
+        case rewind
+
+        /// 是否需要横向进度条（音量/亮度）
+        var usesBar: Bool { self == .volume || self == .brightness }
+    }
     var kind: Kind
     var progress: Double   // 0...1，音量/亮度/进度占比
     var text: String       // 主文案
@@ -136,6 +147,11 @@ final class PlayerHostViewController: UIViewController, UIGestureRecognizerDeleg
     private var pan: UIPanGestureRecognizer!
     private var doubleTap: UITapGestureRecognizer!
     private var singleTap: UITapGestureRecognizer!
+    private var longPress: UILongPressGestureRecognizer!
+
+    private var wasPlayingBeforeSpeed = false
+    private var rewindTimer: Timer?
+    private var rewindTarget: Double = 0
 
     private enum PanMode { case undecided, seek, volume, brightness }
     private var mode: PanMode = .undecided
@@ -184,6 +200,17 @@ final class PlayerHostViewController: UIViewController, UIGestureRecognizerDeleg
         singleTap.numberOfTapsRequired = 1
         singleTap.require(toFail: doubleTap)
         view.addGestureRecognizer(singleTap)
+
+        longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleLongPress(_:)))
+        longPress.minimumPressDuration = 0.35
+        longPress.allowableMovement = 12
+        longPress.delegate = self
+        view.addGestureRecognizer(longPress)
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        endSpeedChange()
     }
 
     @objc private func handleSingleTap(_ gesture: UITapGestureRecognizer) {
@@ -197,12 +224,120 @@ final class PlayerHostViewController: UIViewController, UIGestureRecognizerDeleg
     }
 
     @objc private func handleDoubleTap(_ gesture: UITapGestureRecognizer) {
-        if player.rate > 0 {
-            player.pause()
+        let width = max(1, view.bounds.width)
+        let x = gesture.location(in: view).x
+
+        if x < width / 3 {
+            stepSeek(by: -10, kind: .stepBackward, label: "—10 秒")
+        } else if x > width * 2 / 3 {
+            stepSeek(by: 10, kind: .stepForward, label: "＋10 秒")
         } else {
-            player.play()
+            if player.rate > 0 {
+                player.pause()
+            } else {
+                player.play()
+            }
+            model.isPlaying = player.rate > 0
+            model.pokeChrome()
         }
+    }
+
+    private func stepSeek(by delta: Double, kind: PlayerHUD.Kind, label: String) {
+        let current = player.currentTime().seconds
+        guard current.isFinite else { return }
+        let target = max(0, min(durationSeconds(), current + delta))
+        player.seek(to: CMTime(seconds: target, preferredTimescale: 600),
+                    toleranceBefore: .zero,
+                    toleranceAfter: .zero)
+        model.show(PlayerHUD(kind: kind,
+                             progress: durationSeconds() > 0 ? target / durationSeconds() : 0,
+                             text: label,
+                             detail: Self.format(target)))
+        model.scheduleHide()
+    }
+
+    // MARK: 长按倍速
+
+    @objc private func handleLongPress(_ gesture: UILongPressGestureRecognizer) {
+        switch gesture.state {
+        case .began:
+            let x = gesture.location(in: view).x
+            if x > view.bounds.midX {
+                beginFastForward()
+            } else {
+                beginRewind()
+            }
+        case .ended, .cancelled, .failed:
+            endSpeedChange()
+        default:
+            break
+        }
+    }
+
+    private func beginFastForward() {
+        wasPlayingBeforeSpeed = player.rate > 0
+        player.rate = 2.5
+        model.show(PlayerHUD(kind: .fastForward,
+                             progress: progressFraction(),
+                             text: "2.5×",
+                             detail: "快进播放中"))
+    }
+
+    private func beginRewind() {
+        wasPlayingBeforeSpeed = player.rate > 0
+        player.pause()
+        rewindTarget = max(0, player.currentTime().seconds.isFinite ? player.currentTime().seconds : 0)
+        // 每 0.1 秒回退 0.25 秒 = 2.5 倍速后退
+        rewindTimer?.invalidate()
+        rewindTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.stepRewind() }
+        }
+        model.show(PlayerHUD(kind: .rewind,
+                             progress: progressFraction(),
+                             text: "2.5×",
+                             detail: "后退中"))
+    }
+
+    private func stepRewind() {
+        rewindTarget = max(0, rewindTarget - 0.25)
+        player.seek(to: CMTime(seconds: rewindTarget, preferredTimescale: 600),
+                    toleranceBefore: .positiveInfinity,
+                    toleranceAfter: .positiveInfinity)
+        model.show(PlayerHUD(kind: .rewind,
+                             progress: progressFraction(),
+                             text: "2.5×",
+                             detail: "后退中 \(Self.format(rewindTarget))"))
+        if rewindTarget <= 0 {
+            endSpeedChange()
+        }
+    }
+
+    private func endSpeedChange() {
+        if let rewindTimer {
+            rewindTimer.invalidate()
+            self.rewindTimer = nil
+        }
+        if wasPlayingBeforeSpeed {
+            player.play()
+        } else {
+            player.pause()
+        }
+        wasPlayingBeforeSpeed = false
         model.isPlaying = player.rate > 0
+        model.scheduleHide()
+    }
+
+    private func durationSeconds() -> Double {
+        let total = player.currentItem?.duration.seconds ?? 0
+        return total.isFinite && total > 0 ? total : 0
+    }
+
+    private func progressFraction() -> Double {
+        let total = durationSeconds()
+        guard total > 0 else { return 0 }
+        let current = player.currentTime().seconds
+        guard current.isFinite else { return 0 }
+        return max(0, min(1, current / total))
     }
 
     @objc private func handlePan(_ gesture: UIPanGestureRecognizer) {
@@ -328,6 +463,10 @@ struct PlayerHUDView: View {
         case .volume: return hud.progress <= 0.001 ? "speaker.slash.fill" : "speaker.wave.2.fill"
         case .brightness: return "sun.max.fill"
         case .seek: return "arrow.left.and.right"
+        case .stepForward: return "goforward.10"
+        case .stepBackward: return "gobackward.10"
+        case .fastForward: return "forward.fill"
+        case .rewind: return "backward.fill"
         }
     }
 
@@ -341,7 +480,7 @@ struct PlayerHUDView: View {
             }
             .foregroundStyle(.white)
 
-            if hud.kind == .seek {
+            if !hud.kind.usesBar {
                 Text(hud.text)
                     .font(.system(size: 15, weight: .semibold, design: .monospaced))
                     .foregroundStyle(.white)
