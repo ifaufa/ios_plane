@@ -99,6 +99,7 @@ final class BrowserModel: NSObject, ObservableObject {
 
         controller.add(self, name: "sniff")
         webView.navigationDelegate = self
+        webView.uiDelegate = self
         webView.allowsBackForwardNavigationGestures = true
         webView.customUserAgent = RequestSettings.userAgent.isEmpty ? nil : RequestSettings.userAgent
 
@@ -329,9 +330,28 @@ final class BrowserModel: NSObject, ObservableObject {
             return originalFetch.apply(this, arguments);
           };
         }
+        // window.open 一律在当前页打开
+        window.open = function(u){
+          try { if (u && typeof u === 'string') { window.location.href = u; } } catch (e) {}
+          return window;
+        };
       } catch (e) {}
     })();
     """
+}
+
+extension BrowserModel: WKUIDelegate {
+    /// target="_blank" 等新建窗口请求：一律在当前页打开
+    func webView(_ webView: WKWebView,
+                 createWebViewWith configuration: WKWebViewConfiguration,
+                 for navigationAction: WKNavigationAction,
+                 windowFeatures: WKWindowFeatures) -> WKWebView? {
+        if navigationAction.targetFrame == nil, let url = navigationAction.request.url {
+            webView.load(navigationAction.request)
+            DispatchQueue.main.async { self.currentURL = url.absoluteString }
+        }
+        return nil
+    }
 }
 
 extension BrowserModel: WKNavigationDelegate {

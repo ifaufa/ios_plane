@@ -14,6 +14,8 @@ struct BackupManifest: Codable {
     var createdAt: Date
     var library: [VideoItem]
     var entries: [Entry]
+    /// 收藏夹（旧备份没有该字段）
+    var bookmarks: [Bookmark]?
 }
 
 // MARK: - 归档读写
@@ -32,10 +34,11 @@ enum BackupService {
         var total: Int
         var skipped: [String]
         var library: [VideoItem]
+        var bookmarks: [Bookmark]
     }
 
-    /// 打包 Documents/Assets 下的全部文件 + 台账，返回临时归档文件与打包文件数
-    static func makeArchive(items: [VideoItem]) throws -> (url: URL, files: Int) {
+    /// 打包 Documents/Assets 下的全部文件 + 台账 + 收藏夹
+    static func makeArchive(items: [VideoItem], bookmarks: [Bookmark]) throws -> (url: URL, files: Int) {
         let fm = FileManager.default
         let tmpDir = fm.temporaryDirectory.appendingPathComponent("PlaneBackup-\(UUID().uuidString)", isDirectory: true)
         try fm.createDirectory(at: tmpDir, withIntermediateDirectories: true)
@@ -60,7 +63,7 @@ enum BackupService {
         }
         try payloadHandle.close()
 
-        let manifest = BackupManifest(version: 1, createdAt: Date(), library: items, entries: entries)
+        let manifest = BackupManifest(version: 1, createdAt: Date(), library: items, entries: entries, bookmarks: bookmarks)
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         let manifestData = try encoder.encode(manifest)
@@ -145,7 +148,8 @@ enum BackupService {
         return RestoreResult(restored: restored,
                              total: manifest.entries.count,
                              skipped: skipped,
-                             library: manifest.library)
+                             library: manifest.library,
+                             bookmarks: manifest.bookmarks ?? [])
     }
 
     /// 兼容历史备份中的绝对路径（/private/var/... 或 /var/... 前缀差异）
@@ -229,13 +233,13 @@ final class BackupManager: ObservableObject {
     @Published var alert: AlertInfo?
     @Published var exportURL: URL?
 
-    func backup(items: [VideoItem]) {
+    func backup(items: [VideoItem], bookmarks: [Bookmark]) {
         isWorking = true
         progressText = "正在打包备份…"
         Task {
             do {
                 let result = try await Task.detached(priority: .userInitiated) {
-                    try BackupService.makeArchive(items: items)
+                    try BackupService.makeArchive(items: items, bookmarks: bookmarks)
                 }.value
                 if result.files == 0, !items.isEmpty {
                     alert = AlertInfo(title: "备份未包含视频",
@@ -261,8 +265,9 @@ final class BackupManager: ObservableObject {
                     try BackupService.restore(from: pickedURL)
                 }.value
                 library.merge(result.library)
+                let addedBookmarks = BookmarkStore.shared.merge(result.bookmarks)
 
-                var message = "共 \(result.total) 个文件条目，成功恢复 \(result.restored) 个，合并 \(result.library.count) 条记录。"
+                var message = "共 \(result.total) 个文件条目，成功恢复 \(result.restored) 个，合并 \(result.library.count) 条记录、\(addedBookmarks) 条收藏。"
                 if !result.skipped.isEmpty {
                     let preview = result.skipped.prefix(3).joined(separator: "；")
                     message += "\n\n跳过 \(result.skipped.count) 个：\(preview)"

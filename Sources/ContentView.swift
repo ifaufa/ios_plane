@@ -114,7 +114,7 @@ struct ContentView: View {
                             Label("请求头设置…", systemImage: "slider.horizontal.3")
                         }
                         Divider()
-                        Button { backup.backup(items: library.items) } label: {
+                        Button { backup.backup(items: library.items, bookmarks: BookmarkStore.shared.items) } label: {
                             Label("备份到文件…", systemImage: "square.and.arrow.up")
                         }
                         Button { showImporter = true } label: {

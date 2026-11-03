@@ -49,6 +49,18 @@ final class BookmarkStore: ObservableObject {
         save()
     }
 
+    /// 备份恢复时合并（按 url 去重）
+    @discardableResult
+    func merge(_ incoming: [Bookmark]) -> Int {
+        let existing = Set(items.map { $0.url })
+        let added = incoming.filter { !existing.contains($0.url) }
+        guard !added.isEmpty else { return 0 }
+        items.append(contentsOf: added)
+        items.sort { $0.createdAt > $1.createdAt }
+        save()
+        return added.count
+    }
+
     static func fallbackTitle(_ url: String) -> String {
         guard let parsed = URL(string: url) else { return url }
         let name = parsed.deletingPathExtension().lastPathComponent
