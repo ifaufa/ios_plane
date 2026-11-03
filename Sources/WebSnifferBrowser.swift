@@ -332,7 +332,11 @@ final class BrowserModel: NSObject, ObservableObject {
         }
         // window.open 一律在当前页打开
         window.open = function(u){
-          try { if (u && typeof u === 'string') { window.location.href = u; } } catch (e) {}
+          try {
+            if (u && typeof u === 'string' && u.indexOf('about:') !== 0 && u.indexOf('javascript:') !== 0) {
+              window.location.href = u;
+            }
+          } catch (e) {}
           return window;
         };
       } catch (e) {}
@@ -347,8 +351,12 @@ extension BrowserModel: WKUIDelegate {
                  for navigationAction: WKNavigationAction,
                  windowFeatures: WKWindowFeatures) -> WKWebView? {
         if navigationAction.targetFrame == nil, let url = navigationAction.request.url {
-            webView.load(navigationAction.request)
-            DispatchQueue.main.async { self.currentURL = url.absoluteString }
+            let scheme = url.scheme?.lowercased() ?? ""
+            // about:blank / javascript: 这类弹窗没有实际地址，加载会把当前页变空白，直接忽略
+            if scheme != "about" && scheme != "javascript" && scheme != "data" {
+                webView.load(navigationAction.request)
+                DispatchQueue.main.async { self.currentURL = url.absoluteString }
+            }
         }
         return nil
     }
