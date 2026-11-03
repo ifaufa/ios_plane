@@ -149,9 +149,15 @@ final class PlayerHostViewController: UIViewController, UIGestureRecognizerDeleg
     private var singleTap: UITapGestureRecognizer!
     private var longPress: UILongPressGestureRecognizer!
 
+    private enum SpeedMode { case none, rate, stepping }
+    private var speedMode: SpeedMode = .none
     private var wasPlayingBeforeSpeed = false
-    private var rewindTimer: Timer?
-    private var rewindTarget: Double = 0
+    private var fastForwardMonitor: Timer?
+    private var lastCheckAt: CFTimeInterval = 0
+    private var lastCheckPosition: Double = 0
+    private var previewTimer: Timer?
+    private var previewTarget: Double = 0
+    private var previewStep: Double = 0
 
     private enum PanMode { case undecided, seek, volume, brightness }
     private var mode: PanMode = .undecided
@@ -274,49 +280,109 @@ final class PlayerHostViewController: UIViewController, UIGestureRecognizerDeleg
         }
     }
 
+    /// 快进：先尝试真实 2.0× 播放，检测到没有真正推进则自动切换为步进预览
     private func beginFastForward() {
         wasPlayingBeforeSpeed = player.rate > 0
-        player.rate = 2.5
+        speedMode = .rate
+        player.playImmediately(atRate: 2.0)
+
+        lastCheckAt = CACurrentMediaTime()
+        lastCheckPosition = player.currentTime().seconds
+        fastForwardMonitor?.invalidate()
+        fastForwardMonitor = Timer.scheduledTimer(withTimeInterval: 0.35, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.checkFastForward() }
+        }
         model.show(PlayerHUD(kind: .fastForward,
                              progress: progressFraction(),
-                             text: "2.5×",
+                             text: "2.0×",
                              detail: "快进播放中"))
+    }
+
+    private func checkFastForward() {
+        guard speedMode == .rate else { return }
+        let now = CACurrentMediaTime()
+        let position = player.currentTime().seconds
+        guard position.isFinite else { return }
+        let elapsed = now - lastCheckAt
+        let moved = position - lastCheckPosition
+        let ratio = elapsed > 0 ? moved / elapsed : 0
+
+        // 期望接近 2.0；低于 1.3 说明没有真正加速（HLS 不支持高倍速会反复等待）
+        if ratio < 1.3 || player.timeControlStatus == .waitingToPlayAtSpecifiedRate {
+            switchToSteppingPreview()
+            return
+        }
+        lastCheckAt = now
+        lastCheckPosition = position
+        model.show(PlayerHUD(kind: .fastForward,
+                             progress: progressFraction(),
+                             text: "2.0×",
+                             detail: "快进播放中"))
+    }
+
+    private func switchToSteppingPreview() {
+        fastForwardMonitor?.invalidate()
+        fastForwardMonitor = nil
+        speedMode = .stepping
+        player.pause()
+        previewTarget = max(0, player.currentTime().seconds)
+        previewStep = 0.25
+        startPreviewTimer()
+        model.show(PlayerHUD(kind: .fastForward,
+                             progress: progressFraction(),
+                             text: "预览",
+                             detail: "快进预览（该源不支持高倍速播放）"))
     }
 
     private func beginRewind() {
         wasPlayingBeforeSpeed = player.rate > 0
+        speedMode = .stepping
         player.pause()
-        rewindTarget = max(0, player.currentTime().seconds.isFinite ? player.currentTime().seconds : 0)
-        // 每 0.1 秒回退 0.25 秒 = 2.5 倍速后退
-        rewindTimer?.invalidate()
-        rewindTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.stepRewind() }
-        }
+        previewTarget = max(0, player.currentTime().seconds)
+        previewStep = -0.25
+        startPreviewTimer()
         model.show(PlayerHUD(kind: .rewind,
                              progress: progressFraction(),
                              text: "2.5×",
                              detail: "后退中"))
     }
 
-    private func stepRewind() {
-        rewindTarget = max(0, rewindTarget - 0.25)
-        player.seek(to: CMTime(seconds: rewindTarget, preferredTimescale: 600),
+    private func startPreviewTimer() {
+        previewTimer?.invalidate()
+        // 每 0.1 秒移动 0.25 秒音视频 = 2.5 倍速
+        previewTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.stepPreview() }
+        }
+    }
+
+    private func stepPreview() {
+        let total = durationSeconds()
+        previewTarget = max(0, min(total > 0 ? total : previewTarget, previewTarget + previewStep))
+        player.seek(to: CMTime(seconds: previewTarget, preferredTimescale: 600),
                     toleranceBefore: .positiveInfinity,
                     toleranceAfter: .positiveInfinity)
-        model.show(PlayerHUD(kind: .rewind,
+
+        let kind: PlayerHUD.Kind = previewStep > 0 ? .fastForward : .rewind
+        let verb = previewStep > 0 ? "快进预览中" : "后退中"
+        model.show(PlayerHUD(kind: kind,
                              progress: progressFraction(),
                              text: "2.5×",
-                             detail: "后退中 \(Self.format(rewindTarget))"))
-        if rewindTarget <= 0 {
+                             detail: "\(verb) \(Self.format(previewTarget))"))
+
+        if previewStep < 0 && previewTarget <= 0 {
+            endSpeedChange()
+        } else if previewStep > 0 && total > 0 && previewTarget >= total - 0.05 {
             endSpeedChange()
         }
     }
 
     private func endSpeedChange() {
-        if let rewindTimer {
-            rewindTimer.invalidate()
-            self.rewindTimer = nil
-        }
+        fastForwardMonitor?.invalidate()
+        fastForwardMonitor = nil
+        previewTimer?.invalidate()
+        previewTimer = nil
+        speedMode = .none
+
         if wasPlayingBeforeSpeed {
             player.play()
         } else {
