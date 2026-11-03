@@ -81,6 +81,7 @@ final class BrowserModel: NSObject, ObservableObject {
     @Published var isLoading = false
     @Published var progress: Double = 0
     @Published var currentURL: String = ""
+    @Published var pageTitle: String = ""
 
     let webView: WKWebView
     private var pollTimer: Timer?
@@ -109,6 +110,9 @@ final class BrowserModel: NSObject, ObservableObject {
         })
         observations.append(webView.observe(\.url, options: [.new]) { [weak self] view, _ in
             DispatchQueue.main.async { self?.currentURL = view.url?.absoluteString ?? "" }
+        })
+        observations.append(webView.observe(\.title, options: [.new]) { [weak self] view, _ in
+            DispatchQueue.main.async { self?.pageTitle = view.title ?? "" }
         })
 
         pollTimer = Timer.scheduledTimer(withTimeInterval: 1.2, repeats: true) { [weak self] _ in
@@ -361,10 +365,12 @@ struct WebSnifferBrowser: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var downloads: DownloadManager
     @StateObject private var model = BrowserModel()
+    @StateObject private var bookmarks = BookmarkStore.shared
 
     @State private var address = ""
     @State private var showCandidates = false
     @State private var showHeaders = false
+    @State private var showBookmarks = false
     @State private var extractHint: String?
 
     var body: some View {
@@ -387,9 +393,24 @@ struct WebSnifferBrowser: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("关闭") { dismiss() }
                 }
-                ToolbarItem(placement: .primaryAction) {
+                ToolbarItemGroup(placement: .primaryAction) {
+                    Button { toggleBookmark() } label: {
+                        Image(systemName: isBookmarked ? "star.fill" : "star")
+                            .foregroundStyle(isBookmarked ? Color.yellow : Color.accentColor)
+                    }
+                    Button { showBookmarks = true } label: {
+                        Image(systemName: "book")
+                    }
                     Button { showHeaders = true } label: {
                         Image(systemName: "slider.horizontal.3")
+                    }
+                }
+            }
+            .sheet(isPresented: $showBookmarks) {
+                BookmarksSheet(store: bookmarks) { url in
+                    address = url
+                    if let parsed = URL(string: url) {
+                        model.load(parsed)
                     }
                 }
             }
@@ -474,6 +495,26 @@ struct WebSnifferBrowser: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
         .background(Color(.secondarySystemBackground))
+    }
+
+    private var currentLink: String {
+        let live = model.currentURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        return live.isEmpty ? address.trimmingCharacters(in: .whitespacesAndNewlines) : live
+    }
+
+    private var isBookmarked: Bool {
+        let link = currentLink
+        return !link.isEmpty && bookmarks.contains(link)
+    }
+
+    private func toggleBookmark() {
+        let link = currentLink
+        guard let parsed = URL(string: link), parsed.scheme != nil else {
+            extractHint = "当前没有可收藏的地址"
+            return
+        }
+        let title = model.pageTitle.isEmpty ? BookmarkStore.fallbackTitle(link) : model.pageTitle
+        bookmarks.toggle(url: link, title: title)
     }
 
     private func submit() {
