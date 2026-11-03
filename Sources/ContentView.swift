@@ -6,6 +6,8 @@ struct ContentView: View {
     @EnvironmentObject private var downloads: DownloadManager
     @StateObject private var backup = BackupManager()
     @State private var showAdd = false
+    @State private var showBrowser = false
+    @State private var showHeaders = false
     @State private var showImporter = false
     @State private var playing: VideoItem?
     @State private var selectionMode = false
@@ -102,8 +104,14 @@ struct ContentView: View {
                 }
                 ToolbarItem(placement: .primaryAction) {
                     Menu {
+                        Button { showBrowser = true } label: {
+                            Label("浏览器找视频", systemImage: "safari")
+                        }
                         Button { showAdd = true } label: {
-                            Label("新建下载", systemImage: "plus")
+                            Label("手动填写地址", systemImage: "square.and.pencil")
+                        }
+                        Button { showHeaders = true } label: {
+                            Label("请求头设置…", systemImage: "slider.horizontal.3")
                         }
                         Divider()
                         Button { backup.backup(items: library.items) } label: {
@@ -157,6 +165,12 @@ struct ContentView: View {
             }
             .sheet(isPresented: $showAdd) {
                 AddDownloadView()
+            }
+            .sheet(isPresented: $showBrowser) {
+                WebSnifferBrowser()
+            }
+            .sheet(isPresented: $showHeaders) {
+                HeadersSettingsView()
             }
             .fullScreenCover(item: $playing) { item in
                 PlayerView(

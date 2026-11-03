@@ -123,7 +123,7 @@ final class DownloadManager: NSObject, ObservableObject {
 
     private func begin(url: URL, title: String) {
         let id = url.absoluteString
-        let asset = AVURLAsset(url: url)
+        let asset = Self.makeAsset(url: url)
         guard let task = session.makeAssetDownloadTask(asset: asset,
                                                        assetTitle: title,
                                                        assetArtworkData: nil,
@@ -139,6 +139,13 @@ final class DownloadManager: NSObject, ObservableObject {
             tasks.append(DownloadTaskInfo(id: id, url: url, title: title, progress: 0, status: .downloading))
         }
         task.resume()
+    }
+
+    /// 支持 Referer/UA 等防盗链请求头（AVAssetDownloadURLSession 需要以此方式注入）
+    private static func makeAsset(url: URL) -> AVURLAsset {
+        let headers = RequestSettings.headers
+        guard !headers.isEmpty else { return AVURLAsset(url: url) }
+        return AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
     }
 
     private func startNextIfNeeded() {
