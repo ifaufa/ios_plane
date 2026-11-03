@@ -64,8 +64,10 @@ struct AddDownloadView: View {
 
     private var resultSection: some View {
         Section("检测结果（\(selectedCount)/\(rows.count) 已选）") {
-            ForEach(rows, id: \.id) { row in
-                CandidateRow(candidate: row) { toggle(row.id) }
+            ForEach(rows.indices, id: \.self) { index in
+                CandidateRow(candidate: $rows[index]) {
+                    toggle(rows[index].id)
+                }
             }
             Button("全选可用", action: selectAll)
                 .font(.footnote)
@@ -111,19 +113,19 @@ struct AddDownloadView: View {
     }
 
     private func recognize() {
-        let links = BrowserModel.extractLinks(from: text)
-        guard !links.isEmpty else {
+        let entries = LinkParser.parse(text)
+        guard !entries.isEmpty else {
             hint = "没有识别到 http(s) 链接"
             return
         }
         var seen = Set<String>()
         var candidates: [Candidate] = []
-        for link in links {
-            guard let url = URL(string: link) else { continue }
+        for entry in entries {
+            guard let url = URL(string: entry.url) else { continue }
             let id = url.absoluteString
             guard !seen.contains(id) else { continue }
             seen.insert(id)
-            candidates.append(Candidate(id: id, url: url, sources: [.manual]))
+            candidates.append(Candidate(id: id, url: url, title: entry.title, sources: [.manual]))
         }
         rows = candidates
         check()

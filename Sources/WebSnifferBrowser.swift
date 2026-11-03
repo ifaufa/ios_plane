@@ -21,14 +21,17 @@ struct Candidate: Identifiable, Equatable {
 
     let id: String
     var url: URL
+    var title: String
     var sources: Set<Source>
     var state: State = .checking
     var info: M3U8Info?
     var selected = false
 
-    var title: String {
-        let name = url.deletingPathExtension().lastPathComponent
-        return name.isEmpty ? (url.host ?? "视频") : name
+    init(id: String, url: URL, title: String? = nil, sources: Set<Source>) {
+        self.id = id
+        self.url = url
+        self.title = title ?? LinkParser.defaultTitle(for: url)
+        self.sources = sources
     }
 
     var subtitle: String {
@@ -137,13 +140,13 @@ final class BrowserModel: NSObject, ObservableObject {
     // MARK: 候选管理
 
     func addManual(_ url: URL) {
-        addCandidates([url.absoluteString], source: .manual, inspect: true)
+        addCandidates([LinkParser.Entry(title: nil, url: url.absoluteString)], source: .manual, inspect: true)
     }
 
-    func addCandidates(_ urls: [String], source: Candidate.Source, inspect: Bool) {
+    func addCandidates(_ entries: [LinkParser.Entry], source: Candidate.Source, inspect: Bool) {
         var changed = false
-        for raw in urls {
-            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        for entry in entries {
+            let trimmed = entry.url.trimmingCharacters(in: .whitespacesAndNewlines)
             guard let url = URL(string: trimmed), ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { continue }
             let id = url.absoluteString
             if let index = candidates.firstIndex(where: { $0.id == id }) {
@@ -153,7 +156,7 @@ final class BrowserModel: NSObject, ObservableObject {
                 }
                 continue
             }
-            candidates.append(Candidate(id: id, url: url, sources: [source]))
+            candidates.append(Candidate(id: id, url: url, title: entry.title, sources: [source]))
             changed = true
             if inspect { startInspect(id) }
         }
@@ -222,12 +225,13 @@ final class BrowserModel: NSObject, ObservableObject {
 
             let pageURLs = (object["urls"] as? [String] ?? []).filter { $0.lowercased().contains(".m3u8") }
             let selection = object["selection"] as? String ?? ""
-            let selectionURLs = Self.extractLinks(from: selection).filter { $0.lowercased().contains(".m3u8") }
+            let pageEntries = pageURLs.map { LinkParser.Entry(title: nil, url: $0) }
+            let selectionEntries = LinkParser.parse(selection).filter { $0.url.lowercased().contains(".m3u8") }
 
             DispatchQueue.main.async {
-                self.addCandidates(pageURLs, source: .page, inspect: true)
-                self.addCandidates(selectionURLs, source: .selection, inspect: true)
-                completion?(pageURLs.count + selectionURLs.count)
+                self.addCandidates(pageEntries, source: .page, inspect: true)
+                self.addCandidates(selectionEntries, source: .selection, inspect: true)
+                completion?(pageEntries.count + selectionEntries.count)
             }
         }
     }
@@ -297,7 +301,7 @@ final class BrowserModel: NSObject, ObservableObject {
                   let urls = try? JSONDecoder().decode([String].self, from: data),
                   !urls.isEmpty else { return }
             DispatchQueue.main.async {
-                self.addCandidates(urls, source: .network, inspect: true)
+                self.addCandidates(urls.map { LinkParser.Entry(title: nil, url: $0) }, source: .network, inspect: true)
             }
         }
     }
@@ -336,7 +340,9 @@ extension BrowserModel: WKNavigationDelegate {
 extension BrowserModel: WKScriptMessageHandler {
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         guard message.name == "sniff", let url = message.body as? String else { return }
-        DispatchQueue.main.async { self.addCandidates([url], source: .network, inspect: true) }
+        DispatchQueue.main.async {
+            self.addCandidates([LinkParser.Entry(title: nil, url: url)], source: .network, inspect: true)
+        }
     }
 }
 
@@ -490,29 +496,36 @@ struct WebSnifferBrowser: View {
 // MARK: - 候选行
 
 struct CandidateRow: View {
-    let candidate: Candidate
+    @Binding var candidate: Candidate
     let onToggle: () -> Void
 
     var body: some View {
-        Button(action: onToggle) {
-            HStack(alignment: .top, spacing: 10) {
+        HStack(alignment: .top, spacing: 10) {
+            Button(action: onToggle) {
                 Image(systemName: candidate.selected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 20))
                     .foregroundStyle(candidate.isSelectable ? Color.accentColor : Color.secondary)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(candidate.title)
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(Color.primary)
-                    Text(candidate.subtitle)
-                        .font(.caption)
-                        .foregroundStyle(candidate.isSelectable ? Color.secondary : Color.red)
-                    Text(candidate.url.absoluteString)
-                        .font(.caption2)
-                        .foregroundStyle(Color.secondary)
-                        .lineLimit(1)
-                }
+            }
+            .buttonStyle(.borderless)
+            .disabled(!candidate.isSelectable)
+
+            VStack(alignment: .leading, spacing: 3) {
+                TextField("标题", text: $candidate.title)
+                    .font(.subheadline.weight(.medium))
+                    .textFieldStyle(.plain)
+                    .submitLabel(.done)
+                    .disabled(!candidate.isSelectable)
+
+                Text(candidate.subtitle)
+                    .font(.caption)
+                    .foregroundStyle(candidate.isSelectable ? Color.secondary : Color.red)
+
+                Text(candidate.url.absoluteString)
+                    .font(.caption2)
+                    .foregroundStyle(Color.secondary)
+                    .lineLimit(1)
             }
         }
-        .disabled(!candidate.isSelectable)
     }
 }
 
@@ -529,9 +542,9 @@ private struct CandidateSheet: View {
                     Text("暂未发现视频，试试播放页面里的视频后再看。")
                         .foregroundStyle(.secondary)
                 }
-                ForEach(model.candidates, id: \.id) { candidate in
-                    CandidateRow(candidate: candidate) {
-                        model.toggle(candidate.id)
+                ForEach(model.candidates.indices, id: \.self) { index in
+                    CandidateRow(candidate: $model.candidates[index]) {
+                        model.toggle(model.candidates[index].id)
                     }
                 }
             }

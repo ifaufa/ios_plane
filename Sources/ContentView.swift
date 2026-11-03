@@ -166,7 +166,7 @@ struct ContentView: View {
             .sheet(isPresented: $showAdd) {
                 AddDownloadView()
             }
-            .sheet(isPresented: $showBrowser) {
+            .fullScreenCover(isPresented: $showBrowser) {
                 WebSnifferBrowser()
             }
             .sheet(isPresented: $showHeaders) {
