@@ -13,52 +13,9 @@ struct AddDownloadView: View {
     var body: some View {
         NavigationStack {
             List {
-                Section("粘贴内容（可多行，自动识别链接）") {
-                    TextEditor(text: $text)
-                        .frame(minHeight: 96)
-                        .font(.system(.footnote, design: .monospaced))
-                    HStack {
-                        Button {
-                            text = UIPasteboard.general.string ?? text
-                            recognize()
-                        } label: {
-                            Label("粘贴并识别", systemImage: "doc.on.clipboard")
-                        }
-                        Spacer()
-                        Button("识别链接") { recognize() }
-                            .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    }
-                    .font(.footnote)
-                }
-
+                editorSection
                 if !rows.isEmpty {
-                    Section("检测结果（\(rows.filter { $0.selected }.count)/\(rows.count) 已选）") {
-                        ForEach(rows) { row in
-                            Button {
-                                toggle(row.id)
-                            } label: {
-                                HStack(alignment: .top, spacing: 10) {
-                                    Image(systemName: row.selected ? "checkmark.circle.fill" : "circle")
-                                        .foregroundStyle(row.isSelectable ? Color.accentColor : .secondary)
-                                    VStack(alignment: .leading, spacing: 3) {
-                                        Text(row.title)
-                                            .font(.subheadline.weight(.medium))
-                                            .foregroundStyle(.primary)
-                                        Text(row.subtitle)
-                                            .font(.caption)
-                                            .foregroundStyle(row.isSelectable ? .secondary : .red)
-                                        Text(row.url.absoluteString)
-                                            .font(.caption2)
-                                            .foregroundStyle(.tertiary)
-                                            .lineLimit(1)
-                                    }
-                                }
-                            }
-                            .disabled(!row.isSelectable)
-                        }
-                        Button("全选可用") { selectAll() }
-                            .font(.footnote)
-                    }
+                    resultSection
                 }
             }
             .navigationTitle("手动填写")
@@ -72,32 +29,67 @@ struct AddDownloadView: View {
                         .disabled(selectedCount == 0)
                 }
             }
-            .overlay {
-                if isChecking {
-                    ProgressView("检查中…")
-                        .padding(20)
-                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
-                }
-            }
-            .alert("提示", isPresented: Binding(
-                get: { hint != nil },
-                set: { if !$0 { hint = nil } }
-            )) {
+            .overlay { checkingOverlay }
+            .alert("提示", isPresented: hintBinding) {
                 Button("好", role: .cancel) {}
             } message: {
                 Text(hint ?? "")
             }
-            .onAppear {
-                if text.isEmpty, let clipboard = UIPasteboard.general.string,
-                   clipboard.lowercased().contains(".m3u8") {
-                    text = clipboard
-                    recognize()
-                }
-            }
+            .onAppear(perform: fillFromClipboard)
         }
     }
 
-    private var selectedCount: Int { rows.filter { $0.selected && $0.isSelectable }.count }
+    // MARK: - 子视图
+
+    private var editorSection: some View {
+        Section("粘贴内容（可多行，自动识别链接）") {
+            TextEditor(text: $text)
+                .frame(minHeight: 96)
+                .font(.system(.footnote, design: .monospaced))
+
+            HStack {
+                Button {
+                    text = UIPasteboard.general.string ?? text
+                    recognize()
+                } label: {
+                    Label("粘贴并识别", systemImage: "doc.on.clipboard")
+                }
+                Spacer()
+                Button("识别链接", action: recognize)
+                    .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            .font(.footnote)
+        }
+    }
+
+    private var resultSection: some View {
+        Section("检测结果（\(selectedCount)/\(rows.count) 已选）") {
+            ForEach(rows, id: \.id) { row in
+                CandidateRow(candidate: row) { toggle(row.id) }
+            }
+            Button("全选可用", action: selectAll)
+                .font(.footnote)
+        }
+    }
+
+    @ViewBuilder
+    private var checkingOverlay: some View {
+        if isChecking {
+            ProgressView("检查中…")
+                .padding(20)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+        }
+    }
+
+    private var hintBinding: Binding<Bool> {
+        Binding(get: { hint != nil }, set: { if !$0 { hint = nil } })
+    }
+
+    // MARK: - 数据
+
+    private var selectedCount: Int {
+        rows.filter { $0.selected && $0.isSelectable }.count
+    }
 
     private func toggle(_ id: String) {
         guard let index = rows.firstIndex(where: { $0.id == id }) else { return }
@@ -108,6 +100,14 @@ struct AddDownloadView: View {
         for index in rows.indices where rows[index].isSelectable {
             rows[index].selected = true
         }
+    }
+
+    private func fillFromClipboard() {
+        guard text.isEmpty,
+              let clipboard = UIPasteboard.general.string,
+              clipboard.lowercased().contains(".m3u8") else { return }
+        text = clipboard
+        recognize()
     }
 
     private func recognize() {
@@ -144,6 +144,23 @@ struct AddDownloadView: View {
         }
     }
 
+    private func submit() {
+        for row in rows where row.selected && row.isSelectable {
+            var target = row.url
+            var title = row.title
+            if let info = row.info, info.isMaster,
+               let best = info.variants.max(by: { ($0.bandwidth ?? 0) < ($1.bandwidth ?? 0) }),
+               let variantURL = URL(string: best.url) {
+                target = variantURL
+                if let resolution = best.resolution { title += " \(resolution)" }
+            }
+            downloads.start(url: target, title: title)
+        }
+        dismiss()
+    }
+
+    // MARK: - 无状态工具
+
     private nonisolated static func inspectAll(_ urls: [URL]) async -> [M3U8InspectResult] {
         var results = [M3U8InspectResult](repeating: .invalid("未检查"), count: urls.count)
         await withTaskGroup(of: (Int, M3U8InspectResult).self) { group in
@@ -177,20 +194,5 @@ struct AddDownloadView: View {
         case .unreachable(let reason):
             list[index].state = .unreachable(reason)
         }
-    }
-
-    private func submit() {
-        for row in rows where row.selected && row.isSelectable {
-            var target = row.url
-            var title = row.title
-            if let info = row.info, info.isMaster,
-               let best = info.variants.max(by: { ($0.bandwidth ?? 0) < ($1.bandwidth ?? 0) }),
-               let variantURL = URL(string: best.url) {
-                target = variantURL
-                if let resolution = best.resolution { title += " \(resolution)" }
-            }
-            downloads.start(url: target, title: title)
-        }
-        dismiss()
     }
 }

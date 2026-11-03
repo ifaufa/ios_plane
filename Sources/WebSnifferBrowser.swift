@@ -487,6 +487,35 @@ struct WebSnifferBrowser: View {
     }
 }
 
+// MARK: - 候选行
+
+struct CandidateRow: View {
+    let candidate: Candidate
+    let onToggle: () -> Void
+
+    var body: some View {
+        Button(action: onToggle) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: candidate.selected ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(candidate.isSelectable ? Color.accentColor : Color.secondary)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(candidate.title)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(Color.primary)
+                    Text(candidate.subtitle)
+                        .font(.caption)
+                        .foregroundStyle(candidate.isSelectable ? Color.secondary : Color.red)
+                    Text(candidate.url.absoluteString)
+                        .font(.caption2)
+                        .foregroundStyle(Color.secondary)
+                        .lineLimit(1)
+                }
+            }
+        }
+        .disabled(!candidate.isSelectable)
+    }
+}
+
 // MARK: - 候选面板
 
 private struct CandidateSheet: View {
@@ -500,28 +529,10 @@ private struct CandidateSheet: View {
                     Text("暂未发现视频，试试播放页面里的视频后再看。")
                         .foregroundStyle(.secondary)
                 }
-                ForEach(model.candidates) { candidate in
-                    Button {
+                ForEach(model.candidates, id: \.id) { candidate in
+                    CandidateRow(candidate: candidate) {
                         model.toggle(candidate.id)
-                    } label: {
-                        HStack(alignment: .top, spacing: 10) {
-                            Image(systemName: candidate.selected ? "checkmark.circle.fill" : "circle")
-                                .foregroundStyle(candidate.isSelectable ? Color.accentColor : .secondary)
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(candidate.title)
-                                    .font(.subheadline.weight(.medium))
-                                    .foregroundStyle(.primary)
-                                Text(candidate.subtitle)
-                                    .font(.caption)
-                                    .foregroundStyle(candidate.isSelectable ? .secondary : .red)
-                                Text(candidate.url.absoluteString)
-                                    .font(.caption2)
-                                    .foregroundStyle(.tertiary)
-                                    .lineLimit(1)
-                            }
-                        }
                     }
-                    .disabled(!candidate.isSelectable)
                 }
             }
             .navigationTitle("候选（\(model.selectedCount)/\(model.candidates.count)）")
