@@ -1,6 +1,7 @@
 import SwiftUI
 import UIKit
 import WebKit
+import AVFoundation
 
 // MARK: - 候选
 
@@ -86,6 +87,7 @@ final class BrowserModel: NSObject, ObservableObject {
     let webView: WKWebView
     private var pollTimer: Timer?
     private var observations: [NSKeyValueObservation] = []
+    private var isTornDown = false
 
     override init() {
         let config = WKWebViewConfiguration()
@@ -123,6 +125,38 @@ final class BrowserModel: NSObject, ObservableObject {
 
     deinit {
         pollTimer?.invalidate()
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "sniff")
+        webView.stopLoading()
+    }
+
+    /// 关闭浏览器时彻底停止网页播放并断开引用环，避免"关掉界面声音还在"
+    func teardown() {
+        guard !isTornDown else { return }
+        isTornDown = true
+
+        pollTimer?.invalidate()
+        pollTimer = nil
+
+        webView.stopLoading()
+        webView.pauseAllMediaPlayback(completionHandler: nil)
+        webView.evaluateJavaScript("""
+        (function(){
+          try {
+            var media = document.querySelectorAll('video,audio');
+            for (var i = 0; i < media.length; i++) {
+              try { media[i].pause(); media[i].removeAttribute('src'); media[i].load(); } catch (e) {}
+            }
+          } catch (e) {}
+        })();
+        """, completionHandler: nil)
+
+        webView.navigationDelegate = nil
+        webView.uiDelegate = nil
+        // 断开 BrowserModel ↔ WKUserContentController 的强引用环
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "sniff")
+        webView.loadHTMLString("<html><body></body></html>", baseURL: nil)
+
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
     // MARK: 导航
@@ -469,6 +503,7 @@ struct WebSnifferBrowser: View {
             } message: {
                 Text(extractHint ?? "")
             }
+            .onDisappear { model.teardown() }
         }
     }
 

@@ -51,10 +51,11 @@ struct PlayerView: View {
                     dismiss()
                 } label: {
                     Image(systemName: "xmark")
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(.system(size: 20, weight: .semibold))
                         .foregroundStyle(.white)
-                        .frame(width: 36, height: 36)
+                        .frame(width: 52, height: 52)
                         .background(.black.opacity(0.45), in: Circle())
+                        .contentShape(Circle())
                 }
 
                 Text(title)
@@ -71,14 +72,15 @@ struct PlayerView: View {
                     Image(systemName: immersive
                           ? "arrow.down.right.and.arrow.up.left"
                           : "arrow.up.left.and.arrow.down.right")
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(.system(size: 20, weight: .semibold))
                         .foregroundStyle(.white)
-                        .frame(width: 36, height: 36)
+                        .frame(width: 52, height: 52)
                         .background(.black.opacity(0.45), in: Circle())
+                        .contentShape(Circle())
                 }
             }
-            .padding(.horizontal, 20)
-            .padding(.top, immersive ? 6 : 12)
+            .padding(.horizontal, 24)
+            .padding(.top, immersive ? 8 : 16)
 
             Spacer()
 
