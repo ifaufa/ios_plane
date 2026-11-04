@@ -5,6 +5,26 @@ import AVFoundation
 
 // MARK: - 候选
 
+/// 一次合并操作的结果回执
+struct AddSummary {
+    var added = 0          // 新增条数
+    var duplicated = 0     // URL 已存在条数
+    var titleUpdated = 0   // 其中标题被更新的条数
+
+    var hasVisibleChange: Bool { added > 0 || titleUpdated > 0 }
+
+    var feedback: String {
+        if added == 0 && titleUpdated == 0 {
+            return duplicated > 0 ? "全部重复，无变化（\(duplicated) 条）" : "没有发现 m3u8 链接"
+        }
+        var parts: [String] = []
+        if added > 0 { parts.append("新增 \(added) 条") }
+        if duplicated > 0 { parts.append("重复 \(duplicated) 条") }
+        if titleUpdated > 0 { parts.append("更新标题 \(titleUpdated) 条") }
+        return parts.joined(separator: "，")
+    }
+}
+
 struct Candidate: Identifiable, Equatable {
     enum Source: String, CaseIterable {
         case network = "网络"
@@ -183,24 +203,43 @@ final class BrowserModel: NSObject, ObservableObject {
         addCandidates([LinkParser.Entry(title: nil, url: url.absoluteString)], source: .manual, inspect: true)
     }
 
-    func addCandidates(_ entries: [LinkParser.Entry], source: Candidate.Source, inspect: Bool) {
+    @discardableResult
+    func addCandidates(_ entries: [LinkParser.Entry], source: Candidate.Source, inspect: Bool) -> AddSummary {
+        var summary = AddSummary()
         var changed = false
+
         for entry in entries {
             let trimmed = entry.url.trimmingCharacters(in: .whitespacesAndNewlines)
             guard let url = URL(string: trimmed), ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { continue }
             let id = url.absoluteString
+
             if let index = candidates.firstIndex(where: { $0.id == id }) {
+                summary.duplicated += 1
+
                 if !candidates[index].sources.contains(source) {
                     candidates[index].sources.insert(source)
                     changed = true
                 }
+
+                // 新标题覆盖旧标题；页面/网络来的条目没有标题，不会覆盖用户自定义的
+                if let newTitle = entry.title?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !newTitle.isEmpty,
+                   newTitle != candidates[index].title {
+                    candidates[index].title = newTitle
+                    summary.titleUpdated += 1
+                    changed = true
+                }
                 continue
             }
+
             candidates.append(Candidate(id: id, url: url, title: entry.title, sources: [source]))
+            summary.added += 1
             changed = true
             if inspect { startInspect(id) }
         }
+
         if changed { sortCandidates() }
+        return summary
     }
 
     func toggle(_ id: String) {
@@ -241,7 +280,7 @@ final class BrowserModel: NSObject, ObservableObject {
 
     // MARK: 页面提取
 
-    func extractFromPage(completion: ((Int) -> Void)? = nil) {
+    func extractFromPage(completion: ((AddSummary, Bool, String) -> Void)? = nil) {
         let script = """
         (function(){
           try {
@@ -268,25 +307,30 @@ final class BrowserModel: NSObject, ObservableObject {
 
             let pageURLs = (object["urls"] as? [String] ?? []).filter { $0.lowercased().contains(".m3u8") }
             let selection = object["selection"] as? String ?? ""
+            let usedCache = (object["usedCache"] as? Bool) ?? false
             let pageEntries = pageURLs.map { LinkParser.Entry(title: nil, url: $0) }
             let selectionEntries = LinkParser.parse(selection).filter { $0.url.lowercased().contains(".m3u8") }
+            let preview = String(selection.prefix(30))
 
             DispatchQueue.main.async {
-                self.addCandidates(pageEntries, source: .page, inspect: true)
-                self.addCandidates(selectionEntries, source: .selection, inspect: true)
-                completion?(pageEntries.count + selectionEntries.count)
+                let pageSummary = self.addCandidates(pageEntries, source: .page, inspect: true)
+                let selectionSummary = self.addCandidates(selectionEntries, source: .selection, inspect: true)
+                var total = AddSummary()
+                total.added = pageSummary.added + selectionSummary.added
+                total.duplicated = pageSummary.duplicated + selectionSummary.duplicated
+                total.titleUpdated = pageSummary.titleUpdated + selectionSummary.titleUpdated
+                completion?(total, usedCache, preview)
             }
         }
     }
 
     /// 从系统剪贴板提取 m3u8（会触发系统"允许粘贴"提示）
-    func addFromClipboard() -> Int {
+    func addFromClipboard() -> AddSummary {
         let text = UIPasteboard.general.string ?? ""
-        guard !text.isEmpty else { return 0 }
+        guard !text.isEmpty else { return AddSummary() }
         let entries = LinkParser.parse(text).filter { $0.url.lowercased().contains(".m3u8") }
-        guard !entries.isEmpty else { return 0 }
-        addCandidates(entries, source: .clipboard, inspect: true)
-        return entries.count
+        guard !entries.isEmpty else { return AddSummary() }
+        return addCandidates(entries, source: .clipboard, inspect: true)
     }
 
     static func extractLinks(from text: String) -> [String] {
@@ -463,6 +507,8 @@ struct WebSnifferBrowser: View {
     @State private var showHeaders = false
     @State private var showBookmarks = false
     @State private var extractHint: String?
+    @State private var toast: String?
+    @State private var toastTask: Task<Void, Never>?
 
     var body: some View {
         NavigationStack {
@@ -532,6 +578,19 @@ struct WebSnifferBrowser: View {
             } message: {
                 Text(extractHint ?? "")
             }
+            .overlay(alignment: .bottom) {
+                if let toast {
+                    Text(toast)
+                        .font(.footnote)
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 9)
+                        .background(.black.opacity(0.75), in: Capsule())
+                        .padding(.bottom, 56)
+                        .transition(.opacity)
+                        .allowsHitTesting(false)
+                }
+            }
             .onDisappear { model.teardown() }
         }
     }
@@ -571,15 +630,7 @@ struct WebSnifferBrowser: View {
 
             Spacer()
 
-            Button {
-                model.extractFromPage { count in
-                    if count > 0 {
-                        showCandidates = true
-                    } else {
-                        extractHint = "页面里没有找到 m3u8 链接。可以试试：播放一下视频，等嗅探计数出现后再点「候选」。"
-                    }
-                }
-            } label: {
+            Button(action: extractFromPage) {
                 Label("提取", systemImage: "doc.text.magnifyingglass")
             }
 
@@ -612,12 +663,34 @@ struct WebSnifferBrowser: View {
         return !link.isEmpty && bookmarks.contains(link)
     }
 
+    private func extractFromPage() {
+        model.extractFromPage { summary, usedCache, preview in
+            if summary.hasVisibleChange {
+                showCandidates = true
+            }
+            var text = summary.feedback
+            if usedCache, !preview.isEmpty {
+                text += "（已使用上次选中：\(preview)…）"
+            }
+            showToast(text)
+        }
+    }
+
     private func pasteFromClipboard() {
-        let count = model.addFromClipboard()
-        if count > 0 {
+        let summary = model.addFromClipboard()
+        if summary.hasVisibleChange {
             showCandidates = true
-        } else {
-            extractHint = "剪贴板里没有找到 m3u8 链接。"
+        }
+        showToast(summary.feedback)
+    }
+
+    private func showToast(_ text: String) {
+        toastTask?.cancel()
+        withAnimation(.easeOut(duration: 0.15)) { toast = text }
+        toastTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 2_600_000_000)
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeIn(duration: 0.2)) { toast = nil }
         }
     }
 
@@ -674,6 +747,10 @@ struct CandidateRow: View {
                 Text(candidate.subtitle)
                     .font(.caption)
                     .foregroundStyle(candidate.isSelectable ? Color.secondary : Color.red)
+
+                Text("来源：" + candidate.sources.map { $0.rawValue }.sorted().joined(separator: " · "))
+                    .font(.caption2)
+                    .foregroundStyle(Color.secondary)
 
                 Text(candidate.url.absoluteString)
                     .font(.caption2)
