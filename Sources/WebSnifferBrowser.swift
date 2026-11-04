@@ -11,6 +11,7 @@ struct Candidate: Identifiable, Equatable {
         case page = "页面"
         case selection = "选中"
         case manual = "手动"
+        case clipboard = "剪贴板"
     }
 
     enum State: Equatable {
@@ -250,8 +251,11 @@ final class BrowserModel: NSObject, ObservableObject {
             for (var i = 0; i < nodes.length; i++) { add(nodes[i].href); }
             var media = document.querySelectorAll('video, source');
             for (var j = 0; j < media.length; j++) { add(media[j].src); add(media[j].currentSrc); }
-            var sel = window.getSelection ? String(window.getSelection()) : '';
-            return JSON.stringify({ urls: Object.keys(urls), selection: sel });
+            var live = window.getSelection ? String(window.getSelection()) : '';
+            var cached = window.__planeSelection || '';
+            // 实时选区优先级最高；点按钮时选区可能已被系统清空，回退到复制/选中时缓存的内容
+            var sel = (live && live.trim().length > 0) ? live : cached;
+            return JSON.stringify({ urls: Object.keys(urls), selection: sel, usedCache: !(live && live.trim().length > 0) });
           } catch (e) { return JSON.stringify({ urls: [], selection: '' }); }
         })();
         """
@@ -273,6 +277,16 @@ final class BrowserModel: NSObject, ObservableObject {
                 completion?(pageEntries.count + selectionEntries.count)
             }
         }
+    }
+
+    /// 从系统剪贴板提取 m3u8（会触发系统"允许粘贴"提示）
+    func addFromClipboard() -> Int {
+        let text = UIPasteboard.general.string ?? ""
+        guard !text.isEmpty else { return 0 }
+        let entries = LinkParser.parse(text).filter { $0.url.lowercased().contains(".m3u8") }
+        guard !entries.isEmpty else { return 0 }
+        addCandidates(entries, source: .clipboard, inspect: true)
+        return entries.count
     }
 
     static func extractLinks(from text: String) -> [String] {
@@ -364,6 +378,21 @@ final class BrowserModel: NSObject, ObservableObject {
             return originalFetch.apply(this, arguments);
           };
         }
+        // 缓存选区 / 复制内容：点按钮时选区常被系统清空，这里提前留一份
+        try {
+          document.addEventListener('selectionchange', function(){
+            try {
+              var t = String(window.getSelection());
+              if (t && t.trim().length > 0) { window.__planeSelection = t; }
+            } catch (e) {}
+          }, true);
+          document.addEventListener('copy', function(){
+            try {
+              var t = String(window.getSelection());
+              if (t) { window.__planeSelection = t; }
+            } catch (e) {}
+          }, true);
+        } catch (e) {}
         // window.open 一律在当前页打开
         window.open = function(u){
           try {
@@ -555,6 +584,12 @@ struct WebSnifferBrowser: View {
             }
 
             Button {
+                pasteFromClipboard()
+            } label: {
+                Label("粘贴", systemImage: "doc.on.clipboard")
+            }
+
+            Button {
                 showCandidates = true
             } label: {
                 Label("\(model.candidates.count)", systemImage: "antenna.radiowaves.left.and.right")
@@ -575,6 +610,15 @@ struct WebSnifferBrowser: View {
     private var isBookmarked: Bool {
         let link = currentLink
         return !link.isEmpty && bookmarks.contains(link)
+    }
+
+    private func pasteFromClipboard() {
+        let count = model.addFromClipboard()
+        if count > 0 {
+            showCandidates = true
+        } else {
+            extractHint = "剪贴板里没有找到 m3u8 链接。"
+        }
     }
 
     private func toggleBookmark() {
