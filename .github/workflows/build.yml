@@ -6,7 +6,8 @@ on:
 
 jobs:
   build:
-    runs-on: macos-15
+    # arm64 runner 容量紧张时排队极久，Intel 版更易分配到机器
+    runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
 
