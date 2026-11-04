@@ -303,7 +303,7 @@ final class BrowserModel: NSObject, ObservableObject {
             guard let json = result as? String,
                   let data = json.data(using: .utf8),
                   let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-            else { completion?(0); return }
+            else { completion?(AddSummary(), false, ""); return }
 
             let pageURLs = (object["urls"] as? [String] ?? []).filter { $0.lowercased().contains(".m3u8") }
             let selection = object["selection"] as? String ?? ""
