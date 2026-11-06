@@ -207,7 +207,7 @@ struct ContentView: View {
     }
 }
 
-private struct DownloadRow: View {
+struct DownloadRow: View {
     let task: DownloadTaskInfo
     @EnvironmentObject private var downloads: DownloadManager
 

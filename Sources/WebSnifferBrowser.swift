@@ -506,6 +506,7 @@ struct WebSnifferBrowser: View {
     @State private var showCandidates = false
     @State private var showHeaders = false
     @State private var showBookmarks = false
+    @State private var showQueue = false
     @State private var extractHint: String?
     @State private var toast: String?
     @State private var toastTask: Task<Void, Never>?
@@ -563,9 +564,13 @@ struct WebSnifferBrowser: View {
                     for item in items {
                         downloads.start(url: item.url, title: item.title)
                     }
+                    model.clearSelection()
                     showCandidates = false
-                    dismiss()
+                    showToast("已加入下载队列 \(items.count) 个")
                 }
+            }
+            .sheet(isPresented: $showQueue) {
+                QueueOverviewSheet()
             }
             .sheet(isPresented: $showHeaders) {
                 HeadersSettingsView()
@@ -638,6 +643,14 @@ struct WebSnifferBrowser: View {
                 pasteFromClipboard()
             } label: {
                 Label("粘贴", systemImage: "doc.on.clipboard")
+            }
+
+            if !downloads.tasks.isEmpty {
+                Button {
+                    showQueue = true
+                } label: {
+                    Label("下载中 \(downloads.activeCount)", systemImage: "arrow.down.circle")
+                }
             }
 
             Button {
@@ -851,5 +864,34 @@ struct HeadersSettingsView: View {
                 }
             }
         }
+    }
+}
+
+// MARK: - 下载队列概览
+
+struct QueueOverviewSheet: View {
+    @EnvironmentObject private var downloads: DownloadManager
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if downloads.tasks.isEmpty {
+                    Text("当前没有下载任务")
+                        .foregroundStyle(.secondary)
+                }
+                ForEach(downloads.tasks) { task in
+                    DownloadRow(task: task)
+                }
+            }
+            .navigationTitle("下载队列")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("关闭") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
     }
 }
