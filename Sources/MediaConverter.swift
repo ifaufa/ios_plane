@@ -70,7 +70,9 @@ enum MediaConverter {
             produced = true
         }
 
-        let verify = await LocalHLS.verify(outputURL)
+        DiagnosticsLog.write("[转MP4] 结构自检 \(MP4Inspector.describe(outputURL))")
+
+        let verify = await LocalHLS.verifyByPlayer(outputURL)
         guard verify.playable else {
             try? fm.removeItem(at: outputURL)
             throw ConversionError(message: "转换后校验失败（\(verify.detail)），原分片已保留，可重试")
