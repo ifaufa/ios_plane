@@ -55,10 +55,14 @@ enum AVRemuxPipeline {
             var videoDesc: CMFormatDescription?
             let status: OSStatus = info.sps.withUnsafeBytes { spsBuffer -> OSStatus in
                 info.pps.withUnsafeBytes { ppsBuffer -> OSStatus in
-                    var pointers: [UnsafeRawPointer?] = [spsBuffer.baseAddress, ppsBuffer.baseAddress]
-                    var sizes: [Int] = [info.sps.count, info.pps.count]
-                    return pointers.withUnsafeMutableBufferPointer { ptrBuffer -> OSStatus in
-                        sizes.withUnsafeMutableBufferPointer { sizeBuffer -> OSStatus in
+                    guard let spsPtr = spsBuffer.bindMemory(to: UInt8.self).baseAddress,
+                          let ppsPtr = ppsBuffer.bindMemory(to: UInt8.self).baseAddress else {
+                        return OSStatus(-1)
+                    }
+                    let pointers: [UnsafePointer<UInt8>] = [spsPtr, ppsPtr]
+                    let sizes: [Int] = [info.sps.count, info.pps.count]
+                    return pointers.withUnsafeBufferPointer { ptrBuffer -> OSStatus in
+                        sizes.withUnsafeBufferPointer { sizeBuffer -> OSStatus in
                             CMVideoFormatDescriptionCreateFromH264ParameterSets(
                                 allocator: kCFAllocatorDefault,
                                 parameterSetCount: 2,
@@ -90,7 +94,7 @@ enum AVRemuxPipeline {
                 var asbd = AudioStreamBasicDescription(
                     mSampleRate: Float64(audio.sampleRate),
                     mFormatID: kAudioFormatMPEG4AAC,
-                    mFormatFlags: kMPEG4Object_AAC_LC,
+                    mFormatFlags: 2,   // AAC-LC（kMPEG4Object_AAC_LC 未在 Swift 中导出）
                     mBytesPerPacket: 0,
                     mFramesPerPacket: 1024,
                     mBytesPerFrame: 0,
