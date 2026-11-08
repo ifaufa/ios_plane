@@ -38,6 +38,8 @@ final class SegmentRunner: NSObject, ObservableObject {
 
     private var jobs: [String: SegmentJobState] = [:]
     private var dirs: [String: URL] = [:]
+    /// 目录名（哈希）-> 任务 ID，用于任务回调反查
+    private var hashToID: [String: String] = [:]
     private var activeTasks: [Int: (jobId: String, index: Int)] = [:]
     private var retries: [String: Int] = [:]          // "jobId#index" -> 次数
     private var keyCache: [String: Data] = [:]
@@ -66,6 +68,11 @@ final class SegmentRunner: NSObject, ObservableObject {
 
     var activeSegmentCount: Int { activeTasks.count }
 
+    /// 任务 ID（完整 URL，含 : 和 /）不能直接当目录名，用哈希
+    static func directoryName(for id: String) -> String {
+        String(MediaCrypto.sha256Hex(Data(id.utf8)).prefix(24))
+    }
+
     // MARK: - 对外接口
 
     /// 启动分片下载（第一次调用会拉取并解析播放列表）
@@ -76,7 +83,8 @@ final class SegmentRunner: NSObject, ObservableObject {
                 let playlist = try await PlaylistParser.load(url)
                 guard !playlist.isDRM else { throw PlaylistError.drmProtected }
 
-                let dir = Self.workRoot.appendingPathComponent(id, isDirectory: true)
+                let dirName = Self.directoryName(for: id)
+                let dir = Self.workRoot.appendingPathComponent(dirName, isDirectory: true)
                 try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
                 var state = SegmentJobState(
@@ -100,6 +108,7 @@ final class SegmentRunner: NSObject, ObservableObject {
                 state.updatedAt = Date()
                 jobs[id] = state
                 dirs[id] = dir
+                hashToID[dirName] = id
                 persist(id)
 
                 // 有 init 段（fMP4）时先下它
@@ -137,25 +146,44 @@ final class SegmentRunner: NSObject, ObservableObject {
             try? FileManager.default.removeItem(at: dir)
         }
         keyCache.removeValue(forKey: id)
+        hashToID.removeValue(forKey: Self.directoryName(for: id))
     }
 
-    /// 重启后恢复未完成任务
+    /// 重启后恢复未完成任务（递归扫描，兼容旧版本把 URL 当目录名产生的嵌套结构）
     func restore() -> [SegmentJobState] {
         let fm = FileManager.default
         let root = Self.workRoot
-        guard let entries = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else { return [] }
+        guard let enumerator = fm.enumerator(at: root, includingPropertiesForKeys: nil) else { return [] }
+
+        var stateFiles: [URL] = []
+        for case let url as URL in enumerator where url.lastPathComponent == "state.json" {
+            stateFiles.append(url)
+        }
+
         var result: [SegmentJobState] = []
-        for entry in entries {
-            let stateURL = entry.appendingPathComponent("state.json")
+        for stateURL in stateFiles {
             guard let data = try? Data(contentsOf: stateURL),
                   let state = try? Self.decoder().decode(SegmentJobState.self, from: data) else { continue }
             guard state.completed.count < state.segmentURLs.count else { continue }
+
+            let sourceDir = stateURL.deletingLastPathComponent()
+            let dirName = Self.directoryName(for: state.id)
+            let targetDir = root.appendingPathComponent(dirName, isDirectory: true)
+
+            // 旧目录结构（如 DownloadWork/https:/host/x.m3u8）迁移到哈希目录
+            if sourceDir.standardizedFileURL.path != targetDir.standardizedFileURL.path {
+                if fm.fileExists(atPath: targetDir.path) {
+                    try? fm.removeItem(at: targetDir)
+                }
+                try? fm.moveItem(at: sourceDir, to: targetDir)
+            }
 
             var resumed = state
             resumed.paused = true
             resumed.failure = nil
             jobs[state.id] = resumed
-            dirs[state.id] = entry
+            dirs[state.id] = targetDir
+            hashToID[dirName] = state.id
             persist(state.id)
             result.append(resumed)
         }
@@ -169,6 +197,7 @@ final class SegmentRunner: NSObject, ObservableObject {
         jobs.removeValue(forKey: id)
         dirs.removeValue(forKey: id)
         keyCache.removeValue(forKey: id)
+        hashToID.removeValue(forKey: Self.directoryName(for: id))
         retries = retries.filter { !$0.key.hasPrefix("\(id)#") }
     }
 
@@ -202,14 +231,15 @@ final class SegmentRunner: NSObject, ObservableObject {
             request.setValue(value, forHTTPHeaderField: key)
         }
         let task = session.downloadTask(with: request)
-        task.taskDescription = "\(jobId)#\(index)"
+        task.taskDescription = "\(Self.directoryName(for: jobId))#\(index)"
         activeTasks[task.taskIdentifier] = (jobId, index)
         task.resume()
     }
 
     private func cancelActive(for id: String) {
+        let prefix = "\(Self.directoryName(for: id))#"
         session.getAllTasks { tasks in
-            for task in tasks where (task.taskDescription ?? "").hasPrefix("\(id)#") {
+            for task in tasks where (task.taskDescription ?? "").hasPrefix(prefix) {
                 task.cancel()
             }
         }
@@ -316,10 +346,10 @@ extension SegmentRunner: URLSessionDownloadDelegate {
         let parts = description.split(separator: "#")
         guard parts.count == 2,
               let index = Int(parts[1]) else { return }
-        let jobId = String(parts[0])
+        let hash = String(parts[0])
 
         Task { @MainActor in
-            guard let dir = self.dirs[jobId] else { return }
+            guard let jobId = self.hashToID[hash], let dir = self.dirs[jobId] else { return }
             do {
                 var data = try Data(contentsOf: location, options: .mappedIfSafe)
                 if let key = try await self.keyData(jobId: jobId) {
@@ -346,13 +376,14 @@ extension SegmentRunner: URLSessionDownloadDelegate {
         let description = task.taskDescription ?? ""
         let parts = description.split(separator: "#")
         guard parts.count == 2, let index = Int(parts[1]) else { return }
-        let jobId = String(parts[0])
+        let hash = String(parts[0])
 
         Task { @MainActor in
             if (error as NSError).code == NSURLErrorCancelled {
                 self.activeTasks.removeValue(forKey: task.taskIdentifier)
                 return
             }
+            guard let jobId = self.hashToID[hash] else { return }
             self.handleFailure(jobId: jobId, index: index, message: error.localizedDescription, taskId: task.taskIdentifier)
         }
     }
