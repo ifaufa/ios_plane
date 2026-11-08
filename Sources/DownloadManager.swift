@@ -12,6 +12,8 @@ struct DownloadTaskInfo: Identifiable, Equatable {
     var stalled: Bool = false
     /// 继续后进度回退，说明该源不支持断点续传
     var restartedFromZero: Bool = false
+    /// 实时下载速度（字节/秒）
+    var speed: Double = 0
 
     enum Status: Equatable {
         case queued
@@ -49,6 +51,7 @@ final class DownloadManager: NSObject, ObservableObject {
     /// 继续下载时记录的基线进度，用于判断是否从头开始
     private var resumeBaseline: [String: Double] = [:]
     private var stallTimer: Timer?
+    private var speedTimer: Timer?
 
     private lazy var session: AVAssetDownloadURLSession = {
         let config = URLSessionConfiguration.background(withIdentifier: "com.local.planem3u8.downloads")
@@ -79,6 +82,21 @@ final class DownloadManager: NSObject, ObservableObject {
             }
             self.startNextIfNeeded()
             self.startStallMonitor()
+            self.startSpeedMonitor()
+        }
+    }
+
+    private func startSpeedMonitor() {
+        speedTimer?.invalidate()
+        speedTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.refreshSpeeds() }
+        }
+    }
+
+    private func refreshSpeeds() {
+        for task in tasks where task.status.isActive {
+            let speed = SegmentRunner.shared.speed(of: task.id)
+            update(task.id) { $0.speed = speed }
         }
     }
 

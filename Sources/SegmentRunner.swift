@@ -25,9 +25,27 @@ struct SegmentJobState: Codable {
 final class SegmentRunner: NSObject, ObservableObject {
     static let shared = SegmentRunner()
 
-    static let globalConcurrency = 8
-    static let perJobConcurrency = 4
+    static let perTaskKey = "segments.perTask"
+    static let globalKey = "segments.global"
     static let maxRetry = 5
+
+    /// 每任务并发（可选 4/6/8/10，默认 8）
+    static var perJobConcurrency: Int {
+        let value = UserDefaults.standard.integer(forKey: perTaskKey)
+        return value > 0 ? value : 8
+    }
+
+    /// 全局并发（可选 8/12/16/20/32，默认 20）
+    static var globalConcurrency: Int {
+        let value = UserDefaults.standard.integer(forKey: globalKey)
+        return value > 0 ? value : 20
+    }
+
+    /// 写入节流：累计 5 个分片或超过 2 秒才落盘
+    private var pendingWrites: [String: Int] = [:]
+    private var lastPersist: [String: Date] = [:]
+    private var speedSamples: [String: [(time: Date, bytes: Int64)]] = [:]
+    private var jobBytes: [String: Int64] = [:]
 
     /// 进度回调（jobId, 0...1）
     var onProgress: ((String, Double) -> Void)?
@@ -67,6 +85,18 @@ final class SegmentRunner: NSObject, ObservableObject {
     }
 
     var activeSegmentCount: Int { activeTasks.count }
+
+    /// 当前下载速度（字节/秒）
+    func speed(of id: String) -> Double {
+        guard let samples = speedSamples[id], let first = samples.first, let last = samples.last, samples.count > 1 else {
+            return 0
+        }
+        let elapsed = last.time.timeIntervalSince(first.time)
+        guard elapsed > 0.2 else { return 0 }
+        return Double(last.bytes - first.bytes) / elapsed
+    }
+
+    func totalBytes(of id: String) -> Int64 { jobBytes[id] ?? 0 }
 
     /// 任务 ID（完整 URL，含 : 和 /）不能直接当目录名，用哈希
     static func directoryName(for id: String) -> String {
@@ -255,14 +285,28 @@ final class SegmentRunner: NSObject, ObservableObject {
         try? data.write(to: dir.appendingPathComponent("state.json"), options: .atomic)
     }
 
-    private func markCompleted(jobId: String, index: Int) {
+    private func markCompleted(jobId: String, index: Int, bytes: Int64) {
         guard var job = jobs[jobId] else { return }
         if !job.completed.contains(index) {
             job.completed.append(index)
             job.completed.sort()
         }
         jobs[jobId] = job
-        persist(jobId)
+
+        jobBytes[jobId, default: 0] += bytes
+        var samples = speedSamples[jobId] ?? []
+        samples.append((Date(), jobBytes[jobId] ?? 0))
+        if samples.count > 12 { samples.removeFirst(samples.count - 12) }
+        speedSamples[jobId] = samples
+
+        // 写入节流：每 5 个分片或超过 2 秒落盘一次
+        pendingWrites[jobId, default: 0] += 1
+        let lastWrite = lastPersist[jobId] ?? .distantPast
+        if pendingWrites[jobId, default: 0] >= 5 || Date().timeIntervalSince(lastWrite) > 2 {
+            pendingWrites[jobId] = 0
+            lastPersist[jobId] = Date()
+            persist(jobId)
+        }
 
         let total = job.segmentURLs.count
         let progress = total > 0 ? Double(job.completed.count) / Double(total) : 0
@@ -270,6 +314,7 @@ final class SegmentRunner: NSObject, ObservableObject {
 
         if job.completed.count == total, !finishing.contains(jobId) {
             finishing.insert(jobId)
+            persist(jobId)
             finish(jobId)
         }
     }
@@ -348,12 +393,17 @@ extension SegmentRunner: URLSessionDownloadDelegate {
               let index = Int(parts[1]) else { return }
         let hash = String(parts[0])
 
-        Task { @MainActor in
-            guard let jobId = self.hashToID[hash], let dir = self.dirs[jobId] else { return }
+        Task {
+            guard let jobId = await MainActor.run(body: { self.hashToID[hash] }) else { return }
+            let dir = await MainActor.run { self.dirs[jobId] }
+            guard let dir else { return }
+            let key = try? await self.keyData(jobId: jobId)
+            let iv = await MainActor.run { self.iv(for: jobId, index: index) }
+
             do {
+                // 解密与写盘放在后台执行，避免阻塞主线程（并发高时这是主要瓶颈）
                 var data = try Data(contentsOf: location, options: .mappedIfSafe)
-                if let key = try await self.keyData(jobId: jobId) {
-                    let iv = self.iv(for: jobId, index: index)
+                if let key {
                     guard let plain = MediaCrypto.decrypt(data: data, key: key, iv: iv) else {
                         throw PlaylistError.network("分片解密失败")
                     }
@@ -361,12 +411,21 @@ extension SegmentRunner: URLSessionDownloadDelegate {
                 }
                 let fileURL = dir.appendingPathComponent(String(format: "seg-%06d.ts", index))
                 try data.write(to: fileURL, options: .atomic)
-                self.activeTasks.removeValue(forKey: downloadTask.taskIdentifier)
-                self.retries.removeValue(forKey: "\(jobId)#\(index)")
-                self.markCompleted(jobId: jobId, index: index)
-                self.pump()
+                let bytes = Int64(data.count)
+
+                await MainActor.run {
+                    self.activeTasks.removeValue(forKey: downloadTask.taskIdentifier)
+                    self.retries.removeValue(forKey: "\(jobId)#\(index)")
+                    self.markCompleted(jobId: jobId, index: index, bytes: bytes)
+                    self.pump()
+                }
             } catch {
-                self.handleFailure(jobId: jobId, index: index, message: error.localizedDescription, taskId: downloadTask.taskIdentifier)
+                await MainActor.run {
+                    self.handleFailure(jobId: jobId,
+                                       index: index,
+                                       message: error.localizedDescription,
+                                       taskId: downloadTask.taskIdentifier)
+                }
             }
         }
     }

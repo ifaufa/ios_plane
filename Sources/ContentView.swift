@@ -258,7 +258,7 @@ struct DownloadRow: View {
                     .font(.caption).foregroundStyle(.secondary)
             case .downloading:
                 ProgressView(value: task.progress)
-                Text("\(Int(task.progress * 100))%")
+                Text("\(Int(task.progress * 100))% · \(Self.speedText(task.speed))")
                     .font(.caption).foregroundStyle(.secondary)
             case .paused:
                 Text("已暂停 · \(Int(task.progress * 100))%")
@@ -295,6 +295,14 @@ struct DownloadRow: View {
             .buttonStyle(.borderless)
         }
         .padding(.vertical, 4)
+    }
+
+    static func speedText(_ bytesPerSecond: Double) -> String {
+        guard bytesPerSecond > 1024 else { return "--" }
+        if bytesPerSecond >= 1_048_576 {
+            return String(format: "%.1f MB/s", bytesPerSecond / 1_048_576)
+        }
+        return String(format: "%.0f KB/s", bytesPerSecond / 1024)
     }
 }
 
@@ -343,12 +351,30 @@ struct EngineSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var segmentEnabled =
         (UserDefaults.standard.string(forKey: DownloadManager.engineKey) ?? "segment") == "segment"
+    @State private var perTask =
+        max(4, UserDefaults.standard.integer(forKey: SegmentRunner.perTaskKey) > 0
+            ? UserDefaults.standard.integer(forKey: SegmentRunner.perTaskKey) : 8)
+    @State private var globalLimit =
+        max(8, UserDefaults.standard.integer(forKey: SegmentRunner.globalKey) > 0
+            ? UserDefaults.standard.integer(forKey: SegmentRunner.globalKey) : 20)
 
     var body: some View {
         NavigationStack {
             Form {
                 Section("下载引擎") {
                     Toggle("分片引擎（可断点续传）", isOn: $segmentEnabled)
+                }
+                if segmentEnabled {
+                    Section {
+                        Picker("每任务", selection: $perTask) {
+                            ForEach([4, 6, 8, 10], id: \.self) { Text("\($0)").tag($0) }
+                        }
+                        Picker("全局", selection: $globalLimit) {
+                            ForEach([8, 12, 16, 20, 32], id: \.self) { Text("\($0)").tag($0) }
+                        }
+                    } footer: {
+                        Text("并发越高越快，但更耗电、更容易被源站限流；分片较大时还会增加内存占用。建议 8 / 20，网络好且源不限流时可用 10 / 32。")
+                    }
                 }
                 Section {
                     Text("""
@@ -372,6 +398,8 @@ struct EngineSettingsView: View {
                     Button("保存") {
                         UserDefaults.standard.set(segmentEnabled ? "segment" : "system",
                                                   forKey: DownloadManager.engineKey)
+                        UserDefaults.standard.set(perTask, forKey: SegmentRunner.perTaskKey)
+                        UserDefaults.standard.set(globalLimit, forKey: SegmentRunner.globalKey)
                         dismiss()
                     }
                 }
