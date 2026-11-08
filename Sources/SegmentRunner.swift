@@ -222,6 +222,12 @@ final class SegmentRunner: NSObject, ObservableObject {
 
     func state(of id: String) -> SegmentJobState? { jobs[id] }
 
+    /// 后台唤醒时先恢复任务映射，否则回调找不到对应任务会把分片丢掉
+    func prepareForBackgroundEvents() {
+        guard jobs.isEmpty else { return }
+        _ = restore()
+    }
+
     /// 成功后释放内存状态（不删除磁盘目录，目录已由调用方移走）
     func release(_ id: String) {
         jobs.removeValue(forKey: id)
@@ -393,16 +399,41 @@ extension SegmentRunner: URLSessionDownloadDelegate {
               let index = Int(parts[1]) else { return }
         let hash = String(parts[0])
 
+        // 系统给的临时文件只在本次回调内有效，必须先同步搬走，之后才能异步处理
+        let staging: URL
+        do {
+            let fm = FileManager.default
+            let target = fm.temporaryDirectory.appendingPathComponent("plane-seg-\(UUID().uuidString).bin")
+            try fm.moveItem(at: location, to: target)
+            staging = target
+        } catch {
+            Task { @MainActor in
+                guard let jobId = self.hashToID[hash] else { return }
+                self.handleFailure(jobId: jobId,
+                                   index: index,
+                                   message: "临时文件已失效：\(error.localizedDescription)",
+                                   taskId: downloadTask.taskIdentifier)
+            }
+            return
+        }
+
         Task {
-            guard let jobId = await MainActor.run(body: { self.hashToID[hash] }) else { return }
+            guard let jobId = await MainActor.run(body: { self.hashToID[hash] }) else {
+                try? FileManager.default.removeItem(at: staging)
+                return
+            }
             let dir = await MainActor.run { self.dirs[jobId] }
-            guard let dir else { return }
+            guard let dir else {
+                try? FileManager.default.removeItem(at: staging)
+                return
+            }
             let key = try? await self.keyData(jobId: jobId)
             let iv = await MainActor.run { self.iv(for: jobId, index: index) }
 
             do {
                 // 解密与写盘放在后台执行，避免阻塞主线程（并发高时这是主要瓶颈）
-                var data = try Data(contentsOf: location, options: .mappedIfSafe)
+                var data = try Data(contentsOf: staging, options: .mappedIfSafe)
+                try? FileManager.default.removeItem(at: staging)
                 if let key {
                     guard let plain = MediaCrypto.decrypt(data: data, key: key, iv: iv) else {
                         throw PlaylistError.network("分片解密失败")

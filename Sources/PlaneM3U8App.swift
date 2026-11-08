@@ -21,6 +21,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
                      handleEventsForBackgroundURLSession identifier: String,
                      completionHandler: @escaping () -> Void) {
         if identifier.contains("segments") {
+            SegmentRunner.shared.prepareForBackgroundEvents()
             SegmentRunner.backgroundCompletion = completionHandler
         } else {
             DownloadManager.backgroundCompletionHandler = completionHandler
