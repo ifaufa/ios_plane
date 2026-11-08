@@ -86,8 +86,9 @@ enum MediaConverter {
         DiagnosticsLog.write("[转MP4] 轨道信息 \(trackInfo)")
 
         guard verify.playable, verify.duration > 1 else {
-            try? fm.removeItem(at: outputURL)
-            throw ConversionError(message: "转换后校验失败（\(verify.detail)；\(trackInfo)），原分片已保留，可重试")
+            // 保留产物，便于导出到电脑上比对（不删除，也不入库）
+            DiagnosticsLog.write("[转MP4] 校验未通过，产物已保留：\(outputURL.lastPathComponent)")
+            throw ConversionError(message: "转换后校验失败（\(verify.detail)；\(trackInfo)）。原分片已保留，产物 \(outputName) 也在「文件」App 里，可导出到电脑用 VLC 验证。")
         }
 
         try? fm.removeItem(at: dir)

@@ -76,6 +76,7 @@ enum AVRemuxPipeline {
                 }
             }
 
+            DiagnosticsLog.write("[转MP4] 视频参数 \(info.width)x\(info.height) SPS=\(info.sps.count)B PPS=\(info.pps.count)B profile=\(info.profileLevel.0) level=\(info.profileLevel.1) 格式描述=\(status == noErr ? "ok" : "失败(\(status))")")
             guard status == noErr, let videoDesc else {
                 throw RemuxError(message: "创建视频格式描述失败（\(status)）")
             }
