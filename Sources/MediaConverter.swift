@@ -1,7 +1,7 @@
 import Foundation
 import AVFoundation
 
-/// 分片态视频转 MP4：优先直接转封装 → 校验 → 入库 → 删分片
+/// 分片态视频转 MP4：合并 → 无重编码转封装（失败才降级重编码）→ 校验 → 删分片
 enum MediaConverter {
     struct ConversionError: LocalizedError {
         let message: String
@@ -14,12 +14,11 @@ enum MediaConverter {
         }
         let fm = FileManager.default
         let dir = VideoLibrary.assetsDir.appendingPathComponent((item.fileName as NSString).deletingLastPathComponent)
-        let playlist = dir.appendingPathComponent("index.m3u8")
-        guard fm.fileExists(atPath: playlist.path) else {
-            throw ConversionError(message: "缺少本地播放列表，无法转换")
+        guard let state = loadState(dir: dir) else {
+            throw ConversionError(message: "缺少分片状态文件，无法转换")
         }
 
-        // 空间预检：转 MP4 期间需要分片 + 成品并存
+        // 空间预检：合并文件 + MP4 需要同时存在
         let dirSize = directorySize(dir)
         if let available = availableCapacity(),
            available < Int64(Double(dirSize) * 1.1) + 200 * 1024 * 1024 {
@@ -34,34 +33,37 @@ enum MediaConverter {
             try? fm.removeItem(at: outputURL)
         }
 
-        // 1) 直接从分片态转封装（不经合并，省一次临时占用）
-        var exported = false
-        do {
-            let httpURL = try LocalHLS.playbackURL(playlistURL: playlist)
-            defer { LocalHLS.stopPlayback() }
-            let asset = AVURLAsset(url: httpURL)
-            try await LocalHLS.exportMP4(from: asset, to: outputURL)
-            exported = true
-            DiagnosticsLog.write("[转MP4] 直接转封装成功 大小=\((try? outputURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)B")
-        } catch {
-            DiagnosticsLog.write("[转MP4] 直接转封装失败：\(error.localizedDescription)，尝试合并后转封装")
-        }
+        // 1) 本地合并成一个文件（几秒钟，无网络）
+        let report = try LocalHLS.merge(state: state, dir: dir, container: state.container)
+        let mergedURL = report.url
+        defer { try? fm.removeItem(at: mergedURL) }
+        DiagnosticsLog.write("[转MP4] 合并完成 大小=\(report.bytes)B，开始转封装")
 
-        // 2) 兜底：先合并成单文件再转封装
-        if !exported {
-            guard let state = loadState(dir: dir) else {
-                throw ConversionError(message: "缺少分片状态文件，无法转换")
+        // 2) 优先做无重编码转封装（保留原始画质，速度最快）
+        var produced = false
+        if state.container == "ts" {
+            do {
+                let start = Date()
+                try await TSRemuxer.remux(source: mergedURL, destination: outputURL)
+                let cost = Date().timeIntervalSince(start)
+                produced = true
+                DiagnosticsLog.write(String(format: "[转MP4] 无重编码转封装成功，耗时 %.1fs", cost))
+            } catch {
+                DiagnosticsLog.write("[转MP4] 转封装失败：\(error.localizedDescription)，改用系统导出（可能重编码）")
             }
-            let report = try LocalHLS.merge(state: state, dir: dir, container: state.container)
-            defer { try? fm.removeItem(at: report.url) }
-            try await LocalHLS.exportMP4(from: report.url, to: outputURL)
         }
 
-        // 3) 校验通过才删分片
+        // 3) 兜底：系统导出（passthrough → 重编码）
+        if !produced {
+            try await LocalHLS.exportMP4(from: mergedURL, to: outputURL)
+            produced = true
+        }
+
+        // 4) 校验通过才删分片
         let verify = await LocalHLS.verify(outputURL)
         guard verify.playable else {
             try? fm.removeItem(at: outputURL)
-            throw ConversionError(message: "转换后校验失败（未解析出音轨/视频轨），原分片已保留，可重试")
+            throw ConversionError(message: "转换后校验失败（\(verify.detail)），原分片已保留，可重试")
         }
 
         try? fm.removeItem(at: dir)
