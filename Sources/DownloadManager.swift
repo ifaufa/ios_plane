@@ -192,9 +192,10 @@ final class DownloadManager: NSObject, ObservableObject {
         let title = pendingTitles[id] ?? state.title
 
         let asset = LocalHLS.makeAsset(playlistURL: playlistURL)
-        let localDuration = await LocalHLS.verify(asset: asset)
-        DiagnosticsLog.write("[6 分片态校验] 结果=\(localDuration.map { String(format: "%.1f", $0) } ?? "失败") 容器=\(state.container) 段数=\(state.durations.count)")
-        if let duration = localDuration, duration > 0 {
+        let verify = await LocalHLS.verify(asset: asset)
+        DiagnosticsLog.write("[6 分片态校验] playable=\(verify.playable) \(verify.detail) 容器=\(state.container) 段数=\(state.durations.count)")
+
+        if verify.playable {
             let folder = UUID().uuidString
             let destination = VideoLibrary.assetsDir.appendingPathComponent(folder, isDirectory: true)
             do {
@@ -204,7 +205,7 @@ final class DownloadManager: NSObject, ObservableObject {
                     title: title,
                     sourceURL: id,
                     fileName: "\(folder)/index.m3u8",
-                    duration: duration,
+                    duration: verify.duration,
                     fileSize: Self.directorySize(destination),
                     createdAt: Date(),
                     lastPosition: nil
@@ -214,31 +215,41 @@ final class DownloadManager: NSObject, ObservableObject {
                 finishTask(id: id)
                 return
             } catch {
-                // 继续走合并兜底
+                DiagnosticsLog.write("[6 分片态校验] 入库失败：\(error.localizedDescription)")
             }
         }
 
         do {
-            let merged = try LocalHLS.merge(state: state, dir: workDir, container: state.container)
-            let mergedSize = (try? merged.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-            let mergedDuration = await LocalHLS.verify(merged)
-            DiagnosticsLog.write("[7 合并] 文件=\(merged.lastPathComponent) 大小=\(mergedSize)B 校验=\(mergedDuration.map { String(format: "%.1f", $0) } ?? "失败")")
-            guard let duration = mergedDuration else {
-                throw PlaylistError.network("合并后校验失败，可能源结构异常")
+            // 合并前先做头部与数量校验，避免把坏数据拼进去
+            if let issue = Self.validateSegments(state: state, dir: workDir) {
+                DiagnosticsLog.write("[7 合并] 拒绝合并：\(issue)")
+                throw PlaylistError.network(issue)
             }
-            let fileName = UUID().uuidString + "." + merged.pathExtension
+            let report = try LocalHLS.merge(state: state, dir: workDir, container: state.container)
+            let sum = report.segmentSizes.reduce(0, +)
+            DiagnosticsLog.write("[7 合并] 文件=\(report.url.lastPathComponent) 大小=\(report.bytes)B 分片和=\(sum)B")
+            guard report.bytes == sum else {
+                throw PlaylistError.network("合并大小与分片总和不一致")
+            }
+            let mergedVerify = await LocalHLS.verify(report.url)
+            DiagnosticsLog.write("[7 合并] 校验 playable=\(mergedVerify.playable) \(mergedVerify.detail)")
+            guard mergedVerify.playable else {
+                throw PlaylistError.network("合并后仍无法解析出音视频轨道")
+            }
+
+            let fileName = UUID().uuidString + "." + report.url.pathExtension
             let destination = VideoLibrary.assetsDir.appendingPathComponent(fileName)
             if FileManager.default.fileExists(atPath: destination.path) {
                 try FileManager.default.removeItem(at: destination)
             }
-            try FileManager.default.moveItem(at: merged, to: destination)
-            let size = (try? destination.resourceValues(forKeys: [.fileSizeKey]).fileSize).flatMap { Int64($0) } ?? 0
+            try FileManager.default.moveItem(at: report.url, to: destination)
+            let size = (try? destination.resourceValues(forKeys: [.fileSizeKey]).fileSize).flatMap { Int64($0) } ?? report.bytes
             let item = VideoItem(
                 id: UUID(),
                 title: title,
                 sourceURL: id,
                 fileName: fileName,
-                duration: duration,
+                duration: mergedVerify.duration,
                 fileSize: size,
                 createdAt: Date(),
                 lastPosition: nil
@@ -250,6 +261,28 @@ final class DownloadManager: NSObject, ObservableObject {
             update(id) { $0.status = .failed(error.localizedDescription) }
             startNextIfNeeded()
         }
+    }
+
+    /// 逐片检查头部字节，防止把密文/坏片拼进成品
+    private static func validateSegments(state: SegmentJobState, dir: URL) -> String? {
+        for index in state.durations.indices {
+            let fileURL = dir.appendingPathComponent(LocalHLS.fileName(index: index))
+            guard let handle = try? FileHandle(forReadingFrom: fileURL) else {
+                return "分片 \(index + 1) 无法读取"
+            }
+            let head = (try? handle.read(upToCount: 64)) ?? Data()
+            try? handle.close()
+            guard let first = head.first else { return "分片 \(index + 1) 为空" }
+
+            if state.container == "mp4" {
+                let signature = String(data: head.prefix(4), encoding: .ascii) ?? ""
+                let valid = ["ftyp", "moof", "styp", "sidx", "mdat", "free"].contains(signature)
+                if !valid { return "分片 \(index + 1) 头部异常（\(signature)）" }
+            } else if first != 0x47 {
+                return "分片 \(index + 1) 不是有效的 TS 数据（首字节 \(String(format: "%02x", first))）"
+            }
+        }
+        return nil
     }
 
     private static func directorySize(_ url: URL) -> Int64 {

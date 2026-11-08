@@ -4,3 +4,4 @@ DerivedData/
 Payload/
 *.ipa
 .DS_Store
+diagnostics.log

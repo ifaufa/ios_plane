@@ -103,6 +103,25 @@ final class SegmentRunner: NSObject, ObservableObject {
         String(MediaCrypto.sha256Hex(Data(id.utf8)).prefix(24))
     }
 
+    static func stamp() -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMddHHmmss"
+        return formatter.string(from: Date())
+    }
+
+    /// 清理同一任务的旧工作目录（历史残留可能污染合并结果）
+    static func cleanupOldDirectories(for id: String) {
+        let fm = FileManager.default
+        let root = workRoot
+        guard let entries = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else { return }
+        for entry in entries {
+            let stateURL = entry.appendingPathComponent("state.json")
+            guard let data = try? Data(contentsOf: stateURL),
+                  let state = try? decoder().decode(SegmentJobState.self, from: data) else { continue }
+            if state.id == id { try? fm.removeItem(at: entry) }
+        }
+    }
+
     // MARK: - 对外接口
 
     /// 启动分片下载（第一次调用会拉取并解析播放列表）
@@ -115,7 +134,9 @@ final class SegmentRunner: NSObject, ObservableObject {
                 DiagnosticsLog.write("[2 结构] 段数=\(playlist.segments.count) 时长=\(String(format: "%.1f", playlist.totalDuration))s 容器=\(playlist.initSegment != nil ? "mp4" : "ts") 有MAP=\(playlist.initSegment != nil) 加密=\(playlist.key != nil) keyURI=\(playlist.key?.uri.absoluteString ?? "-") IV=\(playlist.key?.iv.map { DiagnosticsLog.hexPrefix($0, count: 16) } ?? "-")")
                 guard !playlist.isDRM else { throw PlaylistError.drmProtected }
 
-                let dirName = Self.directoryName(for: id)
+                // 每次新建独立目录（带时间戳），避免复用旧目录导致分片混入
+                let dirName = Self.directoryName(for: id) + "-" + Self.stamp()
+                Self.cleanupOldDirectories(for: id)
                 let dir = Self.workRoot.appendingPathComponent(dirName, isDirectory: true)
                 try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
@@ -169,7 +190,14 @@ final class SegmentRunner: NSObject, ObservableObject {
         job.failure = nil
         jobs[id] = job
         persist(id)
-        pump()
+
+        if job.completed.count >= job.segmentURLs.count, !finishing.contains(id) {
+            // 分片已下满但收尾失败过：直接重跑收尾，而不是傻等新分片
+            finishing.insert(id)
+            finish(id)
+        } else {
+            pump()
+        }
     }
 
     func remove(_ id: String) {
@@ -200,23 +228,13 @@ final class SegmentRunner: NSObject, ObservableObject {
             guard state.completed.count < state.segmentURLs.count else { continue }
 
             let sourceDir = stateURL.deletingLastPathComponent()
-            let dirName = Self.directoryName(for: state.id)
-            let targetDir = root.appendingPathComponent(dirName, isDirectory: true)
-
-            // 旧目录结构（如 DownloadWork/https:/host/x.m3u8）迁移到哈希目录
-            if sourceDir.standardizedFileURL.path != targetDir.standardizedFileURL.path {
-                if fm.fileExists(atPath: targetDir.path) {
-                    try? fm.removeItem(at: targetDir)
-                }
-                try? fm.moveItem(at: sourceDir, to: targetDir)
-            }
 
             var resumed = state
             resumed.paused = true
             resumed.failure = nil
             jobs[state.id] = resumed
-            dirs[state.id] = targetDir
-            hashToID[dirName] = state.id
+            dirs[state.id] = sourceDir
+            hashToID[Self.directoryName(for: state.id)] = state.id
             persist(state.id)
             result.append(resumed)
         }

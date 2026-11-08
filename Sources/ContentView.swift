@@ -13,6 +13,7 @@ struct ContentView: View {
     @State private var selectionMode = false
     @State private var selected: Set<UUID> = []
     @State private var convertingID: UUID?
+    @State private var shareItem: ShareItem?
     @State private var showEngineSettings = false
     @State private var showDiagnostics = false
 
@@ -83,6 +84,13 @@ struct ContentView: View {
                                     Label("转 MP4", systemImage: "arrow.triangle.2.circlepath")
                                 }
                                 .tint(.blue)
+                            } else if !library.isMissing(item) {
+                                Button {
+                                    shareItem = ShareItem(url: library.localURL(for: item))
+                                } label: {
+                                    Label("导出", systemImage: "square.and.arrow.up")
+                                }
+                                .tint(.green)
                             }
                         }
                     }
@@ -200,6 +208,9 @@ struct ContentView: View {
             }
             .sheet(isPresented: $showDiagnostics) {
                 DiagnosticsView()
+            }
+            .sheet(item: $shareItem) { item in
+                ShareSheet(items: [item.url])
             }
             .fullScreenCover(item: $playing) { item in
                 PlayerView(
