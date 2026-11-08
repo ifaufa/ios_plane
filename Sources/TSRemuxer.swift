@@ -38,8 +38,8 @@ enum TSRemuxer {
             guard reader.canAdd(output) else { continue }
             reader.add(output)
 
-            let formatHint = (track.formatDescriptions.first as? CMFormatDescription)
-            let input = AVAssetWriterInput(mediaType: track.mediaType, outputSettings: nil, sourceFormatHint: formatHint)
+            // 不指定 sourceFormatHint，由首个样本推断，避免 CF 类型条件转换的编译限制
+            let input = AVAssetWriterInput(mediaType: track.mediaType, outputSettings: nil)
             input.expectsMediaDataInRealTime = false
             guard writer.canAdd(input) else { continue }
             writer.add(input)
