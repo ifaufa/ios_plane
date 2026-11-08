@@ -73,9 +73,12 @@ enum MediaConverter {
         DiagnosticsLog.write("[转MP4] 结构自检 \(MP4Inspector.describe(outputURL))")
 
         let verify = await LocalHLS.verifyByPlayer(outputURL)
-        guard verify.playable else {
+        let trackInfo = await describeTracks(outputURL)
+        DiagnosticsLog.write("[转MP4] 轨道信息 \(trackInfo)")
+
+        guard verify.playable, verify.duration > 1 else {
             try? fm.removeItem(at: outputURL)
-            throw ConversionError(message: "转换后校验失败（\(verify.detail)），原分片已保留，可重试")
+            throw ConversionError(message: "转换后校验失败（\(verify.detail)；\(trackInfo)），原分片已保留，可重试")
         }
 
         try? fm.removeItem(at: dir)
@@ -85,6 +88,21 @@ enum MediaConverter {
     }
 
     // MARK: - 工具
+
+    private static func describeTracks(_ url: URL) async -> String {
+        let asset = AVURLAsset(url: url)
+        guard let tracks = try? await asset.load(.tracks), !tracks.isEmpty else {
+            return "无轨道"
+        }
+        var parts: [String] = []
+        for track in tracks {
+            let size = (try? await track.load(.naturalSize)) ?? .zero
+            let range = (try? await track.load(.timeRange))?.duration.seconds ?? 0
+            parts.append("\(track.mediaType.rawValue) \(Int(size.width))x\(Int(size.height)) \(String(format: "%.1f", range))s")
+        }
+        let duration = (try? await asset.load(.duration))?.seconds ?? 0
+        return "总时长=\(String(format: "%.1f", duration))s | " + parts.joined(separator: " | ")
+    }
 
     private static func loadState(dir: URL) -> SegmentJobState? {
         let stateURL = dir.appendingPathComponent("state.json")

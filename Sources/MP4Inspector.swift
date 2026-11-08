@@ -12,7 +12,7 @@ enum MP4Inspector {
         var offset = 0
         var parts: [String] = []
         while offset + 8 <= head.count {
-            let size = Int(head.u64(at: offset))
+            let size = Int(head.u32(at: offset))
             let type = head.ascii(at: offset + 4, length: 4)
             var boxSize = size
             var headerLength = 8
@@ -132,6 +132,15 @@ enum MP4Inspector {
 }
 
 private extension Data {
+    func u32(at offset: Int) -> UInt32 {
+        guard offset + 4 <= count else { return 0 }
+        var value: UInt32 = 0
+        for index in 0..<4 {
+            value = (value << 8) | UInt32(self[self.startIndex + offset + index])
+        }
+        return value
+    }
+
     func u64(at offset: Int) -> UInt64 {
         guard offset + 8 <= count else { return 0 }
         var value: UInt64 = 0

@@ -136,8 +136,9 @@ final class MP4Writer {
         }
 
         let movieTimescale: Int32 = 1000
-        let maxDuration = max(videoDuration, audioDuration * Int64(movieTimescale) / Int64(max(1, audioTimescale)))
-        let movieDuration = Int32(clamping: Int(maxDuration))
+        let videoMs = videoDuration * Int64(movieTimescale) / Int64(videoTimescale)
+        let audioMs = audioDuration * Int64(movieTimescale) / Int64(max(1, audioTimescale))
+        let movieDuration = Int32(clamping: Int(max(videoMs, audioMs)))
 
         var traks = Data()
         traks.append(videoTrak(videoDurations: videoDurations,
@@ -308,9 +309,13 @@ final class MP4Writer {
             sttsPayload.append(UInt32(run.1).be)
         }
 
+        let hasNegativeCtts = videoSamples.contains { $0.ctts < 0 }
         var cttsPayload = Data()
         cttsPayload.append(UInt32(videoSamples.count).be)
-        for sample in videoSamples { cttsPayload.append(UInt32(bitPattern: sample.ctts).be) }
+        for sample in videoSamples {
+            let value = hasNegativeCtts ? sample.ctts : max(0, sample.ctts)
+            cttsPayload.append(UInt32(bitPattern: value).be)
+        }
 
         var stssPayload = Data()
         let keys = videoSamples.enumerated().filter { $0.element.isKey }.map { UInt32($0.offset + 1) }
@@ -341,7 +346,7 @@ final class MP4Writer {
 
         return box("stbl", payload: stsdVideo()
             + fullBox("stts", version: 0, flags: 0, payload: sttsPayload)
-            + fullBox("ctts", version: 0, flags: 0, payload: cttsPayload)
+            + fullBox("ctts", version: hasNegativeCtts ? 1 : 0, flags: 0, payload: cttsPayload)
             + fullBox("stss", version: 0, flags: 0, payload: stssPayload)
             + stsc
             + fullBox("stsz", version: 0, flags: 0, payload: stszPayload)
