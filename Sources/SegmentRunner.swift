@@ -225,7 +225,7 @@ final class SegmentRunner: NSObject, ObservableObject {
         for stateURL in stateFiles {
             guard let data = try? Data(contentsOf: stateURL),
                   let state = try? Self.decoder().decode(SegmentJobState.self, from: data) else { continue }
-            guard state.completed.count < state.segmentURLs.count else { continue }
+            // 注意：不能因为"分片已下满"就跳过——那通常意味着收尾失败，仍需恢复出来重新收尾
 
             let sourceDir = stateURL.deletingLastPathComponent()
 
