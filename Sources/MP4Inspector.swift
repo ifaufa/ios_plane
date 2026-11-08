@@ -55,14 +55,15 @@ enum MP4Inspector {
             } else if type == "stsd" {
                 names.append("stsd{\(dumpSampleEntry(child))}")
             } else if type == "stsz" {
-                let count = child.count >= 12 ? Int(child.u32(at: 8)) : -1
+                let count = child.count >= 8 ? Int(child.u32(at: 4)) : -1
                 names.append("stsz(\(count))")
             } else if type == "stco" || type == "co64" {
                 let count = child.count >= 4 ? Int(child.u32(at: 0)) : -1
                 names.append("\(type)(\(count))")
             } else if type == "stts" || type == "ctts" || type == "stsc" || type == "stss" {
-                let count = child.count >= 4 ? Int(child.u32(at: 0)) : -1
-                names.append("\(type)(\(count))")
+                // FullBox：version/flags(4) + entry_count(4)
+                let count = child.count >= 8 ? Int(child.u32(at: 4)) : -1
+                names.append("\(type)(entries=\(count))")
             } else {
                 names.append("\(type)(\(size))")
             }

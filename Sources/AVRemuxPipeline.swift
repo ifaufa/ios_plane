@@ -152,8 +152,8 @@ enum AVRemuxPipeline {
                 return
             }
             if !input.append(buffer) {
-                failure = writer.error?.localizedDescription ?? "追加视频样本失败"
-                _ = writer
+                let error = writer.error as NSError?
+                failure = "追加视频样本失败：\(error?.domain ?? "-") \(error?.code ?? 0) \(error?.localizedDescription ?? "")"
             }
             videoFrames += 1
         }
@@ -174,7 +174,9 @@ enum AVRemuxPipeline {
                 videoOffset = dts >= 0 ? dts : max(0, pts)
             }
             let normalizedDTS = max(0, (dts >= 0 ? dts : pts) - videoOffset)
-            let normalizedPTS = max(0, (pts >= 0 ? pts : dts) - videoOffset)
+            // B 帧会出现 PTS < DTS，AVAssetWriter 不接受负的合成偏移，这里夹到 DTS
+            var normalizedPTS = max(0, (pts >= 0 ? pts : dts) - videoOffset)
+            if normalizedPTS < normalizedDTS { normalizedPTS = normalizedDTS }
 
             if let previous = pendingVideo {
                 let delta = max(1, normalizedDTS - previous.dts)

@@ -314,24 +314,33 @@ final class TSDemuxer {
     static func splitNALUnits(_ data: Data) -> [Data] {
         let bytes = [UInt8](data)
         var result: [Data] = []
-        var starts: [Int] = []
+        var codeStarts: [Int] = []   // 起始码第一个 0x00 的位置
+        var nalStarts: [Int] = []    // NAL 头的实际起点
+
         var i = 0
-        while i + 2 < bytes.count {
-            if bytes[i] == 0, bytes[i + 1] == 0, bytes[i + 2] == 1 {
-                starts.append(i + 3)
-                i += 3
-            } else if i + 3 < bytes.count, bytes[i] == 0, bytes[i + 1] == 0, bytes[i + 2] == 0, bytes[i + 3] == 1 {
-                starts.append(i + 4)
+        while i + 3 <= bytes.count {
+            if i + 4 <= bytes.count, bytes[i] == 0, bytes[i + 1] == 0, bytes[i + 2] == 0, bytes[i + 3] == 1 {
+                codeStarts.append(i)
+                nalStarts.append(i + 4)
                 i += 4
+            } else if bytes[i] == 0, bytes[i + 1] == 0, bytes[i + 2] == 1 {
+                codeStarts.append(i)
+                nalStarts.append(i + 3)
+                i += 3
             } else {
                 i += 1
             }
         }
-        for (idx, start) in starts.enumerated() {
-            let end = idx + 1 < starts.count ? starts[idx + 1] - 3 : bytes.count
-            if start < end {
-                result.append(Data(bytes[start..<end]))
-            }
+
+        for index in nalStarts.indices {
+            let start = nalStarts[index]
+            // 结束位置 = 下一个起始码的起点（不能减 3/4，否则会残留 0x00）
+            let end = index + 1 < codeStarts.count ? codeStarts[index + 1] : bytes.count
+            guard start < end else { continue }
+            var nal = Data(bytes[start..<end])
+            // 去掉尾部可能残留的填充 0x00（不影响解码）
+            while nal.count > 1, nal.last == 0x00 { nal.removeLast() }
+            result.append(nal)
         }
         return result
     }
