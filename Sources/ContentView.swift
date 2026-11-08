@@ -370,10 +370,10 @@ struct EngineSettingsView: View {
     @State private var segmentEnabled =
         (UserDefaults.standard.string(forKey: DownloadManager.engineKey) ?? "segment") == "segment"
     @State private var perTask =
-        max(4, UserDefaults.standard.integer(forKey: SegmentRunner.perTaskKey) > 0
+        max(1, UserDefaults.standard.integer(forKey: SegmentRunner.perTaskKey) > 0
             ? UserDefaults.standard.integer(forKey: SegmentRunner.perTaskKey) : 8)
     @State private var globalLimit =
-        max(8, UserDefaults.standard.integer(forKey: SegmentRunner.globalKey) > 0
+        max(5, UserDefaults.standard.integer(forKey: SegmentRunner.globalKey) > 0
             ? UserDefaults.standard.integer(forKey: SegmentRunner.globalKey) : 20)
 
     var body: some View {
@@ -385,13 +385,13 @@ struct EngineSettingsView: View {
                 if segmentEnabled {
                     Section {
                         Picker("每任务", selection: $perTask) {
-                            ForEach([4, 6, 8, 10], id: \.self) { Text("\($0)").tag($0) }
+                            ForEach([1, 4, 6, 8, 10], id: \.self) { Text("\($0)").tag($0) }
                         }
                         Picker("全局", selection: $globalLimit) {
-                            ForEach([8, 12, 16, 20, 32], id: \.self) { Text("\($0)").tag($0) }
+                            ForEach([5, 8, 12, 16, 20, 32], id: \.self) { Text("\($0)").tag($0) }
                         }
                     } footer: {
-                        Text("并发越高越快，但更耗电、更容易被源站限流；分片较大时还会增加内存占用。建议 8 / 20，网络好且源不限流时可用 10 / 32。")
+                        Text("并发越高越快，但更耗电、更容易被源站限流；分片较大时还会增加内存占用。建议 8 / 20，网络好且源不限流时可用 10 / 32。\n\n选 1 / 5 属于极低并发：适合弱网或被限流时保稳，但仍走分片引擎（可续传），速度会明显慢于系统引擎。全局值小于每任务值时，实际以全局为准。")
                     }
                 }
                 Section {
