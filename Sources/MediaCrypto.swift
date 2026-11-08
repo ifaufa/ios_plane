@@ -4,30 +4,39 @@ import CommonCrypto
 /// AES-128-CBC 解密（HLS AES-128 使用 CBC + PKCS7）
 enum MediaCrypto {
     static func decrypt(data: Data, key: Data, iv: Data) -> Data? {
-        guard key.count == 16, iv.count == 16 else { return nil }
+        guard key.count == 16, iv.count == 16, !data.isEmpty else { return nil }
+        let capacity = data.count + kCCBlockSizeAES128
+        var output = Data(count: capacity)
         var outLength = 0
-        var out = Data(count: data.count + kCCBlockSizeAES128)
-        let status = out.withUnsafeMutableBytes { outBytes -> CCCryptorStatus in
-            guard let outPtr = outBytes.baseAddress else { return CCCryptorStatus(kCCMemoryFailure) }
-            return data.withUnsafeBytes { inBytes -> CCCryptorStatus in
-                guard let inPtr = inBytes.baseAddress else { return CCCryptorStatus(kCCMemoryFailure) }
-                return key.withUnsafeBytes { keyBytes -> CCCryptorStatus in
+        let inputCount = data.count
+        let keyCount = key.count
+
+        let status: CCCryptorStatus = output.withUnsafeMutableBytes { outBytes -> CCCryptorStatus in
+            data.withUnsafeBytes { inBytes -> CCCryptorStatus in
+                key.withUnsafeBytes { keyBytes -> CCCryptorStatus in
                     iv.withUnsafeBytes { ivBytes -> CCCryptorStatus in
-                        CCCrypt(CCOperation(kCCDecrypt),
-                                CCAlgorithm(kCCAlgorithmAES),
-                                CCOptions(kCCOptionPKCS7Padding),
-                                keyBytes.baseAddress, key.count,
-                                ivBytes.baseAddress,
-                                inPtr, data.count,
-                                outPtr, out.count,
-                                &outLength)
+                        guard let outPtr = outBytes.baseAddress,
+                              let inPtr = inBytes.baseAddress,
+                              let keyPtr = keyBytes.baseAddress,
+                              let ivPtr = ivBytes.baseAddress else {
+                            return CCCryptorStatus(kCCMemoryFailure)
+                        }
+                        return CCCrypt(CCOperation(kCCDecrypt),
+                                       CCAlgorithm(kCCAlgorithmAES),
+                                       CCOptions(kCCOptionPKCS7Padding),
+                                       keyPtr, keyCount,
+                                       ivPtr,
+                                       inPtr, inputCount,
+                                       outPtr, capacity,
+                                       &outLength)
                     }
                 }
             }
         }
-        guard status == kCCSuccess else { return nil }
-        out.removeSubrange(outLength..<out.count)
-        return out
+
+        guard status == kCCSuccess, outLength > 0, outLength <= capacity else { return nil }
+        output.removeSubrange(outLength..<capacity)
+        return output
     }
 
     static func sha256Hex(_ data: Data) -> String {
