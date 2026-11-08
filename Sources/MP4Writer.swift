@@ -121,7 +121,7 @@ final class MP4Writer {
     private func buildMoov() -> Data {
         let videoTimescale: Int32 = 90000
         let videoDurations = durations(for: videoSamples, timescale: videoTimescale, defaultDelta: 3000)
-        let videoDuration = videoDurations.reduce(0, +)
+        let videoDuration = Int64(videoDurations.reduce(0) { $0 + Int($1) })
 
         var audioTimescale: Int32 = 0
         var audioDuration: Int64 = 0
