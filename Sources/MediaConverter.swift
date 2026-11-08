@@ -33,30 +33,49 @@ enum MediaConverter {
             try? fm.removeItem(at: outputURL)
         }
 
-        // 1) 本地合并成一个文件（几秒钟，无网络）
-        let report = try LocalHLS.merge(state: state, dir: dir, container: state.container)
-        let mergedURL = report.url
-        defer { try? fm.removeItem(at: mergedURL) }
-        DiagnosticsLog.write("[转MP4] 合并完成 大小=\(report.bytes)B，开始转封装")
-
-        // 2) 优先做无重编码转封装（保留原始画质，速度最快）
         var produced = false
-        if state.container == "ts" {
+
+        // 1) 首选：直接从 HLS 资产（本地 HTTP）读取压缩样本转封装，不重编码
+        //    iOS 打不开独立的本地 .ts 文件，必须走 HLS 语境
+        do {
+            let playlist = dir.appendingPathComponent("index.m3u8")
+            let httpURL = try LocalHLS.playbackURL(playlistURL: playlist)
+            defer { LocalHLS.stopPlayback() }
+            let start = Date()
+            try await TSRemuxer.remux(source: httpURL, destination: outputURL)
+            produced = true
+            DiagnosticsLog.write(String(format: "[转MP4] 直接从 HLS 转封装成功，耗时 %.1fs", Date().timeIntervalSince(start)))
+        } catch {
+            DiagnosticsLog.write("[转MP4] 直接从 HLS 转封装失败：\(error.localizedDescription)")
+            // 音频编码可能不被 MP4 支持，退一步只保留视频轨
             do {
-                let start = Date()
-                try await TSRemuxer.remux(source: mergedURL, destination: outputURL)
-                let cost = Date().timeIntervalSince(start)
+                let playlist = dir.appendingPathComponent("index.m3u8")
+                let httpURL = try LocalHLS.playbackURL(playlistURL: playlist)
+                defer { LocalHLS.stopPlayback() }
+                try await TSRemuxer.remux(source: httpURL, destination: outputURL, videoOnly: true)
                 produced = true
-                DiagnosticsLog.write(String(format: "[转MP4] 无重编码转封装成功，耗时 %.1fs", cost))
+                DiagnosticsLog.write("[转MP4] 仅视频轨转封装成功（音频编码不被 MP4 支持）")
             } catch {
-                DiagnosticsLog.write("[转MP4] 转封装失败：\(error.localizedDescription)，改用系统导出（可能重编码）")
+                DiagnosticsLog.write("[转MP4] 仅视频轨转封装也失败：\(error.localizedDescription)")
             }
         }
 
-        // 3) 兜底：系统导出（passthrough → 重编码）
+        // 2) 兜底：合并成单文件后再转封装 / 系统导出
         if !produced {
-            try await LocalHLS.exportMP4(from: mergedURL, to: outputURL)
-            produced = true
+            let report = try LocalHLS.merge(state: state, dir: dir, container: state.container)
+            let mergedURL = report.url
+            defer { try? fm.removeItem(at: mergedURL) }
+            DiagnosticsLog.write("[转MP4] 合并完成 大小=\(report.bytes)B，尝试转封装")
+
+            do {
+                try await TSRemuxer.remux(source: mergedURL, destination: outputURL)
+                produced = true
+                DiagnosticsLog.write("[转MP4] 合并后转封装成功")
+            } catch {
+                DiagnosticsLog.write("[转MP4] 合并后转封装失败：\(error.localizedDescription)，改用系统导出")
+                try await LocalHLS.exportMP4(from: mergedURL, to: outputURL)
+                produced = true
+            }
         }
 
         // 4) 校验通过才删分片
