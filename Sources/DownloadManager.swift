@@ -191,8 +191,18 @@ final class DownloadManager: NSObject, ObservableObject {
         let workDir = playlistURL.deletingLastPathComponent()
         let title = pendingTitles[id] ?? state.title
 
-        let asset = LocalHLS.makeAsset(playlistURL: playlistURL)
-        let verify = await LocalHLS.verify(asset: asset)
+        if let issue = Self.validateSegments(state: state, dir: workDir) {
+            DiagnosticsLog.write("[6 分片态校验] 分片自检异常：\(issue)")
+        }
+
+        var verify = LocalHLS.VerifyResult(playable: false, duration: 0, detail: "本地服务启动失败")
+        do {
+            let httpURL = try LocalHLS.playbackURL(playlistURL: playlistURL)
+            verify = await LocalHLS.verify(httpURL)
+            LocalHLS.stopPlayback()
+        } catch {
+            verify = LocalHLS.VerifyResult(playable: false, duration: 0, detail: error.localizedDescription)
+        }
         DiagnosticsLog.write("[6 分片态校验] playable=\(verify.playable) \(verify.detail) 容器=\(state.container) 段数=\(state.durations.count)")
 
         if verify.playable {
@@ -219,13 +229,18 @@ final class DownloadManager: NSObject, ObservableObject {
             }
         }
 
-        do {
-            // 合并前先做头部与数量校验，避免把坏数据拼进去
-            if let issue = Self.validateSegments(state: state, dir: workDir) {
-                DiagnosticsLog.write("[7 合并] 拒绝合并：\(issue)")
-                throw PlaylistError.network(issue)
+        // 分片态无法被系统解析：仅 fMP4（init+fragments）有合并兜底价值，TS 合并产物 iOS 也解不了
+        guard state.container == "mp4" else {
+            DiagnosticsLog.write("[7 放弃] TS 分片无法解析，提示改用系统引擎")
+            update(id) {
+                $0.status = .failed("分片无法被系统解析（\(verify.detail)）。可在设置中切换到系统引擎重新下载该视频。")
             }
-            let report = try LocalHLS.merge(state: state, dir: workDir, container: state.container)
+            startNextIfNeeded()
+            return
+        }
+
+        do {
+            let report = try LocalHLS.merge(state: state, dir: workDir, container: "mp4")
             let sum = report.segmentSizes.reduce(0, +)
             DiagnosticsLog.write("[7 合并] 文件=\(report.url.lastPathComponent) 大小=\(report.bytes)B 分片和=\(sum)B")
             guard report.bytes == sum else {
@@ -237,7 +252,7 @@ final class DownloadManager: NSObject, ObservableObject {
                 throw PlaylistError.network("合并后仍无法解析出音视频轨道")
             }
 
-            let fileName = UUID().uuidString + "." + report.url.pathExtension
+            let fileName = UUID().uuidString + ".mp4"
             let destination = VideoLibrary.assetsDir.appendingPathComponent(fileName)
             if FileManager.default.fileExists(atPath: destination.path) {
                 try FileManager.default.removeItem(at: destination)

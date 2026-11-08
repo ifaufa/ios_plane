@@ -37,7 +37,9 @@ enum MediaConverter {
         // 1) 直接从分片态转封装（不经合并，省一次临时占用）
         var exported = false
         do {
-            let asset = LocalHLS.makeAsset(playlistURL: playlist)
+            let httpURL = try LocalHLS.playbackURL(playlistURL: playlist)
+            defer { LocalHLS.stopPlayback() }
+            let asset = AVURLAsset(url: httpURL)
             try await LocalHLS.exportMP4(from: asset, to: outputURL)
             exported = true
             DiagnosticsLog.write("[转MP4] 直接转封装成功 大小=\((try? outputURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)B")
