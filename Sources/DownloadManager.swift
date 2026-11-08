@@ -194,6 +194,10 @@ final class DownloadManager: NSObject, ObservableObject {
         if let issue = Self.validateSegments(state: state, dir: workDir) {
             DiagnosticsLog.write("[6 分片态校验] 分片自检异常：\(issue)")
         }
+        if state.container == "ts" {
+            let first = workDir.appendingPathComponent(LocalHLS.fileName(index: 0))
+            DiagnosticsLog.write("[6 分片态校验] TS结构 \(TSProbe.describe(fileURL: first))")
+        }
 
         var verify = LocalHLS.VerifyResult(playable: false, duration: 0, detail: "本地服务启动失败")
         do {

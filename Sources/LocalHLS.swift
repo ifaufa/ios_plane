@@ -64,7 +64,12 @@ enum LocalHLS {
     // MARK: - 校验
 
     static func verify(asset: AVURLAsset) async -> VerifyResult {
-        let tracks = (try? await asset.load(.tracks)) ?? []
+        let tracks: [AVAssetTrack]
+        do {
+            tracks = try await asset.load(.tracks)
+        } catch {
+            return VerifyResult(playable: false, duration: 0, detail: "加载失败：\(error.localizedDescription)")
+        }
         guard !tracks.isEmpty else {
             return VerifyResult(playable: false, duration: 0, detail: "未解析出音视频轨道")
         }

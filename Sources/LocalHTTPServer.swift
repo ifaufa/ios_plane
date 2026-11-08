@@ -101,6 +101,7 @@ final class LocalHTTPServer {
             send(status: "400 Bad Request", headers: [:], body: Data(), to: connection)
             return
         }
+        let method = String(parts[0]).uppercased()
         var path = String(parts[1])
         if let query = path.firstIndex(of: "?") { path = String(path[..<query]) }
         path = path.removingPercentEncoding ?? path
@@ -126,8 +127,11 @@ final class LocalHTTPServer {
         }
 
         let contentType = mimeType(for: name)
+        let isHead = method == "HEAD"
+
         if let rangeHeader, let range = parseRange(rangeHeader, total: data.count) {
             let sub = data.subdata(in: range)
+            DiagnosticsLog.write("[本地服务] \(method) \(name) 206 \(sub.count)B")
             send(status: "206 Partial Content",
                  headers: [
                     "Content-Type": contentType,
@@ -135,15 +139,16 @@ final class LocalHTTPServer {
                     "Content-Range": "bytes \(range.lowerBound)-\(range.upperBound - 1)/\(data.count)",
                     "Content-Length": "\(sub.count)"
                  ],
-                 body: sub, to: connection)
+                 body: isHead ? Data() : sub, to: connection)
         } else {
+            DiagnosticsLog.write("[本地服务] \(method) \(name) 200 \(data.count)B")
             send(status: "200 OK",
                  headers: [
                     "Content-Type": contentType,
                     "Accept-Ranges": "bytes",
                     "Content-Length": "\(data.count)"
                  ],
-                 body: data, to: connection)
+                 body: isHead ? Data() : data, to: connection)
         }
     }
 
