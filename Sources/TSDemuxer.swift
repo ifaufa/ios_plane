@@ -327,41 +327,74 @@ final class TSDemuxer {
         return result
     }
 
-    /// 从 SPS 里解析分辨率（Exp-Golomb）
+    /// 从 SPS 里解析分辨率（严格按 H.264 语法，含 high profile 的 chroma 字段）
     static func parseSPSDimensions(_ sps: Data) -> (Int, Int) {
         let bytes = [UInt8](sps)
         guard bytes.count > 4 else { return (0, 0) }
-        var reader = BitReader(bytes: Array(bytes[3...]))
-        _ = reader.readUE() // profile_idc 之后依次解析
-        _ = reader.readUE()
-        _ = reader.readUE()
-        _ = reader.readUE()
-        _ = reader.readUE()
+        let profile = bytes[1]
+        var reader = BitReader(bytes: Array(bytes[4...]))   // 跳过 NAL 头/profile/constraint/level
+
+        _ = reader.readUE()                                 // seq_parameter_set_id
+
+        let highProfiles: Set<UInt8> = [100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135]
+        if highProfiles.contains(profile) {
+            let chromaFormat = reader.readUE()
+            if chromaFormat == 3 { _ = reader.readBits(1) }
+            _ = reader.readUE()                             // bit_depth_luma_minus8
+            _ = reader.readUE()                             // bit_depth_chroma_minus8
+            _ = reader.readBits(1)                          // qpprime_y_zero_transform_bypass
+            if reader.readBits(1) == 1 {                    // seq_scaling_matrix_present
+                let count = chromaFormat == 3 ? 12 : 8
+                for _ in 0..<count {
+                    if reader.readBits(1) == 1 {
+                        reader.skipScalingList(size: 16)
+                        reader.skipScalingList(size: 64)
+                    }
+                }
+            }
+        }
+
+        _ = reader.readUE()                                 // log2_max_frame_num_minus4
         let pocType = reader.readUE()
         if pocType == 0 {
-            _ = reader.readUE()
+            _ = reader.readUE()                             // log2_max_pic_order_cnt_lsb_minus4
         } else if pocType == 1 {
             _ = reader.readBits(1)
             _ = reader.readSE()
             _ = reader.readSE()
-            let count = Int(reader.readUE())
+            let count = reader.readUE()
             for _ in 0..<count { _ = reader.readSE() }
         }
-        _ = reader.readUE()
-        _ = reader.readBits(1)
-        let widthMbs = Int(reader.readUE()) + 1
-        let heightMap = Int(reader.readUE()) + 1
-        _ = reader.readBits(1)
+        _ = reader.readUE()                                 // max_num_ref_frames
+        _ = reader.readBits(1)                              // gaps_in_frame_num_value_allowed
+        let widthMbs = reader.readUE() + 1
+        let heightMapUnits = reader.readUE() + 1
+        let frameMbsOnly = reader.readBits(1)
+        if frameMbsOnly == 0 { _ = reader.readBits(1) }
+        _ = reader.readBits(1)                              // direct_8x8_inference
+
         var cropLeft = 0, cropRight = 0, cropTop = 0, cropBottom = 0
         if reader.readBits(1) == 1 {
-            cropLeft = Int(reader.readUE())
-            cropRight = Int(reader.readUE())
-            cropTop = Int(reader.readUE())
-            cropBottom = Int(reader.readUE())
+            cropLeft = reader.readUE()
+            cropRight = reader.readUE()
+            cropTop = reader.readUE()
+            cropBottom = reader.readUE()
         }
-        let width = widthMbs * 16 - (cropLeft + cropRight) * 2
-        let height = heightMap * 16 - (cropTop + cropBottom) * 2
-        return (width, height)
+
+        let heightMultiplier = 2 - frameMbsOnly
+        var width = widthMbs * 16
+        var height = heightMapUnits * 16 * heightMultiplier
+
+        // 裁剪单位：4:2:0 = 2, 4:2:2 = 2(垂直 1), 4:4:4 = 1
+        let chromaArrayType = 1
+        let subWidthC = chromaArrayType == 3 ? 1 : 2
+        let subHeightC = chromaArrayType == 1 ? 2 : 1
+        let cropUnitX = chromaArrayType == 0 ? 1 : subWidthC
+        let cropUnitY = (chromaArrayType == 0 ? 1 : subHeightC) * heightMultiplier
+
+        width -= (cropLeft + cropRight) * cropUnitX
+        height -= (cropTop + cropBottom) * cropUnitY
+        return (max(0, width), max(0, height))
     }
 }
 
@@ -394,5 +427,18 @@ struct BitReader {
     mutating func readSE() -> Int {
         let value = readUE()
         return value % 2 == 1 ? (value + 1) / 2 : -(value / 2)
+    }
+
+    /// 跳过 scaling list（SPS 里存在时长度不固定，必须按语法跳过）
+    mutating func skipScalingList(size: Int) {
+        var lastScale = 8
+        var nextScale = 8
+        for _ in 0..<size {
+            if nextScale != 0 {
+                let delta = readSE()
+                nextScale = (lastScale + delta + 256) % 256
+            }
+            lastScale = nextScale == 0 ? lastScale : nextScale
+        }
     }
 }
