@@ -192,7 +192,9 @@ final class DownloadManager: NSObject, ObservableObject {
         let title = pendingTitles[id] ?? state.title
 
         let asset = LocalHLS.makeAsset(playlistURL: playlistURL)
-        if let duration = await LocalHLS.verify(asset: asset), duration > 0 {
+        let localDuration = await LocalHLS.verify(asset: asset)
+        DiagnosticsLog.write("[6 分片态校验] 结果=\(localDuration.map { String(format: "%.1f", $0) } ?? "失败") 容器=\(state.container) 段数=\(state.durations.count)")
+        if let duration = localDuration, duration > 0 {
             let folder = UUID().uuidString
             let destination = VideoLibrary.assetsDir.appendingPathComponent(folder, isDirectory: true)
             do {
@@ -218,7 +220,10 @@ final class DownloadManager: NSObject, ObservableObject {
 
         do {
             let merged = try LocalHLS.merge(state: state, dir: workDir, container: state.container)
-            guard let duration = await LocalHLS.verify(merged) else {
+            let mergedSize = (try? merged.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            let mergedDuration = await LocalHLS.verify(merged)
+            DiagnosticsLog.write("[7 合并] 文件=\(merged.lastPathComponent) 大小=\(mergedSize)B 校验=\(mergedDuration.map { String(format: "%.1f", $0) } ?? "失败")")
+            guard let duration = mergedDuration else {
                 throw PlaylistError.network("合并后校验失败，可能源结构异常")
             }
             let fileName = UUID().uuidString + "." + merged.pathExtension

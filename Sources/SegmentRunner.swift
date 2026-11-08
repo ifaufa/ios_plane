@@ -110,7 +110,9 @@ final class SegmentRunner: NSObject, ObservableObject {
         guard jobs[id] == nil else { return }
         Task { @MainActor in
             do {
+                DiagnosticsLog.write("[1 播放列表] 开始解析 \(url.absoluteString)")
                 let playlist = try await PlaylistParser.load(url)
+                DiagnosticsLog.write("[2 结构] 段数=\(playlist.segments.count) 时长=\(String(format: "%.1f", playlist.totalDuration))s 容器=\(playlist.initSegment != nil ? "mp4" : "ts") 有MAP=\(playlist.initSegment != nil) 加密=\(playlist.key != nil) keyURI=\(playlist.key?.uri.absoluteString ?? "-") IV=\(playlist.key?.iv.map { DiagnosticsLog.hexPrefix($0, count: 16) } ?? "-")")
                 guard !playlist.isDRM else { throw PlaylistError.drmProtected }
 
                 let dirName = Self.directoryName(for: id)
@@ -147,6 +149,7 @@ final class SegmentRunner: NSObject, ObservableObject {
                 }
                 pump()
             } catch {
+                DiagnosticsLog.write("[1 播放列表] 失败：\(error.localizedDescription)")
                 onFailure?(id, error.localizedDescription)
             }
         }
@@ -327,6 +330,7 @@ final class SegmentRunner: NSObject, ObservableObject {
 
     private func finish(_ jobId: String) {
         guard let dir = dirs[jobId], let job = jobs[jobId] else { return }
+        DiagnosticsLog.write("[5 分片完成] \(job.completed.count)/\(job.segmentURLs.count) 累计=\(jobBytes[jobId] ?? 0)B 目录=\(dir.lastPathComponent)")
         do {
             let playlistURL = try LocalHLS.writePlaylist(state: job, dir: dir)
             onAllSegmentsDownloaded?(jobId, playlistURL)
@@ -360,8 +364,10 @@ final class SegmentRunner: NSObject, ObservableObject {
             request.setValue(value, forHTTPHeaderField: key)
         }
         let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode), data.count == 16 else {
-            throw PlaylistError.network("获取解密密钥失败")
+        let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+        DiagnosticsLog.write("[3 密钥] 请求 \(keyURI) 状态=\(status) 字节数=\(data.count) 头=\(DiagnosticsLog.hexPrefix(data))")
+        guard (200..<300).contains(status), data.count == 16 else {
+            throw PlaylistError.network("获取解密密钥失败（HTTP \(status)，返回 \(data.count) 字节）")
         }
         keyCache[jobId] = data
         return data
@@ -434,11 +440,18 @@ extension SegmentRunner: URLSessionDownloadDelegate {
                 // 解密与写盘放在后台执行，避免阻塞主线程（并发高时这是主要瓶颈）
                 var data = try Data(contentsOf: staging, options: .mappedIfSafe)
                 try? FileManager.default.removeItem(at: staging)
+                let rawPrefix = DiagnosticsLog.hexPrefix(data)
+                let rawCount = data.count
+
                 if let key {
                     guard let plain = MediaCrypto.decrypt(data: data, key: key, iv: iv) else {
+                        DiagnosticsLog.write("[4 分片] #\(index) 解密失败 原始=\(rawCount)B 头=\(rawPrefix)")
                         throw PlaylistError.network("分片解密失败")
                     }
                     data = plain
+                }
+                if index < 3 {
+                    DiagnosticsLog.write("[4 分片] #\(index) 原始=\(rawCount)B 解前头=\(rawPrefix) 解后=\(data.count)B 头=\(DiagnosticsLog.hexPrefix(data)) key=\(key == nil ? "无" : "有")")
                 }
                 let fileURL = dir.appendingPathComponent(String(format: "seg-%06d.ts", index))
                 try data.write(to: fileURL, options: .atomic)
@@ -494,6 +507,8 @@ private extension SegmentRunner {
         let key = "\(jobId)#\(index)"
         let attempt = (retries[key] ?? 0) + 1
         retries[key] = attempt
+
+        DiagnosticsLog.write("[! 分片失败] #\(index) 第\(attempt)次 \(message)")
 
         if attempt > Self.maxRetry {
             jobs[jobId]?.failure = "分片 \(index + 1) 下载失败：\(message)"

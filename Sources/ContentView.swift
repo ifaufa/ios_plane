@@ -14,6 +14,7 @@ struct ContentView: View {
     @State private var selected: Set<UUID> = []
     @State private var convertingID: UUID?
     @State private var showEngineSettings = false
+    @State private var showDiagnostics = false
 
     var body: some View {
         NavigationStack {
@@ -128,6 +129,9 @@ struct ContentView: View {
                         Button { showEngineSettings = true } label: {
                             Label("下载引擎…", systemImage: "gearshape.2")
                         }
+                        Button { showDiagnostics = true } label: {
+                            Label("诊断日志…", systemImage: "doc.text.magnifyingglass")
+                        }
                         Divider()
                         Button { backup.backup(items: library.items, bookmarks: BookmarkStore.shared.items) } label: {
                             Label("备份到文件…", systemImage: "square.and.arrow.up")
@@ -193,6 +197,9 @@ struct ContentView: View {
             }
             .sheet(isPresented: $showEngineSettings) {
                 EngineSettingsView()
+            }
+            .sheet(isPresented: $showDiagnostics) {
+                DiagnosticsView()
             }
             .fullScreenCover(item: $playing) { item in
                 PlayerView(
