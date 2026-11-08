@@ -20,7 +20,11 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     func application(_ application: UIApplication,
                      handleEventsForBackgroundURLSession identifier: String,
                      completionHandler: @escaping () -> Void) {
-        DownloadManager.backgroundCompletionHandler = completionHandler
+        if identifier.contains("segments") {
+            SegmentRunner.backgroundCompletion = completionHandler
+        } else {
+            DownloadManager.backgroundCompletionHandler = completionHandler
+        }
     }
 
     func application(_ application: UIApplication,

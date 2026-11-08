@@ -145,6 +145,15 @@ final class VideoLibrary: ObservableObject {
         save()
     }
 
+    /// 转 MP4 成功后更新条目
+    func replace(_ item: VideoItem, fileName: String, duration: Double, fileSize: Int64) {
+        guard let index = items.firstIndex(where: { $0.id == item.id }) else { return }
+        items[index].fileName = fileName
+        items[index].duration = duration
+        items[index].fileSize = fileSize
+        save()
+    }
+
     /// 记录播放进度
     func updateProgress(id: UUID, seconds: Double) {
         guard seconds.isFinite, let idx = items.firstIndex(where: { $0.id == id }) else { return }

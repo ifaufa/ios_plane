@@ -36,6 +36,12 @@ final class DownloadManager: NSObject, ObservableObject {
     weak var library: VideoLibrary?
     @Published private(set) var tasks: [DownloadTaskInfo] = []
 
+    /// 下载引擎：默认分片（可断点续传），可在设置里切回系统引擎
+    static let engineKey = "download.engine"
+    var useSegmentEngine: Bool {
+        (UserDefaults.standard.string(forKey: Self.engineKey) ?? "segment") == "segment"
+    }
+
     private var pending: [(url: URL, title: String)] = []
     private var pendingTitles: [String: String] = [:]
     private var durations: [String: Double] = [:]
@@ -51,7 +57,19 @@ final class DownloadManager: NSObject, ObservableObject {
 
     override init() {
         super.init()
+        wireSegmentEngine()
         Task { @MainActor in
+            for job in SegmentRunner.shared.restore() {
+                if !self.tasks.contains(where: { $0.id == job.id }), let url = URL(string: job.sourceURL) {
+                    self.tasks.append(DownloadTaskInfo(
+                        id: job.id,
+                        url: url,
+                        title: job.title,
+                        progress: Double(job.completed.count) / Double(max(1, job.segmentURLs.count)),
+                        status: .paused
+                    ))
+                }
+            }
             let all = (try? await self.session.allTasks) ?? []
             for case let task as AVAssetDownloadTask in all {
                 guard let desc = task.taskDescription, let url = URL(string: desc) else { continue }
@@ -83,6 +101,12 @@ final class DownloadManager: NSObject, ObservableObject {
     }
 
     func pause(_ info: DownloadTaskInfo) {
+        if SegmentRunner.shared.state(of: info.id) != nil {
+            SegmentRunner.shared.pause(info.id)
+            update(info.id) { $0.status = .paused; $0.stalled = false }
+            startNextIfNeeded()
+            return
+        }
         switch info.status {
         case .queued:
             pending.removeAll { $0.url.absoluteString == info.id }
@@ -101,6 +125,12 @@ final class DownloadManager: NSObject, ObservableObject {
         guard info.status == .paused || isFailed(info.status) else { return }
         resumeBaseline[info.id] = info.progress
         update(info.id) { $0.status = .queued; $0.stalled = false }
+
+        if SegmentRunner.shared.state(of: info.id) != nil {
+            SegmentRunner.shared.resume(info.id)
+            update(info.id) { $0.status = .downloading }
+            return
+        }
         if activeCount < maxConcurrent {
             begin(url: info.url, title: info.title)
         } else {
@@ -110,6 +140,7 @@ final class DownloadManager: NSObject, ObservableObject {
 
     /// 彻底移除任务（不写入视频库）
     func remove(_ info: DownloadTaskInfo) {
+        SegmentRunner.shared.remove(info.id)
         pending.removeAll { $0.url.absoluteString == info.id }
         tasks.removeAll { $0.id == info.id }
         pendingTitles.removeValue(forKey: info.id)
@@ -119,16 +150,101 @@ final class DownloadManager: NSObject, ObservableObject {
         startNextIfNeeded()
     }
 
+    // MARK: - 分片引擎回调
+
+    private func wireSegmentEngine() {
+        SegmentRunner.shared.onProgress = { [weak self] id, progress in
+            self?.update(id) { $0.progress = progress }
+        }
+        SegmentRunner.shared.onFailure = { [weak self] id, message in
+            guard let self else { return }
+            self.update(id) { $0.status = .failed(message); $0.stalled = false }
+            self.startNextIfNeeded()
+        }
+        SegmentRunner.shared.onAllSegmentsDownloaded = { [weak self] id, playlistURL in
+            guard let self else { return }
+            Task { await self.finalizeSegmentJob(id: id, playlistURL: playlistURL) }
+        }
+    }
+
+    /// 全部分片下载完成后：优先保留分片态（可播），失败则合并成单文件兜底
+    private func finalizeSegmentJob(id: String, playlistURL: URL) async {
+        guard let state = SegmentRunner.shared.state(of: id) else { return }
+        let workDir = playlistURL.deletingLastPathComponent()
+        let title = pendingTitles[id] ?? state.title
+
+        let asset = LocalHLS.makeAsset(playlistURL: playlistURL)
+        if let duration = await LocalHLS.verify(asset: asset), duration > 0 {
+            let folder = UUID().uuidString
+            let destination = VideoLibrary.assetsDir.appendingPathComponent(folder, isDirectory: true)
+            do {
+                try FileManager.default.moveItem(at: workDir, to: destination)
+                let item = VideoItem(
+                    id: UUID(),
+                    title: title,
+                    sourceURL: id,
+                    fileName: "\(folder)/index.m3u8",
+                    duration: duration,
+                    fileSize: Self.directorySize(destination),
+                    createdAt: Date(),
+                    lastPosition: nil
+                )
+                library?.add(item)
+                SegmentRunner.shared.release(id)
+                finishTask(id: id)
+                return
+            } catch {
+                // 继续走合并兜底
+            }
+        }
+
+        do {
+            let merged = try LocalHLS.merge(state: state, dir: workDir, container: state.container)
+            guard let duration = await LocalHLS.verify(merged) else {
+                throw PlaylistError.network("合并后校验失败，可能源结构异常")
+            }
+            let fileName = UUID().uuidString + "." + merged.pathExtension
+            let destination = VideoLibrary.assetsDir.appendingPathComponent(fileName)
+            if FileManager.default.fileExists(atPath: destination.path) {
+                try FileManager.default.removeItem(at: destination)
+            }
+            try FileManager.default.moveItem(at: merged, to: destination)
+            let size = (try? destination.resourceValues(forKeys: [.fileSizeKey]).fileSize).flatMap { Int64($0) } ?? 0
+            let item = VideoItem(
+                id: UUID(),
+                title: title,
+                sourceURL: id,
+                fileName: fileName,
+                duration: duration,
+                fileSize: size,
+                createdAt: Date(),
+                lastPosition: nil
+            )
+            library?.add(item)
+            SegmentRunner.shared.release(id)
+            finishTask(id: id)
+        } catch {
+            update(id) { $0.status = .failed(error.localizedDescription) }
+            startNextIfNeeded()
+        }
+    }
+
+    private static func directorySize(_ url: URL) -> Int64 {
+        guard let enumerator = FileManager.default.enumerator(atPath: url.path) else { return 0 }
+        var total: Int64 = 0
+        for case let sub as String in enumerator {
+            let fileURL = url.appendingPathComponent(sub)
+            if let size = try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize {
+                total += Int64(size)
+            }
+        }
+        return total
+    }
+
     // MARK: - 队列调度
 
     private func begin(url: URL, title: String) {
         let id = url.absoluteString
-        let asset = Self.makeAsset(url: url)
-        guard let task = session.makeAssetDownloadTask(asset: asset,
-                                                       assetTitle: title,
-                                                       assetArtworkData: nil,
-                                                       options: nil) else { return }
-        task.taskDescription = id
         pendingTitles[id] = title
         progressMarks[id] = CACurrentMediaTime()
 
@@ -138,6 +254,18 @@ final class DownloadManager: NSObject, ObservableObject {
         } else {
             tasks.append(DownloadTaskInfo(id: id, url: url, title: title, progress: 0, status: .downloading))
         }
+
+        if useSegmentEngine {
+            SegmentRunner.shared.start(id: id, title: title, url: url)
+            return
+        }
+
+        let asset = Self.makeAsset(url: url)
+        guard let task = session.makeAssetDownloadTask(asset: asset,
+                                                       assetTitle: title,
+                                                       assetArtworkData: nil,
+                                                       options: nil) else { return }
+        task.taskDescription = id
         task.resume()
     }
 

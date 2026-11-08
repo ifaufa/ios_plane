@@ -161,7 +161,13 @@ struct PlayerView: View {
         initialBrightness = ScreenBrightness.current
         OrientationLock.apply(.landscape)
 
-        let item = AVPlayerItem(url: url)
+        // 分片态（index.m3u8）走本地资源加载器，其余按普通文件播放
+        let item: AVPlayerItem
+        if url.pathExtension.lowercased() == "m3u8" {
+            item = AVPlayerItem(asset: LocalHLS.makeAsset(playlistURL: url))
+        } else {
+            item = AVPlayerItem(url: url)
+        }
         item.audioTimePitchAlgorithm = .timeDomain   // 倍速播放时保持音调不变
         player.replaceCurrentItem(with: item)
         if startPosition > 3 {

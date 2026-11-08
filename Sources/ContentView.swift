@@ -12,6 +12,8 @@ struct ContentView: View {
     @State private var playing: VideoItem?
     @State private var selectionMode = false
     @State private var selected: Set<UUID> = []
+    @State private var convertingID: UUID?
+    @State private var showEngineSettings = false
 
     var body: some View {
         NavigationStack {
@@ -72,6 +74,16 @@ struct ContentView: View {
                                 library.remove(item)
                             }
                         }
+                        .swipeActions(edge: .leading) {
+                            if item.fileName.lowercased().hasSuffix(".m3u8") {
+                                Button {
+                                    convert(item)
+                                } label: {
+                                    Label("转 MP4", systemImage: "arrow.triangle.2.circlepath")
+                                }
+                                .tint(.blue)
+                            }
+                        }
                     }
                 }
             }
@@ -112,6 +124,9 @@ struct ContentView: View {
                         }
                         Button { showHeaders = true } label: {
                             Label("请求头设置…", systemImage: "slider.horizontal.3")
+                        }
+                        Button { showEngineSettings = true } label: {
+                            Label("下载引擎…", systemImage: "gearshape.2")
                         }
                         Divider()
                         Button { backup.backup(items: library.items, bookmarks: BookmarkStore.shared.items) } label: {
@@ -161,6 +176,10 @@ struct ContentView: View {
                     ProgressView(backup.progressText)
                         .padding(24)
                         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+                } else if convertingID != nil {
+                    ProgressView("正在转换 MP4…")
+                        .padding(24)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
                 }
             }
             .sheet(isPresented: $showAdd) {
@@ -171,6 +190,9 @@ struct ContentView: View {
             }
             .sheet(isPresented: $showHeaders) {
                 HeadersSettingsView()
+            }
+            .sheet(isPresented: $showEngineSettings) {
+                EngineSettingsView()
             }
             .fullScreenCover(item: $playing) { item in
                 PlayerView(
@@ -189,6 +211,21 @@ struct ContentView: View {
             selected.remove(item.id)
         } else {
             selected.insert(item.id)
+        }
+    }
+
+    private func convert(_ item: VideoItem) {
+        guard convertingID == nil else { return }
+        convertingID = item.id
+        Task {
+            do {
+                let result = try await MediaConverter.convertToMP4(item: item)
+                library.replace(item, fileName: result.fileName, duration: result.duration, fileSize: result.fileSize)
+                backup.alert = .init(title: "转换完成", message: "已转为 MP4 并校验通过，原分片已删除。")
+            } catch {
+                backup.alert = .init(title: "转换失败", message: error.localizedDescription)
+            }
+            convertingID = nil
         }
     }
 
@@ -297,5 +334,48 @@ private struct LibraryRow: View {
 
     static func formatSize(_ bytes: Int64) -> String {
         ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+}
+
+// MARK: - 下载引擎设置
+
+struct EngineSettingsView: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var segmentEnabled =
+        (UserDefaults.standard.string(forKey: DownloadManager.engineKey) ?? "segment") == "segment"
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("下载引擎") {
+                    Toggle("分片引擎（可断点续传）", isOn: $segmentEnabled)
+                }
+                Section {
+                    Text("""
+                    分片引擎：自行下载 m3u8 分片，暂停或杀进程后可从断点继续；下载完成即可播放，左滑条目可转换为 MP4。
+
+                    系统引擎：使用 AVFoundation 离线下载，稳定性好，但暂停后只能从头重下。
+
+                    改动只对之后新建的任务生效。
+                    """)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle("下载引擎")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("保存") {
+                        UserDefaults.standard.set(segmentEnabled ? "segment" : "system",
+                                                  forKey: DownloadManager.engineKey)
+                        dismiss()
+                    }
+                }
+            }
+        }
     }
 }
