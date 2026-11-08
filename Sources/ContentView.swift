@@ -13,6 +13,7 @@ struct ContentView: View {
     @State private var selectionMode = false
     @State private var selected: Set<UUID> = []
     @State private var convertingID: UUID?
+    @State private var conversionProgress: Double = 0
     @State private var shareItem: ShareItem?
     @State private var showEngineSettings = false
     @State private var showDiagnostics = false
@@ -189,9 +190,14 @@ struct ContentView: View {
                         .padding(24)
                         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
                 } else if convertingID != nil {
-                    ProgressView("正在转换 MP4…")
-                        .padding(24)
-                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+                    VStack(spacing: 10) {
+                        ProgressView(value: min(max(conversionProgress, 0), 1))
+                            .frame(width: 220)
+                        Text("正在转封装 MP4… \(Int(min(max(conversionProgress, 0), 1) * 100))%")
+                            .font(.footnote)
+                    }
+                    .padding(24)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
                 }
             }
             .sheet(isPresented: $showAdd) {
@@ -235,9 +241,12 @@ struct ContentView: View {
     private func convert(_ item: VideoItem) {
         guard convertingID == nil else { return }
         convertingID = item.id
+        conversionProgress = 0
         Task {
             do {
-                let result = try await MediaConverter.convertToMP4(item: item)
+                let result = try await MediaConverter.convertToMP4(item: item) { value in
+                    Task { @MainActor in conversionProgress = value }
+                }
                 library.replace(item, fileName: result.fileName, duration: result.duration, fileSize: result.fileSize)
                 backup.alert = .init(title: "转换完成", message: "已转为 MP4 并校验通过，原分片已删除。")
             } catch {

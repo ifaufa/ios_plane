@@ -1,14 +1,15 @@
 import Foundation
 import AVFoundation
 
-/// 分片态视频转 MP4：合并 → 无重编码转封装（失败才降级重编码）→ 校验 → 删分片
+/// 分片态视频转 MP4：TS 走自研无损转封装；失败再降级系统导出
 enum MediaConverter {
     struct ConversionError: LocalizedError {
         let message: String
         var errorDescription: String? { message }
     }
 
-    static func convertToMP4(item: VideoItem) async throws -> (fileName: String, duration: Double, fileSize: Int64) {
+    static func convertToMP4(item: VideoItem,
+                             onProgress: ((Double) -> Void)? = nil) async throws -> (fileName: String, duration: Double, fileSize: Int64) {
         guard item.fileName.lowercased().hasSuffix(".m3u8") else {
             throw ConversionError(message: "该视频已经是单体文件，无需转换")
         }
@@ -18,7 +19,6 @@ enum MediaConverter {
             throw ConversionError(message: "缺少分片状态文件，无法转换")
         }
 
-        // 空间预检：合并文件 + MP4 需要同时存在
         let dirSize = directorySize(dir)
         if let available = availableCapacity(),
            available < Int64(Double(dirSize) * 1.1) + 200 * 1024 * 1024 {
@@ -35,53 +35,41 @@ enum MediaConverter {
 
         var produced = false
 
-        // 1) 首选：直接从 HLS 资产（本地 HTTP）读取压缩样本转封装，不重编码
-        //    iOS 打不开独立的本地 .ts 文件，必须走 HLS 语境
-        do {
-            let playlist = dir.appendingPathComponent("index.m3u8")
-            let httpURL = try LocalHLS.playbackURL(playlistURL: playlist)
-            defer { LocalHLS.stopPlayback() }
-            let start = Date()
-            try await TSRemuxer.remux(source: httpURL, destination: outputURL)
-            produced = true
-            DiagnosticsLog.write(String(format: "[转MP4] 直接从 HLS 转封装成功，耗时 %.1fs", Date().timeIntervalSince(start)))
-        } catch {
-            DiagnosticsLog.write("[转MP4] 直接从 HLS 转封装失败：\(error.localizedDescription)")
-            // 音频编码可能不被 MP4 支持，退一步只保留视频轨
+        // 1) TS：自研无损转封装（不依赖 AVFoundation 解 TS）
+        if state.container == "ts" {
+            do {
+                let start = Date()
+                try await TSRemuxPipeline.remux(state: state, dir: dir, destination: outputURL, progress: onProgress)
+                produced = true
+                DiagnosticsLog.write(String(format: "[转MP4] 自研转封装成功，耗时 %.1fs", Date().timeIntervalSince(start)))
+            } catch {
+                DiagnosticsLog.write("[转MP4] 自研转封装失败：\(error.localizedDescription)")
+            }
+        }
+
+        // 2) fMP4 或自研失败：走 AVFoundation（HLS 资产）
+        if !produced {
             do {
                 let playlist = dir.appendingPathComponent("index.m3u8")
                 let httpURL = try LocalHLS.playbackURL(playlistURL: playlist)
                 defer { LocalHLS.stopPlayback() }
-                try await TSRemuxer.remux(source: httpURL, destination: outputURL, videoOnly: true)
+                try await TSRemuxer.remux(source: httpURL, destination: outputURL)
                 produced = true
-                DiagnosticsLog.write("[转MP4] 仅视频轨转封装成功（音频编码不被 MP4 支持）")
+                DiagnosticsLog.write("[转MP4] AVFoundation 转封装成功")
             } catch {
-                DiagnosticsLog.write("[转MP4] 仅视频轨转封装也失败：\(error.localizedDescription)")
+                DiagnosticsLog.write("[转MP4] AVFoundation 转封装失败：\(error.localizedDescription)")
             }
         }
 
-        // 2) 兜底：合并成单文件后再转封装 / 系统导出
+        // 3) 最后兜底：合并后用系统导出（可能重编码）
         if !produced {
             let report = try LocalHLS.merge(state: state, dir: dir, container: state.container)
             let mergedURL = report.url
             defer { try? fm.removeItem(at: mergedURL) }
-            DiagnosticsLog.write("[转MP4] 合并完成 大小=\(report.bytes)B，尝试转封装")
-
-            do {
-                // 本地 TS 必须显式声明 video/mp2t，否则 AVFoundation 打不开
-                let tsAsset = try LocalHLS.tsAsset(mergedURL)
-                defer { LocalHLS.stopPlayback() }
-                try await TSRemuxer.remux(asset: tsAsset, destination: outputURL)
-                produced = true
-                DiagnosticsLog.write("[转MP4] 合并后以 mp2t 转封装成功")
-            } catch {
-                DiagnosticsLog.write("[转MP4] 合并后转封装失败：\(error.localizedDescription)，改用系统导出")
-                try await LocalHLS.exportMP4(from: mergedURL, to: outputURL)
-                produced = true
-            }
+            try await LocalHLS.exportMP4(from: mergedURL, to: outputURL)
+            produced = true
         }
 
-        // 4) 校验通过才删分片
         let verify = await LocalHLS.verify(outputURL)
         guard verify.playable else {
             try? fm.removeItem(at: outputURL)
