@@ -34,6 +34,8 @@ final class TSDemuxer {
 
     private var sps: Data?
     private var pps: Data?
+    private var storedVideoInfo: VideoInfo?
+    private var storedAudioInfo: AudioInfo?
     private var videoInfoEmitted = false
     private var audioInfoEmitted = false
     private var audioConfig: Data?
@@ -41,6 +43,9 @@ final class TSDemuxer {
     private var audioChannels = 0
 
     // MARK: - 输入
+
+    func videoInfo() -> VideoInfo? { storedVideoInfo }
+    func audioInfo() -> AudioInfo? { storedAudioInfo }
 
     func consume(_ data: Data) {
         buffer.append(data)
@@ -251,7 +256,9 @@ final class TSDemuxer {
         let profile = sps[sps.startIndex + 1]
         let level = sps[sps.startIndex + 3]
         let (w, h) = Self.parseSPSDimensions(sps)
-        onInfo?(VideoInfo(width: w, height: h, sps: sps, pps: pps, profileLevel: (profile, level)), nil)
+        let info = VideoInfo(width: w, height: h, sps: sps, pps: pps, profileLevel: (profile, level))
+        storedVideoInfo = info
+        onInfo?(info, nil)
     }
 
     // MARK: - 音频
@@ -286,7 +293,9 @@ final class TSDemuxer {
                 audioConfig = config
                 if !audioInfoEmitted {
                     audioInfoEmitted = true
-                    onInfo?(nil, AudioInfo(sampleRate: audioRate, channels: max(1, channelConfig), audioSpecificConfig: config))
+                    let info = AudioInfo(sampleRate: audioRate, channels: max(1, channelConfig), audioSpecificConfig: config)
+                    storedAudioInfo = info
+                    onInfo?(nil, info)
                 }
             }
 

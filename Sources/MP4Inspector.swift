@@ -1,133 +1,99 @@
 import Foundation
 
-/// 自检 MP4 结构：顶层 box、moov 子 box、以及表格条目数
+/// MP4 结构自检：按文件真实大小遍历顶层 box，并展开 moov 到 stbl 各表
 enum MP4Inspector {
     static func describe(_ url: URL) -> String {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return "无法打开文件" }
         defer { try? handle.close() }
         guard let fileSize = try? handle.seekToEnd() else { return "无法读取大小" }
-        try? handle.seek(toOffset: 0)
-        guard let head = try? handle.read(upToCount: Int(min(fileSize, 9_000_000))) else { return "读取失败" }
 
-        var offset = 0
+        var offset: UInt64 = 0
         var parts: [String] = []
-        while offset + 8 <= head.count {
-            let size = Int(head.u32(at: offset))
-            let type = head.ascii(at: offset + 4, length: 4)
-            var boxSize = size
-            var headerLength = 8
-            if size == 1 {
-                guard offset + 16 <= head.count else { break }
-                boxSize = Int(head.u64(at: offset + 8))
+
+        while offset + 8 <= fileSize {
+            try? handle.seek(toOffset: offset)
+            guard let header = try? handle.read(upToCount: 16), header.count >= 8 else { break }
+            var size = UInt64(header.u32(at: 0))
+            let type = header.ascii(at: 4, length: 4)
+            var headerLength: UInt64 = 8
+            if size == 1, header.count >= 16 {
+                size = header.u64(at: 8)
                 headerLength = 16
             } else if size == 0 {
-                boxSize = head.count - offset
+                size = fileSize - offset
             }
-            guard boxSize >= headerLength, offset + boxSize <= head.count else {
-                parts.append("\(type)(size=\(boxSize) 越界)")
+            guard size >= headerLength, offset + size <= fileSize else {
+                parts.append("\(type)(bad size=\(size) at \(offset))")
                 break
             }
             if type == "moov" {
-                parts.append("moov[\(moovChildren(head, start: offset + headerLength, size: boxSize))]")
-            } else if type == "mdat" {
-                parts.append("mdat(size=\(boxSize))")
+                try? handle.seek(toOffset: offset + headerLength)
+                let body = (try? handle.read(upToCount: Int(min(size - headerLength, 4_000_000)))) ?? Data()
+                parts.append("moov[\(dump(body, limit: 4))]")
             } else {
-                parts.append("\(type)(size=\(boxSize))")
+                parts.append("\(type)(\(size)B)")
             }
-            offset += boxSize
+            offset += size
         }
-
-        let declaredEnd = offset
-        return "文件=\(fileSize)B box总长=\(declaredEnd)B \(parts.joined(separator: " "))"
+        return "文件=\(fileSize)B 结束于=\(offset)B \(parts.joined(separator: " "))"
     }
 
-    private static func moovChildren(_ data: Data, start: Int, size: Int) -> String {
-        var offset = start
-        let end = start + size
+    /// 渐进展开：已知容器 box 递归，叶子只显示大小
+    private static func dump(_ data: Data, limit: Int) -> String {
+        var offset = 0
         var names: [String] = []
-        while offset + 8 <= end {
-            let childSize = Int(data.u64(at: offset))
+        while offset + 8 <= data.count {
+            let size = Int(data.u32(at: offset))
             let type = data.ascii(at: offset + 4, length: 4)
-            guard childSize >= 8, offset + childSize <= end else {
+            guard size >= 8, offset + size <= data.count else {
                 names.append("\(type)(bad)")
                 break
             }
-            if type == "trak" {
-                names.append("trak{\(trakChildren(data, start: offset + 8, size: childSize - 8))}")
+            let child = data.subdata(in: (offset + 8)..<(offset + size))
+            if ["trak", "mdia", "minf", "stbl"].contains(type) {
+                names.append("\(type){\(dump(child, limit: limit - 1))}")
+            } else if type == "stsd" {
+                names.append("stsd{\(dumpSampleEntry(child))}")
+            } else if type == "stsz" {
+                let count = child.count >= 12 ? Int(child.u32(at: 8)) : -1
+                names.append("stsz(\(count))")
+            } else if type == "stco" || type == "co64" {
+                let count = child.count >= 4 ? Int(child.u32(at: 0)) : -1
+                names.append("\(type)(\(count))")
+            } else if type == "stts" || type == "ctts" || type == "stsc" || type == "stss" {
+                let count = child.count >= 4 ? Int(child.u32(at: 0)) : -1
+                names.append("\(type)(\(count))")
             } else {
-                names.append("\(type)")
+                names.append("\(type)(\(size))")
             }
-            offset += childSize
+            offset += size
         }
         return names.joined(separator: ",")
     }
 
-    private static func trakChildren(_ data: Data, start: Int, size: Int) -> String {
-        var offset = start
-        let end = start + size
-        var names: [String] = []
-        while offset + 8 <= end {
-            let childSize = Int(data.u64(at: offset))
-            let type = data.ascii(at: offset + 4, length: 4)
-            guard childSize >= 8, offset + childSize <= end else { break }
-            if type == "mdia" {
-                names.append("mdia{\(mdiaChildren(data, start: offset + 8, size: childSize - 8))}")
-            } else {
-                names.append("\(type)")
+    private static func dumpSampleEntry(_ data: Data) -> String {
+        // stsd: version/flags(4) + entry_count(4) + entry
+        guard data.count >= 8 else { return "empty" }
+        let count = Int(data.u32(at: 4))
+        guard count > 0, data.count >= 16 else { return "count=\(count)" }
+        let entrySize = Int(data.u32(at: 8))
+        let entryType = data.ascii(at: 12, length: 4)
+        var inner: [String] = []
+        if entrySize >= 16, 8 + entrySize <= data.count {
+            var cursor = 16 + 78
+            let end = min(data.count, 8 + entrySize)
+            while cursor + 8 <= end {
+                let size = Int(data.u32(at: cursor))
+                let type = data.ascii(at: cursor + 4, length: 4)
+                guard size >= 8, cursor + size <= end else {
+                    inner.append("\(type)(bad)")
+                    break
+                }
+                inner.append("\(type)(\(size))")
+                cursor += size
             }
-            offset += childSize
         }
-        return names.joined(separator: ",")
-    }
-
-    private static func mdiaChildren(_ data: Data, start: Int, size: Int) -> String {
-        var offset = start
-        let end = start + size
-        var names: [String] = []
-        while offset + 8 <= end {
-            let childSize = Int(data.u64(at: offset))
-            let type = data.ascii(at: offset + 4, length: 4)
-            guard childSize >= 8, offset + childSize <= end else { break }
-            if type == "minf" {
-                names.append("minf{\(minfChildren(data, start: offset + 8, size: childSize - 8))}")
-            } else {
-                names.append("\(type)")
-            }
-            offset += childSize
-        }
-        return names.joined(separator: ",")
-    }
-
-    private static func minfChildren(_ data: Data, start: Int, size: Int) -> String {
-        var offset = start
-        let end = start + size
-        var names: [String] = []
-        while offset + 8 <= end {
-            let childSize = Int(data.u64(at: offset))
-            let type = data.ascii(at: offset + 4, length: 4)
-            guard childSize >= 8, offset + childSize <= end else { break }
-            if type == "stbl" {
-                names.append("stbl{\(stblChildren(data, start: offset + 8, size: childSize - 8))}")
-            } else {
-                names.append("\(type)")
-            }
-            offset += childSize
-        }
-        return names.joined(separator: ",")
-    }
-
-    private static func stblChildren(_ data: Data, start: Int, size: Int) -> String {
-        var offset = start
-        let end = start + size
-        var names: [String] = []
-        while offset + 8 <= end {
-            let childSize = Int(data.u64(at: offset))
-            let type = data.ascii(at: offset + 4, length: 4)
-            guard childSize >= 8, offset + childSize <= end else { break }
-            names.append("\(type):\(childSize)")
-            offset += childSize
-        }
-        return names.joined(separator: ",")
+        return "count=\(count) \(entryType) size=\(entrySize) [\(inner.joined(separator: ","))]"
     }
 }
 

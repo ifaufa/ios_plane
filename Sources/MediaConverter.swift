@@ -39,11 +39,20 @@ enum MediaConverter {
         if state.container == "ts" {
             do {
                 let start = Date()
+                try await AVRemuxPipeline.remux(state: state, dir: dir, destination: outputURL, onProgress: onProgress)
+                produced = true
+                DiagnosticsLog.write(String(format: "[转MP4] TS→MP4（AVAssetWriter）成功，耗时 %.1fs", Date().timeIntervalSince(start)))
+            } catch {
+                DiagnosticsLog.write("[转MP4] AVAssetWriter 封装失败：\(error.localizedDescription)")
+            }
+        }
+        if !produced {
+            do {
                 try await TSRemuxPipeline.remux(state: state, dir: dir, destination: outputURL, progress: onProgress)
                 produced = true
-                DiagnosticsLog.write(String(format: "[转MP4] 自研转封装成功，耗时 %.1fs", Date().timeIntervalSince(start)))
+                DiagnosticsLog.write("[转MP4] 手写封装成功")
             } catch {
-                DiagnosticsLog.write("[转MP4] 自研转封装失败：\(error.localizedDescription)")
+                DiagnosticsLog.write("[转MP4] 手写封装失败：\(error.localizedDescription)")
             }
         }
 
