@@ -173,24 +173,55 @@ enum LocalHLS {
 
     // MARK: - 转 MP4
 
+    struct ExportFailure: LocalizedError {
+        let message: String
+        var errorDescription: String? { message }
+    }
+
+    /// 先尝试不重编码导出；失败后自动降级为重编码（TS 源 passthrough 常报 Operation Stopped）
     static func exportMP4(from asset: AVURLAsset, to destination: URL) async throws {
         let fm = FileManager.default
-        if fm.fileExists(atPath: destination.path) {
-            try fm.removeItem(at: destination)
-        }
-        guard let session = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetPassthrough) else {
-            throw PlaylistError.network("无法创建导出会话")
-        }
-        session.outputURL = destination
-        session.outputFileType = .mp4
-        session.shouldOptimizeForNetworkUse = true
+        let presets = [AVAssetExportPresetPassthrough, AVAssetExportPresetHighestQuality]
+        var lastMessage = "未知错误"
 
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            session.exportAsynchronously { continuation.resume() }
+        for preset in presets {
+            if fm.fileExists(atPath: destination.path) {
+                try? fm.removeItem(at: destination)
+            }
+            guard let session = AVAssetExportSession(asset: asset, presetName: preset) else {
+                lastMessage = "无法创建导出会话（\(preset)）"
+                continue
+            }
+            session.outputURL = destination
+            session.outputFileType = .mp4
+            session.shouldOptimizeForNetworkUse = true
+
+            let progressTask = Task { @MainActor in
+                var lastLogged = -1
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                    let percent = Int(session.progress * 100)
+                    if percent >= lastLogged + 15 || percent >= 100 {
+                        lastLogged = percent
+                        DiagnosticsLog.write("[转MP4] \(preset) 进度 \(percent)%")
+                    }
+                }
+            }
+
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                session.exportAsynchronously { continuation.resume() }
+            }
+            progressTask.cancel()
+
+            if session.status == .completed {
+                DiagnosticsLog.write("[转MP4] 使用 \(preset) 导出成功")
+                return
+            }
+            lastMessage = session.error?.localizedDescription ?? "导出失败"
+            DiagnosticsLog.write("[转MP4] \(preset) 失败：\(lastMessage)")
         }
-        guard session.status == .completed else {
-            throw PlaylistError.network(session.error?.localizedDescription ?? "转 MP4 失败")
-        }
+
+        throw ExportFailure(message: "导出失败：\(lastMessage)")
     }
 
     static func exportMP4(from fileURL: URL, to destination: URL) async throws {
