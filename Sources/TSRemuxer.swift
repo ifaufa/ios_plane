@@ -17,9 +17,10 @@ enum TSRemuxer {
         }
 
         let asset = AVURLAsset(url: source)
-        let tracks = try await asset.load(.tracks)
+        let tracks = await loadTracks(asset: asset)
         let videoTracks = tracks.filter { $0.mediaType == .video }
         let audioTracks = tracks.filter { $0.mediaType == .audio }
+        DiagnosticsLog.write("[转MP4] 轨道解析 视频=\(videoTracks.count) 音频=\(audioTracks.count)")
         guard !videoTracks.isEmpty || !audioTracks.isEmpty else {
             throw RemuxError(message: "源文件里没有可用的音视频轨道")
         }
@@ -121,6 +122,39 @@ enum TSRemuxer {
             try? fm.removeItem(at: destination)
             throw RemuxError(message: writer.error?.localizedDescription ?? "写出文件失败")
         }
+    }
+
+    /// HLS 资产用 load(.tracks) 会返回空数组，必须先用 AVPlayerItem 预热到 readyToPlay
+    private static func loadTracks(asset: AVURLAsset, timeout: TimeInterval = 15) async -> [AVAssetTrack] {
+        if let tracks = try? await asset.load(.tracks), !tracks.isEmpty {
+            return tracks
+        }
+
+        let item = AVPlayerItem(asset: asset)
+        let player = AVPlayer(playerItem: item)
+        let deadline = Date().addingTimeInterval(timeout)
+
+        while Date() < deadline {
+            if item.status == .readyToPlay {
+                let tracks = item.tracks.compactMap { $0.assetTrack }
+                player.pause()
+                if !tracks.isEmpty { return tracks }
+                break
+            }
+            if item.status == .failed {
+                DiagnosticsLog.write("[转MP4] 预热失败：\(item.error?.localizedDescription ?? "未知")")
+                player.pause()
+                return []
+            }
+            try? await Task.sleep(nanoseconds: 150_000_000)
+        }
+        player.pause()
+
+        // 预热后仍未拿到，尝试再次同步读取
+        if let tracks = try? await asset.load(.tracks), !tracks.isEmpty {
+            return tracks
+        }
+        return []
     }
 
     /// 把样本时间从"源起点"平移到 0，避免成片开头出现空白
