@@ -202,7 +202,9 @@ final class DownloadManager: NSObject, ObservableObject {
         var verify = LocalHLS.VerifyResult(playable: false, duration: 0, detail: "本地服务启动失败")
         do {
             let httpURL = try LocalHLS.playbackURL(playlistURL: playlistURL)
-            verify = await LocalHLS.verify(httpURL)
+            let check = await LocalHLS.selfCheck(httpURL)
+            DiagnosticsLog.write("[本地服务自检] \(check)")
+            verify = await LocalHLS.verifyByPlayer(httpURL)
             LocalHLS.stopPlayback()
         } catch {
             verify = LocalHLS.VerifyResult(playable: false, duration: 0, detail: error.localizedDescription)

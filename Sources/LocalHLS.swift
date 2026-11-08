@@ -86,6 +86,47 @@ enum LocalHLS {
         await verify(asset: AVURLAsset(url: url))
     }
 
+    /// 用 AVPlayerItem 的真实加载状态判断可播性（load(.tracks) 对 HLS 会直接返回空数组）
+    static func verifyByPlayer(_ url: URL, timeout: TimeInterval = 12) async -> VerifyResult {
+        let asset = AVURLAsset(url: url)
+        let item = AVPlayerItem(asset: asset)
+        let player = AVPlayer(playerItem: item)
+
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            switch item.status {
+            case .readyToPlay:
+                let duration = item.duration.seconds
+                let value = duration.isFinite && duration > 0 ? duration : 0
+                player.pause()
+                return VerifyResult(playable: true, duration: value,
+                                    detail: "readyToPlay，时长 \(String(format: "%.1f", value))s")
+            case .failed:
+                let message = item.error?.localizedDescription ?? "未知错误"
+                let log = item.errorLog()?.events.last?.errorComment ?? ""
+                return VerifyResult(playable: false, duration: 0,
+                                    detail: "加载失败：\(message) \(log)")
+            default:
+                try? await Task.sleep(nanoseconds: 150_000_000)
+            }
+        }
+        player.pause()
+        return VerifyResult(playable: false, duration: 0, detail: "超时未就绪（\(Int(timeout))s）")
+    }
+
+    /// 自检：用 URLSession 直接请求本地服务，判断服务本身是否正常
+    static func selfCheck(_ url: URL) async -> String {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 5
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+            return "HTTP \(status) \(data.count)B"
+        } catch {
+            return "请求失败：\(error.localizedDescription)"
+        }
+    }
+
     // MARK: - 合并（仅用于转 MP4 兜底）
 
     static func merge(state: SegmentJobState, dir: URL, container: String) throws -> MergeReport {
