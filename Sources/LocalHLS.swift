@@ -61,6 +61,24 @@ enum LocalHLS {
         LocalHTTPServer.shared.stop()
     }
 
+    /// 把单个文件通过本地 HTTP 提供（用于以 video/mp2t 打开本地 TS）
+    static func fileURL(_ file: URL) throws -> URL {
+        let dir = file.deletingLastPathComponent()
+        let port = try LocalHTTPServer.shared.start(root: dir)
+        guard let url = URL(string: "http://127.0.0.1:\(port)/\(file.lastPathComponent)") else {
+            throw PlaylistError.network("本地文件地址构造失败")
+        }
+        return url
+    }
+
+    /// MPEG-TS 资产：必须显式声明 MIME，否则 AVFoundation 无法识别
+    static func tsAsset(_ file: URL) throws -> AVURLAsset {
+        let url = try fileURL(file)
+        return AVURLAsset(url: url, options: [
+            "AVURLAssetOutOfBandMIMETypeKey": "video/mp2t"
+        ])
+    }
+
     // MARK: - 校验
 
     static func verify(asset: AVURLAsset) async -> VerifyResult {

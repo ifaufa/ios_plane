@@ -11,12 +11,14 @@ enum TSRemuxer {
 
     /// 只搬运 H.264/HEVC 视频 + AAC 音频的压缩样本，不重新编码
     static func remux(source: URL, destination: URL, videoOnly: Bool = false, timeout: TimeInterval = 300) async throws {
+        try await remux(asset: AVURLAsset(url: source), destination: destination, videoOnly: videoOnly, timeout: timeout)
+    }
+
+    static func remux(asset: AVURLAsset, destination: URL, videoOnly: Bool = false, timeout: TimeInterval = 300) async throws {
         let fm = FileManager.default
         if fm.fileExists(atPath: destination.path) {
             try fm.removeItem(at: destination)
         }
-
-        let asset = AVURLAsset(url: source)
         let tracks = await loadTracks(asset: asset)
         let videoTracks = tracks.filter { $0.mediaType == .video }
         let audioTracks = tracks.filter { $0.mediaType == .audio }

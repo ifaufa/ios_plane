@@ -68,9 +68,12 @@ enum MediaConverter {
             DiagnosticsLog.write("[转MP4] 合并完成 大小=\(report.bytes)B，尝试转封装")
 
             do {
-                try await TSRemuxer.remux(source: mergedURL, destination: outputURL)
+                // 本地 TS 必须显式声明 video/mp2t，否则 AVFoundation 打不开
+                let tsAsset = try LocalHLS.tsAsset(mergedURL)
+                defer { LocalHLS.stopPlayback() }
+                try await TSRemuxer.remux(asset: tsAsset, destination: outputURL)
                 produced = true
-                DiagnosticsLog.write("[转MP4] 合并后转封装成功")
+                DiagnosticsLog.write("[转MP4] 合并后以 mp2t 转封装成功")
             } catch {
                 DiagnosticsLog.write("[转MP4] 合并后转封装失败：\(error.localizedDescription)，改用系统导出")
                 try await LocalHLS.exportMP4(from: mergedURL, to: outputURL)
