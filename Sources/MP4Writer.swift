@@ -100,8 +100,8 @@ final class MP4Writer {
         guard !videoSamples.isEmpty else {
             throw WriteError.io("没有采集到视频帧")
         }
-        // 回填 mdat 长度
-        let totalMdat = writeOffset - mdatHeaderStart + 8
+        // 回填 mdat 长度：64 位 box 的总长已包含 4+4+8 字节头部
+        let totalMdat = writeOffset - mdatHeaderStart
         try handle.seek(toOffset: mdatHeaderStart + 8)
         try handle.write(contentsOf: UInt64(totalMdat).be)
         try handle.seekToEnd()
@@ -109,6 +109,9 @@ final class MP4Writer {
         let moov = buildMoov()
         try handle.write(contentsOf: moov)
         try? handle.close()
+
+        let fileSize = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.intValue ?? 0
+        DiagnosticsLog.write("[转MP4] 写出完成 视频样本=\(videoSamples.count) 音频样本=\(audioSamples.count) mdat=\(totalMdat)B 文件=\(fileSize)B moov=\(moov.count)B")
     }
 
     func abort() {
