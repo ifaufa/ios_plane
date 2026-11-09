@@ -32,6 +32,11 @@ final class TSDemuxer {
     private var pendingPTS: Int64 = -1
     private var pendingDTS: Int64 = -1
 
+    private var multiAUCount = 0
+    /// 已学习到的帧间隔（90kHz ticks），用于同 PES 多帧的 DTS 递推
+    private var frameStep: Int64 = 3750
+    private var lastPESDTS: Int64 = -1
+    private var lastPESUnits = 0
     private var sps: Data?
     private var pps: Data?
     private var storedVideoInfo: VideoInfo?
@@ -156,6 +161,11 @@ final class TSDemuxer {
                     videoPES.removeAll()
                 }
                 let parsed = parsePESHeader(payload)
+                // 用相邻 PES 的 DTS 差与上一 PES 的帧数，学习帧间隔
+                if lastPESDTS >= 0, parsed.dts > lastPESDTS, lastPESUnits > 0 {
+                    frameStep = max(1, (parsed.dts - lastPESDTS) / Int64(lastPESUnits))
+                }
+                lastPESDTS = parsed.dts
                 pendingPTS = parsed.pts
                 pendingDTS = parsed.dts
                 videoPES.append(parsed.payload)
@@ -220,9 +230,13 @@ final class TSDemuxer {
         let nals = Self.splitNALUnits(pes)
         guard !nals.isEmpty else { return }
 
-        var hasVCL = false
-        var isKey = false
-        var avcc = Data()
+        // 按 VCL NAL 切分访问单元：一个 VCL = 一帧
+        // （编码器可能把多个帧打包进同一个 PES，合并成一个样本会导致 AVAssetWriter 判非法）
+        var units: [[Data]] = []
+        var unitKeys: [Bool] = []
+        var current: [Data] = []
+        var currentHasVCL = false
+        var currentIsKey = false
 
         for nal in nals {
             guard let first = nal.first else { continue }
@@ -236,18 +250,45 @@ final class TSDemuxer {
                 continue
             }
             if type == 9 { continue } // AUD 丢弃
-            if type == 5 { isKey = true }
-            if type == 1 || type == 5 { hasVCL = true }
-
-            var length = UInt32(nal.count).bigEndian
-            withUnsafeBytes(of: &length) { avcc.append(contentsOf: $0) }
-            avcc.append(nal)
+            if type == 5 || type == 1 {
+                if currentHasVCL {
+                    units.append(current)
+                    unitKeys.append(currentIsKey)
+                    current = []
+                    currentHasVCL = false
+                    currentIsKey = false
+                }
+                if type == 5 { currentIsKey = true }
+                currentHasVCL = true
+            }
+            current.append(nal)
+        }
+        if currentHasVCL {
+            units.append(current)
+            unitKeys.append(currentIsKey)
         }
 
         emitVideoInfoIfNeeded()
+        guard !units.isEmpty else { return }
 
-        guard hasVCL, !avcc.isEmpty else { return }
-        onVideoFrame?(avcc, pts, dts, isKey)
+        if units.count > 1 {
+            multiAUCount += units.count - 1
+            DiagnosticsLog.write("[转MP4] PES 含多帧（\(units.count) 帧，累计拆分 \(multiAUCount)）")
+        }
+        lastPESUnits = units.count
+
+        // 同一 PES 拆出的多帧：DTS/PTS 按已学习到的帧间隔递推
+        for (index, unit) in units.enumerated() {
+            var avcc = Data()
+            for nal in unit {
+                var length = UInt32(nal.count).bigEndian
+                withUnsafeBytes(of: &length) { avcc.append(contentsOf: $0) }
+                avcc.append(nal)
+            }
+            let auDTS = (dts >= 0 ? dts : max(0, pts)) + Int64(index) * frameStep
+            let auPTS = max((pts >= 0 ? pts : auDTS), auDTS) + Int64(index) * frameStep
+            onVideoFrame?(avcc, auPTS, auDTS, unitKeys[index])
+        }
     }
 
     private func emitVideoInfoIfNeeded() {
