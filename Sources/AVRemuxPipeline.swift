@@ -82,7 +82,7 @@ enum AVRemuxPipeline {
             }
 
             let newWriter = try AVAssetWriter(outputURL: destination, fileType: .mp4)
-            newWriter.shouldOptimizeForNetworkUse = true
+            newWriter.shouldOptimizeForNetworkUse = false
 
             let vInput = AVAssetWriterInput(mediaType: .video, outputSettings: nil, sourceFormatHint: videoDesc)
             vInput.expectsMediaDataInRealTime = false
@@ -154,7 +154,7 @@ enum AVRemuxPipeline {
             }
             if !input.append(buffer) {
                 let error = writer.error as NSError?
-                failure = "追加视频样本失败：\(error?.domain ?? "-") \(error?.code ?? 0) \(error?.localizedDescription ?? "")"
+                failure = "追加视频样本失败（第 \(videoFrames + 1) 帧，PTS=\(sample.pts) DTS=\(sample.dts) 大小=\(sample.data.count)B）：\(error?.domain ?? "-") \(error?.code ?? 0) \(error?.localizedDescription ?? "")"
             }
             videoFrames += 1
         }
