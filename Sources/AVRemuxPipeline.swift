@@ -3,33 +3,65 @@ import AVFoundation
 import CoreMedia
 
 /// 自研 TS 解复用 → AVAssetWriter 封装 MP4
-/// 关键设计：
-/// 1) 显示顺序由 slice_type（I/P/B）推导，不依赖可疑的 PES 时间戳
-/// 2) writer 等到"视频+音频参数都就绪"再创建，保证音轨存在
-/// 3) 所有就绪等待有上限，避免多轨死锁；不在单线程做大批量冲刷
+/// 写入模型：解复用线程投递到有界队列，writer 通过 requestMediaDataWhenReady 主动取样本
+/// （彻底避免"按帧等待 isReadyForMoreMediaData"导致的极慢与死锁）
 enum AVRemuxPipeline {
     struct RemuxError: LocalizedError {
         let message: String
         var errorDescription: String? { message }
     }
 
-    private struct Frame {
+    private struct VideoItem {
         let data: Data
-        let isKey: Bool
         let pts: Int64
+        let dts: Int64
+        let isKey: Bool
     }
 
-    static func remux(state: SegmentJobState,
-                      dir: URL,
-                      destination: URL,
-                      onProgress: ((Double) -> Void)? = nil,
-                      videoOnly: Bool = false) async throws {
-        try await Task.detached(priority: .userInitiated) {
-            try run(state: state, dir: dir, destination: destination, progress: onProgress, videoOnly: videoOnly)
-        }.value
+    private final class ItemQueue<Element> {
+        private var items: [Element] = []
+        private let condition = NSCondition()
+        private let capacity: Int
+        private var finished = false
+
+        init(capacity: Int) { self.capacity = capacity }
+
+        func push(_ item: Element) {
+            condition.lock()
+            while items.count >= capacity, !finished {
+                condition.wait(until: Date().addingTimeInterval(0.2))
+            }
+            items.append(item)
+            condition.signal()
+            condition.unlock()
+        }
+
+        func pop(waitSeconds: TimeInterval) -> Element? {
+            condition.lock()
+            defer { condition.unlock() }
+            if items.isEmpty {
+                let deadline = Date().addingTimeInterval(waitSeconds)
+                while items.isEmpty, !finished {
+                    if !condition.wait(until: deadline) { break }
+                }
+            }
+            return items.isEmpty ? nil : items.removeFirst()
+        }
+
+        var isFinished: Bool {
+            condition.lock()
+            defer { condition.unlock() }
+            return finished && items.isEmpty
+        }
+
+        func finish() {
+            condition.lock()
+            finished = true
+            condition.broadcast()
+            condition.unlock()
+        }
     }
 
-    // swiftlint:disable:next function_body_length
     private static func run(state: SegmentJobState,
                             dir: URL,
                             destination: URL,
@@ -44,136 +76,81 @@ enum AVRemuxPipeline {
         var writer: AVAssetWriter?
         var videoInput: AVAssetWriterInput?
         var audioInput: AVAssetWriterInput?
-        var videoFormat: CMFormatDescription?
-        var audioFormat: CMFormatDescription?
         var audioRate = 44100
 
-        // 帧间隔（仅用于时间轴刻度，不用于帧位置）
+        let videoQueue = ItemQueue<VideoItem>(capacity: 300)
+        let audioQueue = ItemQueue<Data>(capacity: 2000)
+        let pumpQueue = DispatchQueue(label: "remux.pump", qos: .userInitiated)
+        let doneGroup = DispatchGroup()
+        let lock = NSLock()
+        var failure: String?
+        var videoFrames = 0
+        var audioFrameIndex: Int64 = 0
+
+        // 时间轴
         var frameStep: Int64 = 3750
         var deltaSamples: [Int64] = []
         var lastRawDTS: Int64 = -1
-
-        // 显示顺序重建（解码序分组：[参考帧, 其后引用它的 B 帧...]）
-        var group: [Frame] = []
+        var group: [Data] = []
+        var groupKeys: [Bool] = []
         var displayCursor: Int64 = 0
-        var decodeSeq: Int64 = 0
-        var waitingWrites: [Frame] = []
-        var displayOrderSamples: [String] = []
+        var decodeCursor: Int64 = 0
+        var pushedBeforeWriter = 0
 
-        var pendingAudio: [Data] = []
-        var audioFrameIndex: Int64 = 0
-        var failure: String?
-        var videoFrames = 0
-        var skippedVideo = 0
-        var skippedAudio = 0
-
-        func appendFrame(_ frame: Frame) {
-            guard let input = videoInput, let format = videoFormat, let currentWriter = writer else {
-                waitingWrites.append(frame)
-                return
-            }
-            var waited: TimeInterval = 0
-            while !input.isReadyForMoreMediaData, waited < 1.0 {
-                Thread.sleep(forTimeInterval: 0.005)
-                waited += 0.005
-            }
-            if !input.isReadyForMoreMediaData {
-                // 强行 append 会触发不可捕获的 ObjC 异常，宁可跳过该帧
-                skippedVideo += 1
-                decodeSeq += 1
-                return
-            }
-            let dts = decodeSeq * frameStep
-            guard let buffer = makeSampleBuffer(data: frame.data,
-                                                format: format,
-                                                pts: frame.pts * frameStep,
-                                                dts: dts,
-                                                duration: frameStep,
-                                                timescale: 90000) else {
-                failure = "创建视频样本失败"
-                return
-            }
-            var appended = false
-            for _ in 0..<200 {
-                if currentWriter.status == .failed { break }
-                if input.append(buffer) {
-                    appended = true
-                    break
-                }
-                Thread.sleep(forTimeInterval: 0.005)
-            }
-            if !appended, currentWriter.status == .failed {
-                let error = currentWriter.error as NSError?
-                failure = "追加视频样本失败（第 \(videoFrames + 1) 帧）：\(error?.domain ?? "-") \(error?.code ?? 0) \(error?.localizedDescription ?? "")"
-            }
-            videoFrames += 1
-            decodeSeq += 1
+        func setFailure(_ message: String) {
+            lock.lock()
+            if failure == nil { failure = message }
+            lock.unlock()
         }
 
-        /// 一组结束：组内 B 帧先显示，参考帧最后显示；按解码序追加
+        func currentFailure() -> String? {
+            lock.lock()
+            defer { lock.unlock() }
+            return failure
+        }
+
         func finalizeGroup() {
             guard !group.isEmpty else { return }
-            var ptsFor = [Int64](repeating: 0, count: group.count)
-            if group.count > 1 {
-                for index in 1..<group.count {
-                    ptsFor[index] = displayCursor
+            let count = group.count
+            var ptsByIndex = [Int64](repeating: 0, count: count)
+            if count > 1 {
+                for index in 1..<count {
+                    ptsByIndex[index] = displayCursor
                     displayCursor += 1
                 }
             }
-            ptsFor[0] = displayCursor
+            ptsByIndex[0] = displayCursor
             displayCursor += 1
 
-            if displayOrderSamples.count < 8 {
-                displayOrderSamples.append("[\(group.count)帧 pts=\(ptsFor)]")
-            }
-            for (index, frame) in group.enumerated() {
-                appendFrame(Frame(data: frame.data, isKey: frame.isKey, pts: ptsFor[index]))
-                if failure != nil { break }
+            for index in 0..<count {
+                let item = VideoItem(data: group[index],
+                                     pts: ptsByIndex[index] * frameStep,
+                                     dts: decodeCursor * frameStep,
+                                     isKey: groupKeys[index])
+                decodeCursor += 1
+                videoQueue.push(item)
             }
             group.removeAll()
-        }
-
-        func appendAudio(_ data: Data) {
-            guard let input = audioInput, let format = audioFormat else { return }
-            var waited: TimeInterval = 0
-            while !input.isReadyForMoreMediaData, waited < 1.0 {
-                Thread.sleep(forTimeInterval: 0.005)
-                waited += 0.005
-            }
-            if !input.isReadyForMoreMediaData {
-                skippedAudio += 1
-                audioFrameIndex += 1
-                return
-            }
-            guard let buffer = makeSampleBuffer(data: data,
-                                                format: format,
-                                                pts: audioFrameIndex * 1024,
-                                                dts: audioFrameIndex * 1024,
-                                                duration: 1024,
-                                                timescale: Int32(max(8000, audioRate))) else {
-                if failure == nil { failure = "创建音频样本失败" }
-                return
-            }
-            var appended = false
-            for _ in 0..<200 {
-                if input.append(buffer) {
-                    appended = true
-                    break
+            groupKeys.removeAll()
+            if currentFailure() != nil { videoQueue.finish(); return }
+            // 音频参数迟迟未就绪时，缓冲到一定量就强制创建（纯视频源兜底）
+            if writer == nil {
+                pushedBeforeWriter += count
+                if pushedBeforeWriter >= 200 {
+                    do { try makeWriterIfNeeded(force: true) } catch { setFailure(error.localizedDescription) }
                 }
-                Thread.sleep(forTimeInterval: 0.005)
             }
-            if !appended, writer?.status == .failed, failure == nil {
-                failure = "追加音频样本失败（writer 已失败）"
-            }
-            audioFrameIndex += 1
         }
 
-        func createWriter(force: Bool) throws {
+        func makeWriterIfNeeded(force: Bool) throws {
             guard writer == nil else { return }
             guard let info = demuxer.videoInfo() else { return }
             let audioInfo = videoOnly ? nil : demuxer.audioInfo()
-            // 音频参数未就绪时等待（最多约 30 帧），避免音轨缺失
-            if !force, audioInfo == nil, waitingWrites.count < 12 { return }
+            if !force, audioInfo == nil {
+                // 音频参数未就绪：视频帧继续在队列中缓冲，等音频就绪再创建 writer
+                return
+            }
+            // 音频参数未就绪时先不创建 writer（保证音轨可用），除非强制
 
             var videoDesc: CMFormatDescription?
             let status: OSStatus = info.sps.withUnsafeBytes { spsBuffer -> OSStatus in
@@ -208,24 +185,22 @@ enum AVRemuxPipeline {
 
             let vInput = AVAssetWriterInput(mediaType: .video, outputSettings: nil, sourceFormatHint: videoDesc)
             vInput.expectsMediaDataInRealTime = false
-            guard newWriter.canAdd(vInput) else {
-                throw RemuxError(message: "无法添加视频轨")
-            }
+            guard newWriter.canAdd(vInput) else { throw RemuxError(message: "无法添加视频轨") }
             newWriter.add(vInput)
 
+            var aInput: AVAssetWriterInput?
+            var aDesc: CMFormatDescription?
             if let audio = audioInfo {
-                var asbd = AudioStreamBasicDescription(
-                    mSampleRate: Float64(audio.sampleRate),
-                    mFormatID: kAudioFormatMPEG4AAC,
-                    mFormatFlags: 2,
-                    mBytesPerPacket: 0,
-                    mFramesPerPacket: 1024,
-                    mBytesPerFrame: 0,
-                    mChannelsPerFrame: UInt32(max(1, audio.channels)),
-                    mBitsPerChannel: 0,
-                    mReserved: 0
-                )
-                var audioDesc: CMFormatDescription?
+                var asbd = AudioStreamBasicDescription(mSampleRate: Float64(audio.sampleRate),
+                                                       mFormatID: kAudioFormatMPEG4AAC,
+                                                       mFormatFlags: 2,
+                                                       mBytesPerPacket: 0,
+                                                       mFramesPerPacket: 1024,
+                                                       mBytesPerFrame: 0,
+                                                       mChannelsPerFrame: UInt32(max(1, audio.channels)),
+                                                       mBitsPerChannel: 0,
+                                                       mReserved: 0)
+                var desc: CMFormatDescription?
                 let asc = audio.audioSpecificConfig
                 let audioStatus = asc.withUnsafeBytes { buffer -> OSStatus in
                     CMAudioFormatDescriptionCreate(allocator: kCFAllocatorDefault,
@@ -235,15 +210,15 @@ enum AVRemuxPipeline {
                                                    magicCookieSize: asc.count,
                                                    magicCookie: buffer.baseAddress,
                                                    extensions: nil,
-                                                   formatDescriptionOut: &audioDesc)
+                                                   formatDescriptionOut: &desc)
                 }
-                if audioStatus == noErr, let audioDesc {
-                    let aInput = AVAssetWriterInput(mediaType: .audio, outputSettings: nil, sourceFormatHint: audioDesc)
-                    aInput.expectsMediaDataInRealTime = false
-                    if newWriter.canAdd(aInput) {
-                        newWriter.add(aInput)
-                        audioInput = aInput
-                        audioFormat = audioDesc
+                if audioStatus == noErr, let desc {
+                    let input = AVAssetWriterInput(mediaType: .audio, outputSettings: nil, sourceFormatHint: desc)
+                    input.expectsMediaDataInRealTime = false
+                    if newWriter.canAdd(input) {
+                        newWriter.add(input)
+                        aInput = input
+                        aDesc = desc
                         audioRate = audio.sampleRate
                     }
                 }
@@ -256,33 +231,89 @@ enum AVRemuxPipeline {
 
             writer = newWriter
             videoInput = vInput
-            videoFormat = videoDesc
+            audioInput = aInput
+            DiagnosticsLog.write("[转MP4] writer 创建完成 视频输入=1 音频输入=\(aInput == nil ? 0 : 1)")
 
-            // 音频优先补写，保证两轨起点对齐（视频抢跑会导致 writer 关闭视频输入就绪状态）
-            if audioInput != nil, !pendingAudio.isEmpty {
-                for data in pendingAudio {
-                    appendAudio(data)
-                    if failure != nil { return }
+            // 视频泵
+            var videoPumpFinished = false
+            var audioPumpFinished = false
+            doneGroup.enter()
+            vInput.requestMediaDataWhenReady(on: pumpQueue) {
+                while vInput.isReadyForMoreMediaData {
+                    guard let item = videoQueue.pop(waitSeconds: 0.5) else {
+                        if videoQueue.isFinished, !videoPumpFinished {
+                            videoPumpFinished = true
+                            vInput.markAsFinished()
+                            doneGroup.leave()
+                        }
+                        return
+                    }
+                    guard let buffer = makeSampleBuffer(data: item.data,
+                                                        format: videoDesc,
+                                                        pts: item.pts,
+                                                        dts: item.dts,
+                                                        duration: frameStep,
+                                                        timescale: 90000) else {
+                        setFailure("创建视频样本失败")
+                        if !videoPumpFinished { videoPumpFinished = true; doneGroup.leave() }
+                        vInput.markAsFinished()
+                        return
+                    }
+                    if !vInput.append(buffer) {
+                        let error = newWriter.error as NSError?
+                        setFailure("追加视频样本失败：\(error?.code ?? 0) \(error?.localizedDescription ?? "")")
+                        if !videoPumpFinished { videoPumpFinished = true; doneGroup.leave() }
+                        vInput.markAsFinished()
+                        return
+                    }
+                    lock.lock()
+                    videoFrames += 1
+                    lock.unlock()
                 }
-                pendingAudio.removeAll()
             }
-            if !waitingWrites.isEmpty {
-                let buffered = waitingWrites
-                waitingWrites.removeAll()
-                for frame in buffered {
-                    appendFrame(frame)
-                    if failure != nil { return }
+
+            // 音频泵
+            if let aInput, let aDesc {
+                doneGroup.enter()
+                aInput.requestMediaDataWhenReady(on: pumpQueue) {
+                    while aInput.isReadyForMoreMediaData {
+                        guard let data = audioQueue.pop(waitSeconds: 0.5) else {
+                            if audioQueue.isFinished, !audioPumpFinished {
+                                audioPumpFinished = true
+                                aInput.markAsFinished()
+                                doneGroup.leave()
+                            }
+                            return
+                        }
+                        let index = audioFrameIndex
+                        audioFrameIndex += 1
+                        guard let buffer = makeSampleBuffer(data: data,
+                                                            format: aDesc,
+                                                            pts: index * 1024,
+                                                            dts: index * 1024,
+                                                            duration: 1024,
+                                                            timescale: Int32(max(8000, audioRate))) else {
+                            setFailure("创建音频样本失败")
+                            if !audioPumpFinished { audioPumpFinished = true; doneGroup.leave() }
+                            aInput.markAsFinished()
+                            return
+                        }
+                        if !aInput.append(buffer) {
+                            setFailure("追加音频样本失败")
+                            if !audioPumpFinished { audioPumpFinished = true; doneGroup.leave() }
+                            aInput.markAsFinished()
+                            return
+                        }
+                    }
                 }
             }
-            DiagnosticsLog.write("[转MP4] writer 创建完成 视频输入=1 音频输入=\(audioInput == nil ? 0 : 1)")
         }
 
         demuxer.onInfo = { _, _ in }
 
         demuxer.onVideoFrame = { data, pts, dts, isKey, isRef in
-            guard failure == nil else { return }
+            guard currentFailure() == nil else { return }
 
-            // 帧间隔学习（只取正向合理差值的中位数）
             if lastRawDTS >= 0 {
                 let delta = dts - lastRawDTS
                 if delta > 0, delta < 90000 {
@@ -294,42 +325,26 @@ enum AVRemuxPipeline {
             }
             lastRawDTS = dts
 
-            if isRef {
-                finalizeGroup()
-                group.append(Frame(data: data, isKey: isKey, pts: 0))
-            } else {
-                group.append(Frame(data: data, isKey: isKey, pts: 0))
-            }
+            if isRef { finalizeGroup() }
+            group.append(data)
+            groupKeys.append(isKey)
 
             if writer == nil {
-                do {
-                    try createWriter(force: false)
-                } catch {
-                    failure = error.localizedDescription
-                }
+                do { try makeWriterIfNeeded(force: false) } catch { setFailure(error.localizedDescription) }
             }
         }
 
         demuxer.onAudioFrame = { data, _ in
-            guard failure == nil, !videoOnly else { return }
-            if audioInput != nil {
-                appendAudio(data)
-            } else {
-                pendingAudio.append(data)
-                if pendingAudio.count > 6000 { pendingAudio.removeFirst(3000) }
-                if demuxer.videoInfo() != nil {
-                    do {
-                        try createWriter(force: false)
-                    } catch {
-                        failure = error.localizedDescription
-                    }
-                }
+            guard currentFailure() == nil, !videoOnly else { return }
+            audioQueue.push(data)
+            if writer == nil {
+                do { try makeWriterIfNeeded(force: false) } catch { setFailure(error.localizedDescription) }
             }
         }
 
         let total = max(1, state.segmentURLs.count)
         for index in state.durations.indices {
-            if failure != nil { break }
+            if currentFailure() != nil { break }
             let fileURL = dir.appendingPathComponent(LocalHLS.fileName(index: index))
             guard fm.fileExists(atPath: fileURL.path) else {
                 throw RemuxError(message: "缺少分片 \(index + 1)")
@@ -337,51 +352,50 @@ enum AVRemuxPipeline {
             let handle = try FileHandle(forReadingFrom: fileURL)
             while let chunk = try handle.read(upToCount: 1 << 20), !chunk.isEmpty {
                 demuxer.consume(chunk)
-                if failure != nil { break }
+                if currentFailure() != nil { break }
             }
             try? handle.close()
-            // 第一个分片结束后仍无音频 → 按纯视频处理
-            if index == 0, writer == nil, failure == nil {
-                do {
-                    try createWriter(force: true)
-                } catch {
-                    failure = error.localizedDescription
-                }
+            if index == 0, writer == nil, currentFailure() == nil {
+                do { try makeWriterIfNeeded(force: true) } catch { setFailure(error.localizedDescription) }
             }
             progress?(Double(index + 1) / Double(total))
         }
         demuxer.finish()
         finalizeGroup()
+        videoQueue.finish()
+        audioQueue.finish()
 
-        if let failure {
-            writer?.cancelWriting()
-            try? fm.removeItem(at: destination)
+        if let writer {
+            _ = doneGroup.wait(timeout: .now() + 600)
+            let semaphore = DispatchSemaphore(value: 0)
+            writer.finishWriting { semaphore.signal() }
+            _ = semaphore.wait(timeout: .now() + 300)
+            if let failure = currentFailure() {
+                writer.cancelWriting()
+                try? fm.removeItem(at: destination)
+                throw RemuxError(message: "转封装失败：\(failure)")
+            }
+            guard writer.status == .completed else {
+                try? fm.removeItem(at: destination)
+                throw RemuxError(message: writer.error?.localizedDescription ?? "写出失败")
+            }
+        } else if let failure = currentFailure() {
             throw RemuxError(message: "转封装失败：\(failure)")
-        }
-        guard let writer, videoInput != nil else {
+        } else {
             throw RemuxError(message: "转封装失败：没有可写入的视频帧")
         }
-        if !waitingWrites.isEmpty {
-            let buffered = waitingWrites
-            waitingWrites.removeAll()
-            for frame in buffered {
-                appendFrame(frame)
-            }
-        }
-        DiagnosticsLog.write("[转MP4] 显示顺序样例 \(displayOrderSamples.joined(separator: " "))")
 
-        videoInput?.markAsFinished()
-        audioInput?.markAsFinished()
+        DiagnosticsLog.write("[转MP4] 封装完成 视频帧=\(videoFrames) 音频帧=\(audioFrameIndex) 帧间隔=\(frameStep)")
+    }
 
-        let semaphore = DispatchSemaphore(value: 0)
-        writer.finishWriting { semaphore.signal() }
-        _ = semaphore.wait(timeout: .now() + 300)
-
-        guard writer.status == .completed else {
-            try? fm.removeItem(at: destination)
-            throw RemuxError(message: writer.error?.localizedDescription ?? "写出失败")
-        }
-        DiagnosticsLog.write("[转MP4] 封装完成 视频帧=\(videoFrames) 音频帧=\(audioFrameIndex) 跳过视频=\(skippedVideo) 跳过音频=\(skippedAudio) 帧间隔=\(frameStep)")
+    static func remux(state: SegmentJobState,
+                      dir: URL,
+                      destination: URL,
+                      onProgress: ((Double) -> Void)? = nil,
+                      videoOnly: Bool = false) async throws {
+        try await Task.detached(priority: .userInitiated) {
+            try run(state: state, dir: dir, destination: destination, progress: onProgress, videoOnly: videoOnly)
+        }.value
     }
 
     // MARK: - 样本构造
@@ -412,11 +426,7 @@ enum AVRemuxPipeline {
                                           dataLength: data.count)
         }
         guard copied == noErr else { return nil }
-        // passthrough 要求样本内存连续
         _ = CMBlockBufferAssureBlockMemory(blockBuffer)
-        guard CMBlockBufferIsRangeContiguous(blockBuffer, atOffset: 0, length: data.count) else {
-            return nil
-        }
 
         var timing = CMSampleTimingInfo(duration: CMTime(value: duration, timescale: timescale),
                                         presentationTimeStamp: CMTime(value: pts, timescale: timescale),
