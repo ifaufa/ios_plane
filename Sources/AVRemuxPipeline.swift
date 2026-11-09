@@ -64,6 +64,8 @@ enum AVRemuxPipeline {
         var audioFrameIndex: Int64 = 0
         var failure: String?
         var videoFrames = 0
+        var skippedVideo = 0
+        var skippedAudio = 0
 
         func appendFrame(_ frame: Frame) {
             guard let input = videoInput, let format = videoFormat, let currentWriter = writer else {
@@ -74,6 +76,12 @@ enum AVRemuxPipeline {
             while !input.isReadyForMoreMediaData, waited < 1.0 {
                 Thread.sleep(forTimeInterval: 0.005)
                 waited += 0.005
+            }
+            if !input.isReadyForMoreMediaData {
+                // 强行 append 会触发不可捕获的 ObjC 异常，宁可跳过该帧
+                skippedVideo += 1
+                decodeSeq += 1
+                return
             }
             let dts = decodeSeq * frameStep
             guard let buffer = makeSampleBuffer(data: frame.data,
@@ -132,6 +140,11 @@ enum AVRemuxPipeline {
                 Thread.sleep(forTimeInterval: 0.005)
                 waited += 0.005
             }
+            if !input.isReadyForMoreMediaData {
+                skippedAudio += 1
+                audioFrameIndex += 1
+                return
+            }
             guard let buffer = makeSampleBuffer(data: data,
                                                 format: format,
                                                 pts: audioFrameIndex * 1024,
@@ -160,7 +173,7 @@ enum AVRemuxPipeline {
             guard let info = demuxer.videoInfo() else { return }
             let audioInfo = videoOnly ? nil : demuxer.audioInfo()
             // 音频参数未就绪时等待（最多约 30 帧），避免音轨缺失
-            if !force, audioInfo == nil, waitingWrites.count < 30 { return }
+            if !force, audioInfo == nil, waitingWrites.count < 12 { return }
 
             var videoDesc: CMFormatDescription?
             let status: OSStatus = info.sps.withUnsafeBytes { spsBuffer -> OSStatus in
@@ -245,6 +258,14 @@ enum AVRemuxPipeline {
             videoInput = vInput
             videoFormat = videoDesc
 
+            // 音频优先补写，保证两轨起点对齐（视频抢跑会导致 writer 关闭视频输入就绪状态）
+            if audioInput != nil, !pendingAudio.isEmpty {
+                for data in pendingAudio {
+                    appendAudio(data)
+                    if failure != nil { return }
+                }
+                pendingAudio.removeAll()
+            }
             if !waitingWrites.isEmpty {
                 let buffered = waitingWrites
                 waitingWrites.removeAll()
@@ -252,12 +273,6 @@ enum AVRemuxPipeline {
                     appendFrame(frame)
                     if failure != nil { return }
                 }
-            }
-            if audioInput != nil, !pendingAudio.isEmpty {
-                for data in pendingAudio {
-                    appendAudio(data)
-                }
-                pendingAudio.removeAll()
             }
             DiagnosticsLog.write("[转MP4] writer 创建完成 视频输入=1 音频输入=\(audioInput == nil ? 0 : 1)")
         }
@@ -366,7 +381,7 @@ enum AVRemuxPipeline {
             try? fm.removeItem(at: destination)
             throw RemuxError(message: writer.error?.localizedDescription ?? "写出失败")
         }
-        DiagnosticsLog.write("[转MP4] 封装完成 视频帧=\(videoFrames) 音频帧=\(audioFrameIndex) 帧间隔=\(frameStep)")
+        DiagnosticsLog.write("[转MP4] 封装完成 视频帧=\(videoFrames) 音频帧=\(audioFrameIndex) 跳过视频=\(skippedVideo) 跳过音频=\(skippedAudio) 帧间隔=\(frameStep)")
     }
 
     // MARK: - 样本构造
@@ -397,6 +412,11 @@ enum AVRemuxPipeline {
                                           dataLength: data.count)
         }
         guard copied == noErr else { return nil }
+        // passthrough 要求样本内存连续
+        _ = CMBlockBufferAssureBlockMemory(blockBuffer)
+        guard CMBlockBufferIsRangeContiguous(blockBuffer, atOffset: 0, length: data.count) else {
+            return nil
+        }
 
         var timing = CMSampleTimingInfo(duration: CMTime(value: duration, timescale: timescale),
                                         presentationTimeStamp: CMTime(value: pts, timescale: timescale),
