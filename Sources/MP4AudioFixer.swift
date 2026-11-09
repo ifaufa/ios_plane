@@ -4,7 +4,7 @@ import Foundation
 /// 前置条件：moov 位于文件末尾（AVAssetWriter 的顺序：ftyp → mdat → moov），
 /// 因此增长 moov 不会影响 stco/co64 指向的 mdat 偏移
 enum MP4AudioFixer {
-    static func fix(url: URL, asc: Data, handlerType: String = "soun") -> String {
+    static func fix(url: URL, asc: Data, sampleRate: Int = 0, handlerType: String = "soun") -> String {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return "无法打开" }
         defer { try? handle.close() }
 
@@ -61,7 +61,33 @@ enum MP4AudioFixer {
             return "音频样本描述类型=\(entryType)（非 mp4a）hex=\(hexHead)"
         }
 
-        // 3) 已有 esds？AVAssetWriter 可能写入"裸 ASC"（无描述符层级），必须替换
+        // 3) 轨头字段规范化（就地改 4 字节，不影响尺寸）
+        var notes: [String] = []
+        if let tkhd = descend(moov, from: trakRange.lowerBound + 8, upper: trakRange.upperBound, path: ["tkhd"]) {
+            let flagsField = moov.u32(at: tkhd.lowerBound + 8)
+            let flags = flagsField & 0xFFFFFF
+            if flags & 0x1 == 0 {
+                let newFlags = (flagsField & 0xFF000000) | (flags | 0x1)
+                moov.replaceSubrange((tkhd.lowerBound + 8)..<(tkhd.lowerBound + 12),
+                                     with: withUnsafeBytes(of: newFlags.bigEndian) { Data($0) })
+                notes.append("启用音轨(tkhd flags 0x\(String(format: "%06x", flags))→0x\(String(format: "%06x", flags | 1)))")
+            }
+        }
+        if let mdhd = descend(moov, from: trakRange.lowerBound + 8, upper: trakRange.upperBound, path: ["mdia", "mdhd"]) {
+            let version = moov.u32(at: mdhd.lowerBound + 8) >> 24
+            let tsOffset = mdhd.lowerBound + 8 + 4 + (version == 1 ? 16 : 8)
+            let timescale = moov.u32(at: tsOffset)
+            if timescale == 0 || timescale > 1_000_000 {
+                let fixed = UInt32(max(8000, sampleRate))
+                moov.replaceSubrange(tsOffset..<(tsOffset + 4), with: withUnsafeBytes(of: fixed.bigEndian) { Data($0) })
+                notes.append("修正 mdhd timescale \(timescale)→\(fixed)")
+            }
+        }
+        if !notes.isEmpty {
+            DiagnosticsLog.write("[转MP4] 音轨头修正：\(notes.joined(separator: "；"))")
+        }
+
+        // 4) 已有 esds？AVAssetWriter 可能写入"裸 ASC"（无描述符层级），必须替换
         let childrenStart = entryRange.lowerBound + 36
         var replaceRange: Range<Int>?
         let newESDS = buildESDS(asc: asc)

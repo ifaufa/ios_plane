@@ -46,7 +46,7 @@ enum MediaConverter {
                                                 audioFormatFlags: flags)
                 // 关键：若 AVAssetWriter 没写出可用的 esds，音频轨会被系统丢弃，这里手工补写
                 if let asc = AVRemuxPipeline.lastAudioASC, !asc.isEmpty {
-                    let fixLog = MP4AudioFixer.fix(url: outputURL, asc: asc)
+                    let fixLog = MP4AudioFixer.fix(url: outputURL, asc: asc, sampleRate: AVRemuxPipeline.lastAudioSampleRate)
                     DiagnosticsLog.write("[转MP4] esds 修补：\(fixLog)")
                 }
                 DiagnosticsLog.write("[转MP4] 音频轨诊断 \(MP4AudioFixer.inspectAudioTrack(url: outputURL))")
