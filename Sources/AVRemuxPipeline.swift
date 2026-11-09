@@ -37,13 +37,14 @@ enum AVRemuxPipeline {
         var videoFormat: CMFormatDescription?
         var audioFormat: CMFormatDescription?
 
-        var videoOffset: Int64 = -1
-        var lastVideoDTS: Int64 = -1
-        var dtsAdjustCount = 0
-        var pendingVideo: (data: Data, pts: Int64, dts: Int64, isKey: Bool)?
-        var pendingVideoDuration: Int64 = 3000
+        // 时间轴重建：源 DTS 大量倒退，按 CFR 网格重建（帧间隔取原始 DTS 差值的中位数）
+        var outputIndex: Int64 = 0
+        var frameStep: Int64 = 3750
+        var lastDeltaSamples: [Int64] = []
+        var rawDTS: Int64 = -1
+        var videoBuffer: [(data: Data, isKey: Bool)] = []
+        var pendingVideo: (data: Data, isKey: Bool)?
 
-        var audioOffset: Int64 = -1
         var audioRate = 44100
         var pendingAudio: [Data] = []
         var audioFrameIndex: Int64 = 0
@@ -52,10 +53,13 @@ enum AVRemuxPipeline {
         var videoFrames = 0
         var audioFrames = 0
         var currentVideoInfo: TSDemuxer.VideoInfo?
-        var probeFrames: [(data: Data, pts: Int64, dts: Int64)] = []
 
-        func ensureWriter(video info: TSDemuxer.VideoInfo) throws -> AVAssetWriter {
+        func ensureWriter(video info: TSDemuxer.VideoInfo, force: Bool) throws -> AVAssetWriter? {
             if let writer { return writer }
+            // 音频参数未就绪时不急着创建（等音频轨能加入），除非强制或缓冲够多
+            if !force, !videoOnly, demuxer.audioInfo() == nil, videoBuffer.count < 240 {
+                return nil
+            }
 
             var videoDesc: CMFormatDescription?
             let status: OSStatus = info.sps.withUnsafeBytes { spsBuffer -> OSStatus in
@@ -144,16 +148,8 @@ enum AVRemuxPipeline {
             // 补写 writer 创建前到达的音频帧（保持索引连续）
             if audioInput != nil, !pendingAudio.isEmpty {
                 for data in pendingAudio {
-                    appendAudioSample(data: data,
-                                      format: audioFormat!,
-                                      input: audioInput!,
-                                      index: audioFrameIndex,
-                                      rate: audioRate,
-                                      offset: 0,
-                                      basePTS: 0) { message in
-                        if failure == nil { failure = message }
-                    }
-                    audioFrameIndex += 1
+                    appendAudioFrame(data)
+                    audioFrames += 1
                 }
                 pendingAudio.removeAll()
             }
@@ -174,47 +170,73 @@ enum AVRemuxPipeline {
             return offset == data.count
         }
 
-        func appendVideoSample(_ sample: (data: Data, pts: Int64, dts: Int64, isKey: Bool), duration: Int64) {
-            guard let input = videoInput, let format = videoFormat, var writer else { return }
+        /// 用 CFR 网格时序追加一帧（pts == dts == outputIndex * frameStep）
+        func appendVideoFrame(_ data: Data, isKey: Bool, duration: Int64) {
+            guard let input = videoInput, let format = videoFormat, let currentWriter = writer else { return }
 
-            if !validateAVCC(sample.data) {
-                let head = sample.data.prefix(16).map { String(format: "%02x", $0) }.joined(separator: " ")
-                DiagnosticsLog.write("[转MP4] 跳过非法样本（第 \(videoFrames + 1) 帧）大小=\(sample.data.count)B 头=\(head)")
+            if !validateAVCC(data) {
+                let head = data.prefix(16).map { String(format: "%02x", $0) }.joined(separator: " ")
+                DiagnosticsLog.write("[转MP4] 跳过非法样本（第 \(videoFrames + 1) 帧）大小=\(data.count)B 头=\(head)")
+                outputIndex += 1
                 return
             }
 
+            let gridTime = outputIndex * frameStep
             while !input.isReadyForMoreMediaData {
                 Thread.sleep(forTimeInterval: 0.005)
             }
-            guard let buffer = makeSampleBuffer(data: sample.data,
+            guard let buffer = makeSampleBuffer(data: data,
                                                 format: format,
-                                                pts: sample.pts,
-                                                dts: sample.dts,
+                                                pts: gridTime,
+                                                dts: gridTime,
                                                 duration: duration,
                                                 timescale: 90000) else {
                 failure = "创建视频样本失败"
                 return
             }
-            if !input.append(buffer) {
-                // append 返回 false 多数是"此刻不接受"，等待重试；只有 writer 真正失败才终止
-                var appended = false
-                for _ in 0..<300 {
-                    if writer.status == .failed { break }
-                    Thread.sleep(forTimeInterval: 0.01)
-                    if input.append(buffer) {
-                        appended = true
-                        break
-                    }
+            var appended = false
+            for _ in 0..<300 {
+                if currentWriter.status == .failed { break }
+                if input.append(buffer) {
+                    appended = true
+                    break
                 }
-                if !appended {
-                    let error = writer.error as NSError?
-                    if currentVideoInfo != nil {
-                        DiagnosticsLog.write("[转MP4] 顺序解码前 \(probeFrames.count) 帧：\(H264Probe.decodeSequence(frames: probeFrames, info: currentVideoInfo!))")
-                    }
-                    failure = "追加视频样本失败（第 \(videoFrames + 1) 帧，PTS=\(sample.pts) DTS=\(sample.dts) 大小=\(sample.data.count)B，writer状态=\(writer.status.rawValue)）：\(error?.domain ?? "-") \(error?.code ?? 0) \(error?.localizedDescription ?? "")"
-                }
+                Thread.sleep(forTimeInterval: 0.01)
+            }
+            if !appended {
+                let error = currentWriter.error as NSError?
+                failure = "追加视频样本失败（第 \(videoFrames + 1) 帧，writer状态=\(currentWriter.status.rawValue)）：\(error?.domain ?? "-") \(error?.code ?? 0) \(error?.localizedDescription ?? "")"
             }
             videoFrames += 1
+            outputIndex += 1
+        }
+
+        func appendAudioFrame(_ data: Data) {
+            guard let input = audioInput, let format = audioFormat else { return }
+            while !input.isReadyForMoreMediaData {
+                Thread.sleep(forTimeInterval: 0.005)
+            }
+            guard let buffer = makeSampleBuffer(data: data,
+                                                format: format,
+                                                pts: audioFrameIndex * 1024,
+                                                dts: audioFrameIndex * 1024,
+                                                duration: 1024,
+                                                timescale: Int32(max(8000, audioRate))) else {
+                if failure == nil { failure = "创建音频样本失败" }
+                return
+            }
+            var appended = false
+            for _ in 0..<300 {
+                if input.append(buffer) {
+                    appended = true
+                    break
+                }
+                Thread.sleep(forTimeInterval: 0.01)
+            }
+            if !appended, failure == nil {
+                failure = "追加音频样本失败"
+            }
+            audioFrameIndex += 1
         }
 
         demuxer.onInfo = { _, _ in }
@@ -222,62 +244,63 @@ enum AVRemuxPipeline {
         demuxer.onVideoFrame = { data, pts, dts, isKey in
             guard failure == nil else { return }
             guard let info = demuxer.videoInfo() else { return }
+            currentVideoInfo = info
+
+            // 学习帧间隔（原始 DTS 差值的中位数，抗异常值）
+            if rawDTS >= 0 {
+                let delta = dts - rawDTS
+                if delta > 0, delta < 90000 {
+                    lastDeltaSamples.append(delta)
+                    if lastDeltaSamples.count > 50 { lastDeltaSamples.removeFirst() }
+                    let sorted = lastDeltaSamples.sorted()
+                    frameStep = max(1, sorted[sorted.count / 2])
+                }
+            }
+            rawDTS = dts
+
+            if videoFrames == 0 && videoBuffer.isEmpty && pendingVideo == nil {
+                DiagnosticsLog.write("[转MP4] 首帧探测 \(H264Probe.decodeFirstFrame(avcc: data, info: info))")
+            }
+
             do {
-                _ = try ensureWriter(video: info)
-                currentVideoInfo = info
+                _ = try ensureWriter(video: info, force: false)
             } catch {
                 failure = error.localizedDescription
                 return
             }
 
-            if videoFrames == 0 && pendingVideo == nil {
-                DiagnosticsLog.write("[转MP4] 首帧探测 \(H264Probe.decodeFirstFrame(avcc: data, info: info))")
+            if writer != nil {
+                if let previous = pendingVideo {
+                    appendVideoFrame(previous.data, isKey: previous.isKey, duration: frameStep)
+                }
+                pendingVideo = (data, isKey)
+            } else {
+                videoBuffer.append((data, isKey))
             }
-
-            if videoOffset < 0 {
-                videoOffset = dts >= 0 ? dts : max(0, pts)
-            }
-            var normalizedDTS = max(0, (dts >= 0 ? dts : pts) - videoOffset)
-            // 源流个别 PES 时间戳异常（DTS 倒退），AVAssetWriter 要求 DTS 单调递增：
-            // 数据本身合法（顺序解码全 OK），这里只校正时间戳，不改动样本内容
-            if normalizedDTS <= lastVideoDTS {
-                normalizedDTS = lastVideoDTS + 3750
-                dtsAdjustCount += 1
-            }
-            lastVideoDTS = normalizedDTS
-            // B 帧的 PTS 本来就小于 DTS（解码序 vs 显示序），不能钳位——否则合成时序被破坏
-            let normalizedPTS = max(0, (pts >= 0 ? pts : dts) - videoOffset)
-
-            if let previous = pendingVideo {
-                let delta = max(1, normalizedDTS - previous.dts)
-                appendVideoSample(previous, duration: delta)
-                pendingVideoDuration = delta
-            }
-            pendingVideo = (data, normalizedPTS, normalizedDTS, isKey)
-            if probeFrames.count < 12 {
-                probeFrames.append((data, normalizedPTS, normalizedDTS))
-            }
-            lastVideoDTS = normalizedDTS
         }
 
-        demuxer.onAudioFrame = { data, pts in
-            guard failure == nil, let input = audioInput, let format = audioFormat else {
+        demuxer.onAudioFrame = { data, _ in
+            guard failure == nil else { return }
+            if let input = audioInput {
+                appendAudioFrame(data)
+                audioFrames += 1
+            } else {
                 pendingAudio.append(data)
-                return
+                // 视频参数未就绪时无法创建 writer（需要 avcC），继续缓冲音频
+                guard demuxer.videoInfo() != nil else { return }
+                do {
+                    _ = try ensureWriter(video: demuxer.videoInfo()!, force: false)
+                } catch {
+                    if failure == nil { failure = error.localizedDescription }
+                }
+                if let input = audioInput {
+                    for buffered in pendingAudio {
+                        appendAudioFrame(buffered)
+                        audioFrames += 1
+                    }
+                    pendingAudio.removeAll()
+                }
             }
-            if audioOffset < 0 {
-                audioOffset = pts >= 0 ? pts : 0
-            }
-            appendAudioSample(data: data,
-                              format: format,
-                              input: input,
-                              index: audioFrameIndex,
-                              rate: audioRate,
-                              offset: audioOffset,
-                              basePTS: pts) { message in
-                if failure == nil { failure = message }
-            }
-            audioFrameIndex += 1
         }
 
         // 顺序读取分片
@@ -294,6 +317,22 @@ enum AVRemuxPipeline {
                 if failure != nil { break }
             }
             try? handle.close()
+            // 第一个分片结束后仍无音频参数 → 强制创建（纯视频源或缓冲超限）
+            if index == 0, writer == nil, failure == nil {
+                do {
+                    _ = try ensureWriter(video: demuxer.videoInfo() ?? currentVideoInfo
+                        ?? TSDemuxer.VideoInfo(width: 0, height: 0, sps: Data(), pps: Data(), profileLevel: (0, 0)),
+                        force: true)
+                    if writer != nil {
+                        for buffered in videoBuffer {
+                            appendVideoFrame(buffered.data, isKey: buffered.isKey, duration: frameStep)
+                        }
+                        videoBuffer.removeAll()
+                    }
+                } catch {
+                    if failure == nil { failure = error.localizedDescription }
+                }
+            }
             progress?(Double(index + 1) / Double(total))
         }
         demuxer.finish()
@@ -306,14 +345,21 @@ enum AVRemuxPipeline {
         guard let writer else {
             throw RemuxError(message: "转封装失败：没有解析出视频轨道")
         }
-        guard videoInput != nil, videoFrames > 0 || pendingVideo != nil else {
+        guard videoInput != nil else {
             writer.cancelWriting()
             try? fm.removeItem(at: destination)
             throw RemuxError(message: "转封装失败：没有可写入的视频帧")
         }
 
         if let pending = pendingVideo {
-            appendVideoSample(pending, duration: pendingVideoDuration)
+            appendVideoFrame(pending.data, isKey: pending.isKey, duration: frameStep)
+        }
+        // 补写仍缓冲的视频帧（音频参数始终未就绪的极端情况）
+        if writer.status == .writing, !videoBuffer.isEmpty {
+            for buffered in videoBuffer {
+                appendVideoFrame(buffered.data, isKey: buffered.isKey, duration: frameStep)
+            }
+            videoBuffer.removeAll()
         }
         if let input = videoInput {
             input.markAsFinished()
@@ -330,7 +376,7 @@ enum AVRemuxPipeline {
             try? fm.removeItem(at: destination)
             throw RemuxError(message: writer.error?.localizedDescription ?? "写出失败")
         }
-        DiagnosticsLog.write("[转MP4] AVAssetWriter 封装完成 视频帧=\(videoFrames) 音频帧=\(audioFrameIndex) DTS校正=\(dtsAdjustCount)次")
+        DiagnosticsLog.write("[转MP4] AVAssetWriter 封装完成 视频帧=\(videoFrames) 音频帧=\(audioFrames) 帧间隔=\(frameStep)ticks")
     }
 
     // MARK: - 样本构造
