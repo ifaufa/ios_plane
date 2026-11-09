@@ -11,6 +11,11 @@ enum AVRemuxPipeline {
         var errorDescription: String? { message }
     }
 
+    /// 最近一次解析到的音频参数（供容器修补使用）
+    static var lastAudioASC: Data?
+    static var lastAudioSampleRate: Int = 0
+    static var lastAudioChannels: Int = 0
+
     private struct VideoItem {
         let data: Data
         let pts: Int64
@@ -220,6 +225,9 @@ enum AVRemuxPipeline {
                     let ascHex = asc.map { String(format: "%02x", $0) }.joined(separator: " ")
                     DiagnosticsLog.write("[转MP4] 音频参数 rate=\(audio.sampleRate) ch=\(audio.channels) ASC=\(ascHex)(\(asc.count)B) cookie=\(cookieSize)B status=\(audioStatus)")
                 }
+                AVRemuxPipeline.lastAudioASC = asc
+                AVRemuxPipeline.lastAudioSampleRate = audio.sampleRate
+                AVRemuxPipeline.lastAudioChannels = audio.channels
                 if audioStatus == noErr, let desc {
                     let input = AVAssetWriterInput(mediaType: .audio, outputSettings: nil, sourceFormatHint: desc)
                     input.expectsMediaDataInRealTime = false

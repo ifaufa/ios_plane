@@ -44,6 +44,11 @@ enum MediaConverter {
                 try await AVRemuxPipeline.remux(state: state, dir: dir, destination: outputURL,
                                                 onProgress: onProgress, videoOnly: false,
                                                 audioFormatFlags: flags)
+                // 关键：若 AVAssetWriter 没写出可用的 esds，音频轨会被系统丢弃，这里手工补写
+                if let asc = AVRemuxPipeline.lastAudioASC, !asc.isEmpty {
+                    let fixLog = MP4AudioFixer.fix(url: outputURL, asc: asc)
+                    DiagnosticsLog.write("[转MP4] esds 修补：\(fixLog)")
+                }
                 let audioCount = ((try? await AVURLAsset(url: outputURL).loadTracks(withMediaType: .audio)) ?? []).count
                 let videoCount = ((try? await AVURLAsset(url: outputURL).loadTracks(withMediaType: .video)) ?? []).count
                 DiagnosticsLog.write("[转MP4] 自研封装成功（第\(attempt + 1)次 flags=\(flags)）耗时 \(String(format: "%.1f", Date().timeIntervalSince(start)))s 产物轨道 视频=\(videoCount) 音频=\(audioCount)")
