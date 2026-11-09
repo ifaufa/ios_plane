@@ -288,8 +288,17 @@ enum AVRemuxPipeline {
             }
 
             if writer != nil {
+                // writer 刚创建时，先把缓冲的视频帧按序补写
+                if !videoBuffer.isEmpty {
+                    for buffered in videoBuffer {
+                        appendVideoFrame(buffered.data, isKey: buffered.isKey, duration: frameStep)
+                        if failure != nil { return }
+                    }
+                    videoBuffer.removeAll()
+                }
                 if let previous = pendingVideo {
                     appendVideoFrame(previous.data, isKey: previous.isKey, duration: frameStep)
+                    if failure != nil { return }
                 }
                 pendingVideo = (data, isKey)
             } else {
@@ -304,6 +313,11 @@ enum AVRemuxPipeline {
                 audioFrames += 1
             } else {
                 pendingAudio.append(data)
+                // 音频输入创建失败时缓冲会无限增长，设置上限
+                if pendingAudio.count > 8000 {
+                    pendingAudio.removeFirst(4000)
+                    DiagnosticsLog.write("[转MP4] 音频缓冲超限，丢弃早期 \(4000) 帧")
+                }
                 // 视频参数未就绪时无法创建 writer（需要 avcC），继续缓冲音频
                 guard demuxer.videoInfo() != nil else { return }
                 do {
@@ -405,6 +419,7 @@ enum AVRemuxPipeline {
                                          dts: Int64,
                                          duration: Int64,
                                          timescale: Int32) -> CMSampleBuffer? {
+        guard !data.isEmpty else { return nil }
         var blockBuffer: CMBlockBuffer?
         guard CMBlockBufferCreateWithMemoryBlock(allocator: kCFAllocatorDefault,
                                                  memoryBlock: nil,
