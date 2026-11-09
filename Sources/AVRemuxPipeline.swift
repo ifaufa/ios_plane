@@ -158,8 +158,29 @@ enum AVRemuxPipeline {
             return newWriter
         }
 
+        /// 校验 AVCC：每个 4 字节长度前缀都必须与实际数据吻合
+        func validateAVCC(_ data: Data) -> Bool {
+            var offset = 0
+            while offset + 4 <= data.count {
+                let length = (Int(data[data.startIndex + offset]) << 24)
+                    | (Int(data[data.startIndex + offset + 1]) << 16)
+                    | (Int(data[data.startIndex + offset + 2]) << 8)
+                    | Int(data[data.startIndex + offset + 3])
+                guard length > 0, offset + 4 + length <= data.count else { return false }
+                offset += 4 + length
+            }
+            return offset == data.count
+        }
+
         func appendVideoSample(_ sample: (data: Data, pts: Int64, dts: Int64, isKey: Bool), duration: Int64) {
             guard let input = videoInput, let format = videoFormat, var writer else { return }
+
+            if !validateAVCC(sample.data) {
+                let head = sample.data.prefix(16).map { String(format: "%02x", $0) }.joined(separator: " ")
+                DiagnosticsLog.write("[转MP4] 跳过非法样本（第 \(videoFrames + 1) 帧）大小=\(sample.data.count)B 头=\(head)")
+                return
+            }
+
             while !input.isReadyForMoreMediaData {
                 Thread.sleep(forTimeInterval: 0.005)
             }
