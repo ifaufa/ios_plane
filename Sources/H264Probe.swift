@@ -6,9 +6,6 @@ import VideoToolbox
 /// 用 VideoToolbox 试解第一帧，判定"解复用出的样本是否合法"
 enum H264Probe {
     fileprivate static var sharedProbe: ProbeSink?
-    fileprivate static var sharedCallback: VTDecompressionOutputCallback?
-    // 该键在新版 SDK 中未以 Swift 常量导出，按 VT 属性原始字符串使用
-    private static let outputCallbackKey = "OutputCallback" as CFString
 
     static func decodeFirstFrame(avcc: Data, info: TSDemuxer.VideoInfo) -> String {
         let head = avcc.prefix(16).map { String(format: "%02x", $0) }.joined(separator: " ")
@@ -53,15 +50,12 @@ enum H264Probe {
                                                          formatDescription: format,
                                                          decoderSpecification: decoderParams,
                                                          imageBufferAttributes: nil,
+                                                         outputCallback: callback,
                                                          decompressionSessionOut: &session)
         guard sessionStatus == noErr, let session else {
             cleanup()
             return "VT 会话创建失败 status=\(sessionStatus)"
         }
-        // 新版 SDK 的创建接口不含 outputCallback，回调通过会话属性注入
-        VTSessionSetProperty(session,
-                             key: outputCallbackKey,
-                             value: unsafeBitCast(callback, to: CFTypeRef.self))
 
         var blockBuffer: CMBlockBuffer?
         let blockStatus = CMBlockBufferCreateWithMemoryBlock(allocator: kCFAllocatorDefault,
