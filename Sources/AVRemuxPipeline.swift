@@ -39,6 +39,7 @@ enum AVRemuxPipeline {
 
         var videoOffset: Int64 = -1
         var lastVideoDTS: Int64 = -1
+        var dtsAdjustCount = 0
         var pendingVideo: (data: Data, pts: Int64, dts: Int64, isKey: Bool)?
         var pendingVideoDuration: Int64 = 3000
 
@@ -236,7 +237,14 @@ enum AVRemuxPipeline {
             if videoOffset < 0 {
                 videoOffset = dts >= 0 ? dts : max(0, pts)
             }
-            let normalizedDTS = max(0, (dts >= 0 ? dts : pts) - videoOffset)
+            var normalizedDTS = max(0, (dts >= 0 ? dts : pts) - videoOffset)
+            // 源流个别 PES 时间戳异常（DTS 倒退），AVAssetWriter 要求 DTS 单调递增：
+            // 数据本身合法（顺序解码全 OK），这里只校正时间戳，不改动样本内容
+            if normalizedDTS <= lastVideoDTS {
+                normalizedDTS = lastVideoDTS + 3750
+                dtsAdjustCount += 1
+            }
+            lastVideoDTS = normalizedDTS
             // B 帧的 PTS 本来就小于 DTS（解码序 vs 显示序），不能钳位——否则合成时序被破坏
             let normalizedPTS = max(0, (pts >= 0 ? pts : dts) - videoOffset)
 
@@ -322,7 +330,7 @@ enum AVRemuxPipeline {
             try? fm.removeItem(at: destination)
             throw RemuxError(message: writer.error?.localizedDescription ?? "写出失败")
         }
-        DiagnosticsLog.write("[转MP4] AVAssetWriter 封装完成 视频帧=\(videoFrames) 音频帧=\(audioFrameIndex)")
+        DiagnosticsLog.write("[转MP4] AVAssetWriter 封装完成 视频帧=\(videoFrames) 音频帧=\(audioFrameIndex) DTS校正=\(dtsAdjustCount)次")
     }
 
     // MARK: - 样本构造
