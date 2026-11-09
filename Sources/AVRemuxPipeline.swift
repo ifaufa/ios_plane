@@ -182,8 +182,15 @@ enum AVRemuxPipeline {
             }
 
             let gridTime = outputIndex * frameStep
-            while !input.isReadyForMoreMediaData {
+            // 就绪等待必须有上限：多轨 writer 会按整体进度节流各输入，
+            // 单线程里无限等待会与另一轨的追加形成死锁
+            var waited: TimeInterval = 0
+            while !input.isReadyForMoreMediaData, waited < 2.0 {
                 Thread.sleep(forTimeInterval: 0.005)
+                waited += 0.005
+            }
+            if videoFrames % 1000 == 0, videoFrames > 0 {
+                DiagnosticsLog.write("[转MP4] 进度 已写 \(videoFrames) 帧（缓冲 \(videoBuffer.count)）")
             }
             guard let buffer = makeSampleBuffer(data: data,
                                                 format: format,
@@ -204,8 +211,13 @@ enum AVRemuxPipeline {
                 Thread.sleep(forTimeInterval: 0.01)
             }
             if !appended {
-                let error = currentWriter.error as NSError?
-                failure = "追加视频样本失败（第 \(videoFrames + 1) 帧，writer状态=\(currentWriter.status.rawValue)）：\(error?.domain ?? "-") \(error?.code ?? 0) \(error?.localizedDescription ?? "")"
+                // writer 已失败才终止；否则视为暂时性拒绝，丢弃该帧继续（避免整体卡死）
+                if currentWriter.status == .failed {
+                    let error = currentWriter.error as NSError?
+                    failure = "追加视频样本失败（第 \(videoFrames + 1) 帧，writer状态=\(currentWriter.status.rawValue)）：\(error?.domain ?? "-") \(error?.code ?? 0) \(error?.localizedDescription ?? "")"
+                } else {
+                    DiagnosticsLog.write("[转MP4] 跳过追加失败帧（第 \(videoFrames + 1) 帧）")
+                }
             }
             videoFrames += 1
             outputIndex += 1
@@ -213,8 +225,10 @@ enum AVRemuxPipeline {
 
         func appendAudioFrame(_ data: Data) {
             guard let input = audioInput, let format = audioFormat else { return }
-            while !input.isReadyForMoreMediaData {
+            var waited: TimeInterval = 0
+            while !input.isReadyForMoreMediaData, waited < 2.0 {
                 Thread.sleep(forTimeInterval: 0.005)
+                waited += 0.005
             }
             guard let buffer = makeSampleBuffer(data: data,
                                                 format: format,
@@ -233,8 +247,12 @@ enum AVRemuxPipeline {
                 }
                 Thread.sleep(forTimeInterval: 0.01)
             }
-            if !appended, failure == nil {
-                failure = "追加音频样本失败"
+            if !appended {
+                if writer?.status == .failed, failure == nil {
+                    failure = "追加音频样本失败（writer 已失败）"
+                } else {
+                    DiagnosticsLog.write("[转MP4] 跳过追加失败音频帧（第 \(audioFrameIndex + 1) 帧）")
+                }
             }
             audioFrameIndex += 1
         }
