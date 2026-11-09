@@ -81,7 +81,7 @@ enum MP4Inspector {
         let entryType = data.ascii(at: 12, length: 4)
         var inner: [String] = []
         if entrySize >= 16, 8 + entrySize <= data.count {
-            let headerExtra = (entryType == "mp4a" || entryType == "ac-3" || entryType == "alac") ? 20 : 78
+            let headerExtra = (entryType == "mp4a" || entryType == "ac-3" || entryType == "alac") ? 28 : 78
             var cursor = 16 + headerExtra
             let end = min(data.count, 8 + entrySize)
             while cursor + 8 <= end {

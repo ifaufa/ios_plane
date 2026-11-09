@@ -66,7 +66,8 @@ enum AVRemuxPipeline {
                             dir: URL,
                             destination: URL,
                             progress: ((Double) -> Void)?,
-                            videoOnly: Bool) throws {
+                            videoOnly: Bool,
+                            audioFormatFlags: Int32) throws {
         let fm = FileManager.default
         if fm.fileExists(atPath: destination.path) {
             try fm.removeItem(at: destination)
@@ -193,7 +194,7 @@ enum AVRemuxPipeline {
             if let audio = audioInfo {
                 var asbd = AudioStreamBasicDescription(mSampleRate: Float64(audio.sampleRate),
                                                        mFormatID: kAudioFormatMPEG4AAC,
-                                                       mFormatFlags: 2,
+                                                       mFormatFlags: audioFormatFlags,
                                                        mBytesPerPacket: 0,
                                                        mFramesPerPacket: 1024,
                                                        mBytesPerFrame: 0,
@@ -399,9 +400,11 @@ enum AVRemuxPipeline {
                       dir: URL,
                       destination: URL,
                       onProgress: ((Double) -> Void)? = nil,
-                      videoOnly: Bool = false) async throws {
+                      videoOnly: Bool = false,
+                      audioFormatFlags: Int32 = 2) async throws {
         try await Task.detached(priority: .userInitiated) {
-            try run(state: state, dir: dir, destination: destination, progress: onProgress, videoOnly: videoOnly)
+            try run(state: state, dir: dir, destination: destination,
+                    progress: onProgress, videoOnly: videoOnly, audioFormatFlags: audioFormatFlags)
         }.value
     }
 

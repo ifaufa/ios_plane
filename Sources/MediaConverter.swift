@@ -36,14 +36,25 @@ enum MediaConverter {
         var produced = false
 
         // 1) 自研解复用 + AVAssetWriter（显示顺序由 I/P/B 推导，不依赖 PES 时间戳）
-        do {
-            let start = Date()
-            try await AVRemuxPipeline.remux(state: state, dir: dir, destination: outputURL,
-                                            onProgress: onProgress, videoOnly: false)
-            produced = true
-            DiagnosticsLog.write(String(format: "[转MP4] 自研封装成功，耗时 %.1fs", Date().timeIntervalSince(start)))
-        } catch {
-            DiagnosticsLog.write("[转MP4] 自研封装失败：\(error.localizedDescription)")
+        // 音频 ASBD flags 做 A/B 自愈：产物若无音频轨，换另一组参数重转一次
+        for (attempt, flags) in [Int32(2), Int32(0)].enumerated() {
+            if produced { break }
+            do {
+                let start = Date()
+                try await AVRemuxPipeline.remux(state: state, dir: dir, destination: outputURL,
+                                                onProgress: onProgress, videoOnly: false,
+                                                audioFormatFlags: flags)
+                let audioCount = ((try? await AVURLAsset(url: outputURL).loadTracks(withMediaType: .audio)) ?? []).count
+                let videoCount = ((try? await AVURLAsset(url: outputURL).loadTracks(withMediaType: .video)) ?? []).count
+                DiagnosticsLog.write("[转MP4] 自研封装成功（第\(attempt + 1)次 flags=\(flags)）耗时 \(String(format: "%.1f", Date().timeIntervalSince(start)))s 产物轨道 视频=\(videoCount) 音频=\(audioCount)")
+                if audioCount > 0 || videoCount == 0 {
+                    produced = true
+                } else {
+                    DiagnosticsLog.write("[转MP4] 产物缺音轨，换 ASBD flags 重转")
+                }
+            } catch {
+                DiagnosticsLog.write("[转MP4] 自研封装失败（flags=\(flags)）：\(error.localizedDescription)")
+            }
         }
 
         // 2) fMP4 或自研失败：走 AVFoundation（HLS 资产）
