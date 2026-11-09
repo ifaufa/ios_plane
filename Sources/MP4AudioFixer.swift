@@ -4,7 +4,7 @@ import Foundation
 /// 前置条件：moov 位于文件末尾（AVAssetWriter 的顺序：ftyp → mdat → moov），
 /// 因此增长 moov 不会影响 stco/co64 指向的 mdat 偏移
 enum MP4AudioFixer {
-    static func fix(url: URL, asc: Data, sampleRate: Int = 0, handlerType: String = "soun") -> String {
+    static func fix(url: URL, asc: Data, sampleRate: Int = 0, audioChannels: Int = 2, handlerType: String = "soun") -> String {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return "无法打开" }
         defer { try? handle.close() }
 
@@ -63,6 +63,17 @@ enum MP4AudioFixer {
 
         // 3) 轨头字段规范化（就地改 4 字节，不影响尺寸）
         var notes: [String] = []
+        // 3.0) mp4a 样本描述固定字段（声道/位宽/采样率）规范化
+        let entryHex = moov.subdata(in: entryRange).prefix(64).map { String(format: "%02x", $0) }.joined(separator: " ")
+        notes.append("mp4a hex=\(entryHex)")
+        if entryRange.count >= 36, sampleRate > 0 {
+            let base = entryRange.lowerBound
+            let channels = UInt16(min(8, max(1, audioChannels)))
+            let rate16 = UInt32(min(96000, max(8000, sampleRate))) << 16
+            moov.replaceSubrange((base + 24)..<(base + 26), with: withUnsafeBytes(of: channels.bigEndian) { Data($0) })
+            moov.replaceSubrange((base + 26)..<(base + 28), with: withUnsafeBytes(of: UInt16(16).bigEndian) { Data($0) })
+            moov.replaceSubrange((base + 32)..<(base + 36), with: withUnsafeBytes(of: rate16.bigEndian) { Data($0) })
+        }
         if let tkhd = descend(moov, from: trakRange.lowerBound + 8, upper: trakRange.upperBound, path: ["tkhd"]) {
             let flagsField = moov.u32(at: tkhd.lowerBound + 8)
             let flags = flagsField & 0xFFFFFF
