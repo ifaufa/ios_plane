@@ -51,6 +51,7 @@ enum AVRemuxPipeline {
         var videoFrames = 0
         var audioFrames = 0
         var currentVideoInfo: TSDemuxer.VideoInfo?
+        var probeFrames: [(data: Data, pts: Int64, dts: Int64)] = []
 
         func ensureWriter(video info: TSDemuxer.VideoInfo) throws -> AVAssetWriter {
             if let writer { return writer }
@@ -206,6 +207,9 @@ enum AVRemuxPipeline {
                 }
                 if !appended {
                     let error = writer.error as NSError?
+                    if currentVideoInfo != nil {
+                        DiagnosticsLog.write("[转MP4] 顺序解码前 \(probeFrames.count) 帧：\(H264Probe.decodeSequence(frames: probeFrames, info: currentVideoInfo!))")
+                    }
                     failure = "追加视频样本失败（第 \(videoFrames + 1) 帧，PTS=\(sample.pts) DTS=\(sample.dts) 大小=\(sample.data.count)B，writer状态=\(writer.status.rawValue)）：\(error?.domain ?? "-") \(error?.code ?? 0) \(error?.localizedDescription ?? "")"
                 }
             }
@@ -243,6 +247,9 @@ enum AVRemuxPipeline {
                 pendingVideoDuration = delta
             }
             pendingVideo = (data, normalizedPTS, normalizedDTS, isKey)
+            if probeFrames.count < 12 {
+                probeFrames.append((data, normalizedPTS, normalizedDTS))
+            }
             lastVideoDTS = normalizedDTS
         }
 
