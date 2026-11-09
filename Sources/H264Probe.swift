@@ -6,6 +6,7 @@ import VideoToolbox
 /// 用 VideoToolbox 试解第一帧，判定"解复用出的样本是否合法"
 enum H264Probe {
     fileprivate static var sharedProbe: ProbeSink?
+    fileprivate static var sharedCallback: VTDecompressionOutputCallback?
 
     static func decodeFirstFrame(avcc: Data, info: TSDemuxer.VideoInfo) -> String {
         let head = avcc.prefix(16).map { String(format: "%02x", $0) }.joined(separator: " ")
@@ -44,13 +45,15 @@ enum H264Probe {
         }
         H264Probe.sharedCallback = callback
 
+        let record = VTDecompressionOutputCallbackRecord(callbackPointer: callback, refcon: nil)
+
         var session: VTDecompressionSession?
         let decoderParams = [kVTDecompressionPropertyKey_RealTime: false] as CFDictionary
         let sessionStatus = VTDecompressionSessionCreate(allocator: kCFAllocatorDefault,
                                                          formatDescription: format,
                                                          decoderSpecification: decoderParams,
                                                          imageBufferAttributes: nil,
-                                                         outputCallback: callback,
+                                                         outputCallback: &record,
                                                          decompressionSessionOut: &session)
         guard sessionStatus == noErr, let session else {
             cleanup()
