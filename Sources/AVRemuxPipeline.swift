@@ -214,7 +214,8 @@ enum AVRemuxPipeline {
                 }
                 // 诊断：打印音频格式描述与 magic cookie，确认 ASC 是否有效
                 if let desc {
-                    let cookieSize = CMAudioFormatDescriptionGetMagicCookie(desc, magicCookieOut: nil) ?? 0
+                    var cookieSize = 0
+                    _ = CMAudioFormatDescriptionGetMagicCookie(desc, sizeOut: &cookieSize)
                     let ascHex = asc.map { String(format: "%02x", $0) }.joined(separator: " ")
                     DiagnosticsLog.write("[转MP4] 音频参数 rate=\(audio.sampleRate) ch=\(audio.channels) ASC=\(ascHex)(\(asc.count)B) cookie=\(cookieSize)B status=\(audioStatus)")
                 }
