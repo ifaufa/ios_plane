@@ -37,7 +37,7 @@ enum MediaConverter {
 
         // 1) 自研解复用 + AVAssetWriter（显示顺序由 I/P/B 推导，不依赖 PES 时间戳）
         // 音频 ASBD flags 做 A/B 自愈：产物若无音频轨，换另一组参数重转一次
-        for (attempt, flags) in [Int32(2), Int32(0)].enumerated() {
+        for (attempt, flags) in [UInt32(2), UInt32(0)].enumerated() {
             if produced { break }
             do {
                 let start = Date()
