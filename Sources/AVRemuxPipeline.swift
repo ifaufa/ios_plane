@@ -171,6 +171,10 @@ enum AVRemuxPipeline {
                 return
             }
 
+            if videoFrames == 0 && pendingVideo == nil {
+                DiagnosticsLog.write("[转MP4] 首帧探测 \(H264Probe.decodeFirstFrame(avcc: data, info: info))")
+            }
+
             if videoOffset < 0 {
                 videoOffset = dts >= 0 ? dts : max(0, pts)
             }
