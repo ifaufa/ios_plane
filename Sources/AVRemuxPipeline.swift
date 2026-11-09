@@ -212,6 +212,12 @@ enum AVRemuxPipeline {
                                                    extensions: nil,
                                                    formatDescriptionOut: &desc)
                 }
+                // 诊断：打印音频格式描述与 magic cookie，确认 ASC 是否有效
+                if let desc {
+                    let cookieSize = CMAudioFormatDescriptionGetMagicCookie(desc, magicCookieOut: nil) ?? 0
+                    let ascHex = asc.map { String(format: "%02x", $0) }.joined(separator: " ")
+                    DiagnosticsLog.write("[转MP4] 音频参数 rate=\(audio.sampleRate) ch=\(audio.channels) ASC=\(ascHex)(\(asc.count)B) cookie=\(cookieSize)B status=\(audioStatus)")
+                }
                 if audioStatus == noErr, let desc {
                     let input = AVAssetWriterInput(mediaType: .audio, outputSettings: nil, sourceFormatHint: desc)
                     input.expectsMediaDataInRealTime = false

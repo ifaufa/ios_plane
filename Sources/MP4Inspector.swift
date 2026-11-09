@@ -55,10 +55,10 @@ enum MP4Inspector {
             } else if type == "stsd" {
                 names.append("stsd{\(dumpSampleEntry(child))}")
             } else if type == "stsz" {
-                let count = child.count >= 8 ? Int(child.u32(at: 4)) : -1
+                let count = child.count >= 12 ? Int(child.u32(at: 8)) : -1
                 names.append("stsz(\(count))")
             } else if type == "stco" || type == "co64" {
-                let count = child.count >= 4 ? Int(child.u32(at: 0)) : -1
+                let count = child.count >= 8 ? Int(child.u32(at: 4)) : -1
                 names.append("\(type)(\(count))")
             } else if type == "stts" || type == "ctts" || type == "stsc" || type == "stss" {
                 // FullBox：version/flags(4) + entry_count(4)
@@ -81,7 +81,8 @@ enum MP4Inspector {
         let entryType = data.ascii(at: 12, length: 4)
         var inner: [String] = []
         if entrySize >= 16, 8 + entrySize <= data.count {
-            var cursor = 16 + 78
+            let headerExtra = (entryType == "mp4a" || entryType == "ac-3" || entryType == "alac") ? 20 : 78
+            var cursor = 16 + headerExtra
             let end = min(data.count, 8 + entrySize)
             while cursor + 8 <= end {
                 let size = Int(data.u32(at: cursor))
