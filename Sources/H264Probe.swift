@@ -6,6 +6,7 @@ import VideoToolbox
 /// 用 VideoToolbox 试解第一帧，判定"解复用出的样本是否合法"
 enum H264Probe {
     static var sharedProbe: ProbeSink?
+    static var sharedCallback: VTDecompressionOutputCallback?
 
     static func decodeFirstFrame(avcc: Data, info: TSDemuxer.VideoInfo) -> String {
         let head = avcc.prefix(16).map { String(format: "%02x", $0) }.joined(separator: " ")
@@ -39,23 +40,26 @@ enum H264Probe {
 
         let probe = ProbeSink()
         H264Probe.sharedProbe = probe
-
         let callback: VTDecompressionOutputCallback = { _, _, status, _, _, _, _ in
             H264Probe.sharedProbe?.receivedStatus = status
         }
+        H264Probe.sharedCallback = callback
 
         var session: VTDecompressionSession?
-        var decoderParams = [kVTDecompressionPropertyKey_RealTime: false] as CFDictionary
+        let decoderParams = [kVTDecompressionPropertyKey_RealTime: false] as CFDictionary
         let sessionStatus = VTDecompressionSessionCreate(allocator: kCFAllocatorDefault,
                                                          formatDescription: format,
-                                                         decoderSpecifications: decoderParams as CFDictionary,
+                                                         decoderSpecifications: decoderParams,
                                                          destinationImageBufferAttributes: nil,
-                                                         outputCallback: callback,
                                                          decompressionSessionOut: &session)
         guard sessionStatus == noErr, let session else {
-            H264Probe.sharedProbe = nil
+            cleanup()
             return "VT 会话创建失败 status=\(sessionStatus)"
         }
+        // 新版 SDK 的创建接口不含 outputCallback，回调通过会话属性注入
+        VTSessionSetProperty(session,
+                             key: kVTDecompressionPropertyKey_OutputCallback,
+                             value: unsafeBitCast(callback, to: CFTypeRef.self))
 
         var blockBuffer: CMBlockBuffer?
         let blockStatus = CMBlockBufferCreateWithMemoryBlock(allocator: kCFAllocatorDefault,
@@ -68,7 +72,7 @@ enum H264Probe {
                                                              flags: 0,
                                                              blockBufferOut: &blockBuffer)
         guard blockStatus == noErr, let blockBuffer else {
-            H264Probe.sharedProbe = nil
+            cleanup()
             return "CMBlockBuffer 创建失败"
         }
         let copied = avcc.withUnsafeBytes { buffer -> OSStatus in
@@ -78,7 +82,7 @@ enum H264Probe {
                                           dataLength: avcc.count)
         }
         guard copied == noErr else {
-            H264Probe.sharedProbe = nil
+            cleanup()
             return "样本数据写入失败"
         }
 
@@ -100,15 +104,15 @@ enum H264Probe {
                                                 sampleSizeArray: &sampleSize,
                                                 sampleBufferOut: &sampleBuffer)
         guard sampleStatus == noErr, let sampleBuffer else {
-            H264Probe.sharedProbe = nil
+            cleanup()
             return "CMSampleBuffer 创建失败 status=\(sampleStatus)"
         }
 
-        var infoFlags = VTDecodeFrameFlags(rawValue: 0)
+        var infoFlags = VTDecodeInfoFlags(rawValue: 0)
         let decodeStatus = VTDecompressionSessionDecodeFrame(session,
                                                              sampleBuffer: sampleBuffer,
-                                                             decodeFlags: infoFlags,
-                                                             sourceFrameRefCon: nil,
+                                                             flags: VTDecodeFrameFlags(rawValue: 0),
+                                                             frameRefcon: nil,
                                                              infoFlagsOut: &infoFlags)
 
         let deadline = Date().addingTimeInterval(2)
@@ -121,11 +125,16 @@ enum H264Probe {
             Thread.sleep(forTimeInterval: 0.02)
         }
         VTDecompressionSessionInvalidate(session)
-        H264Probe.sharedProbe = nil
+        cleanup()
         return result + "（首帧头=\(head)）"
+    }
+
+    private static func cleanup() {
+        H264Probe.sharedProbe = nil
+        H264Probe.sharedCallback = nil
     }
 }
 
-private final class ProbeSink {
+fileprivate final class ProbeSink {
     var receivedStatus: OSStatus?
 }
