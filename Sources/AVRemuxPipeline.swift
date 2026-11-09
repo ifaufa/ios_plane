@@ -237,9 +237,8 @@ enum AVRemuxPipeline {
                 videoOffset = dts >= 0 ? dts : max(0, pts)
             }
             let normalizedDTS = max(0, (dts >= 0 ? dts : pts) - videoOffset)
-            // B 帧会出现 PTS < DTS，AVAssetWriter 不接受负的合成偏移，这里夹到 DTS
-            var normalizedPTS = max(0, (pts >= 0 ? pts : dts) - videoOffset)
-            if normalizedPTS < normalizedDTS { normalizedPTS = normalizedDTS }
+            // B 帧的 PTS 本来就小于 DTS（解码序 vs 显示序），不能钳位——否则合成时序被破坏
+            let normalizedPTS = max(0, (pts >= 0 ? pts : dts) - videoOffset)
 
             if let previous = pendingVideo {
                 let delta = max(1, normalizedDTS - previous.dts)

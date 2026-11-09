@@ -136,7 +136,7 @@ enum H264Probe {
             let status = index < probe.statuses.count ? probe.statuses[index] : OSStatus(-9999)
             let head = frames[index].data.prefix(8).map { String(format: "%02x", $0) }.joined(separator: " ")
             let verdict = status == noErr ? "OK" : "失败(\(status))"
-            lines.append("#\(index)[\(frames[index].data.count)B \(head) \(verdict)]")
+            lines.append("#\(index)[\(frames[index].data.count)B dts=\(frames[index].dts) pts=\(frames[index].pts) \(verdict)]")
         }
         return "顺序解码：" + lines.joined(separator: " ")
     }

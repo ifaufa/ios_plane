@@ -138,8 +138,15 @@ final class VideoLibrary: ObservableObject {
     func remove(ids: Set<UUID>) {
         guard !ids.isEmpty else { return }
         quarantineStoreIfNeeded()
+        let fm = FileManager.default
         for item in items where ids.contains(item.id) {
-            try? FileManager.default.removeItem(at: localURL(for: item))
+            let url = localURL(for: item)
+            if item.fileName.lowercased().hasSuffix(".m3u8") {
+                // 分片态：删除整个工作目录（否则只删 index.m3u8，分片仍占空间）
+                try? fm.removeItem(at: url.deletingLastPathComponent())
+            } else {
+                try? fm.removeItem(at: url)
+            }
         }
         items.removeAll { ids.contains($0.id) }
         save()
