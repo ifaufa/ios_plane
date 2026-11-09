@@ -205,8 +205,7 @@ enum AVRemuxPipeline {
             if !CMSampleBufferIsValid(buffer)
                 || !CMSampleBufferGetDecodeTimeStamp(buffer).isValid
                 || !CMSampleBufferGetPresentationTimeStamp(buffer).isValid
-                || !CMSampleBufferGetDuration(buffer).isValid
-                || CMSampleBufferGetDataLength(buffer) <= 0 {
+                || !CMSampleBufferGetDuration(buffer).isValid {
                 DiagnosticsLog.write("[转MP4] 跳过无效时间样本（第 \(videoFrames + 1) 帧）grid=\(gridTime)")
                 outputIndex += 1
                 videoFrames += 1
