@@ -191,6 +191,7 @@ enum AVRemuxPipeline {
 
             let vInput = AVAssetWriterInput(mediaType: .video, outputSettings: nil, sourceFormatHint: videoDesc)
             vInput.expectsMediaDataInRealTime = false
+            vInput.mediaTimeScale = 90000
             guard newWriter.canAdd(vInput) else { throw RemuxError(message: "无法添加视频轨") }
             newWriter.add(vInput)
 
@@ -231,6 +232,7 @@ enum AVRemuxPipeline {
                 if audioStatus == noErr, let desc {
                     let input = AVAssetWriterInput(mediaType: .audio, outputSettings: nil, sourceFormatHint: desc)
                     input.expectsMediaDataInRealTime = false
+                    input.mediaTimeScale = Int32(max(8000, audio.sampleRate))
                     if newWriter.canAdd(input) {
                         newWriter.add(input)
                         aInput = input

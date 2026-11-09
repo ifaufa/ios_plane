@@ -108,6 +108,62 @@ enum MP4AudioFixer {
         return "esds 已写入（新增 \(delta)B，ASC=\(asc.map { String(format: "%02x", $0) }.joined())）"
     }
 
+    /// 打印音频轨关键参数（tkhd/mdhd/stts/stsz），用于定位被系统丢弃的原因
+    static func inspectAudioTrack(url: URL, handlerType: String = "soun") -> String {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return "无法打开" }
+        defer { try? handle.close() }
+        guard let fileSize = try? handle.seekToEnd() else { return "无法读取大小" }
+
+        var offset: UInt64 = 0
+        var moovOffset: UInt64?
+        var moovSize: UInt64 = 0
+        var moovHeaderLength: UInt64 = 8
+        while offset + 8 <= fileSize {
+            try? handle.seek(toOffset: offset)
+            guard let header = try? handle.read(upToCount: 16), header.count >= 8 else { break }
+            var size = UInt64(header.u32(at: 0))
+            let type = header.ascii(at: 4, length: 4)
+            var headerLength: UInt64 = 8
+            if size == 1, header.count >= 16 { size = header.u64(at: 8); headerLength = 16 }
+            else if size == 0 { size = fileSize - offset }
+            guard size >= headerLength else { break }
+            if type == "moov" { moovOffset = offset; moovSize = size; moovHeaderLength = headerLength; break }
+            offset += size
+        }
+        guard let moovOffset else { return "无 moov" }
+        try? handle.seek(toOffset: moovOffset)
+        guard let moov = try? handle.read(upToCount: Int(moovSize)) else { return "读 moov 失败" }
+
+        guard let trakRange = findTrak(in: moov, bodyStart: Int(moovHeaderLength), handlerType: handlerType) else {
+            return "无 \(handlerType) 轨"
+        }
+        var parts: [String] = []
+        if let tkhd = descend(moov, from: trakRange.lowerBound + 8, upper: trakRange.upperBound, path: ["tkhd"]) {
+            let flags = moov.u32(at: tkhd.lowerBound + 8) & 0xFFFFFF
+            let duration = moov.u32(at: tkhd.lowerBound + 8 + 4 + 8 + 8)
+            parts.append("tkhd flags=0x\(String(format: "%06x", flags)) dur=\(duration)")
+        }
+        if let mdhd = descend(moov, from: trakRange.lowerBound + 8, upper: trakRange.upperBound, path: ["mdia", "mdhd"]) {
+            let version = moov.u32(at: mdhd.lowerBound + 8) >> 24
+            let timescale: UInt32 = version == 1 ? moov.u32(at: mdhd.lowerBound + 8 + 4 + 16) : moov.u32(at: mdhd.lowerBound + 8 + 4 + 8)
+            let duration: UInt64 = version == 1 ? moov.u64(at: mdhd.lowerBound + 8 + 4 + 20) : UInt64(moov.u32(at: mdhd.lowerBound + 8 + 4 + 12))
+            parts.append("mdhd v=\(version) timescale=\(timescale) dur=\(duration)")
+        }
+        if let edts = descend(moov, from: trakRange.lowerBound + 8, upper: trakRange.upperBound, path: ["edts", "elst"]) {
+            let count = moov.u32(at: edts.lowerBound + 12)
+            parts.append("elst v=\(moov.u32(at: edts.lowerBound + 8) >> 24) count=\(count)")
+            if count > 0 {
+                let entry = edts.lowerBound + 16
+                parts.append("elst0 segDur=\(moov.u32(at: entry)) mediaTime=\(Int32(bitPattern: moov.u32(at: entry + 4)))")
+            }
+        } else {
+            parts.append("无 edts")
+        }
+        if let stts = descend(moov, from: trakRange.lowerBound + 8, upper: trakRange.upperBound, path: ["mdia", "minf", "stbl", "stts"]) {
+            parts.append("stts entries=\(moov.u32(at: stts.lowerBound + 12))")
+        }
+        return parts.joined(separator: " ")
+    }
     // MARK: - esds 构造
 
     private static func buildESDS(asc: Data) -> Data {

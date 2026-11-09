@@ -49,6 +49,7 @@ enum MediaConverter {
                     let fixLog = MP4AudioFixer.fix(url: outputURL, asc: asc)
                     DiagnosticsLog.write("[转MP4] esds 修补：\(fixLog)")
                 }
+                DiagnosticsLog.write("[转MP4] 音频轨诊断 \(MP4AudioFixer.inspectAudioTrack(url: outputURL))")
                 let audioCount = ((try? await AVURLAsset(url: outputURL).loadTracks(withMediaType: .audio)) ?? []).count
                 let videoCount = ((try? await AVURLAsset(url: outputURL).loadTracks(withMediaType: .video)) ?? []).count
                 DiagnosticsLog.write("[转MP4] 自研封装成功（第\(attempt + 1)次 flags=\(flags)）耗时 \(String(format: "%.1f", Date().timeIntervalSince(start)))s 产物轨道 视频=\(videoCount) 音频=\(audioCount)")
