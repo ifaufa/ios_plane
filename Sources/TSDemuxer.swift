@@ -15,7 +15,7 @@ final class TSDemuxer {
         var audioSpecificConfig: Data
     }
 
-    var onVideoFrame: ((_ avcc: Data, _ pts: Int64, _ dts: Int64, _ isKey: Bool) -> Void)?
+    var onVideoFrame: ((_ avcc: Data, _ pts: Int64, _ dts: Int64, _ isKey: Bool, _ isRef: Bool) -> Void)?
     var onAudioFrame: ((_ raw: Data, _ pts: Int64) -> Void)?
     var onInfo: ((VideoInfo?, AudioInfo?) -> Void)?
     var onError: ((String) -> Void)?
@@ -234,9 +234,11 @@ final class TSDemuxer {
         // （编码器可能把多个帧打包进同一个 PES，合并成一个样本会导致 AVAssetWriter 判非法）
         var units: [[Data]] = []
         var unitKeys: [Bool] = []
+        var unitRefs: [Bool] = []
         var current: [Data] = []
         var currentHasVCL = false
         var currentIsKey = false
+        var currentIsRef = true
 
         for nal in nals {
             guard let first = nal.first else { continue }
@@ -254,11 +256,20 @@ final class TSDemuxer {
                 if currentHasVCL {
                     units.append(current)
                     unitKeys.append(currentIsKey)
+                    unitRefs.append(currentIsRef)
                     current = []
                     currentHasVCL = false
                     currentIsKey = false
+                    currentIsRef = true
                 }
-                if type == 5 { currentIsKey = true }
+                if type == 5 {
+                    currentIsKey = true
+                    currentIsRef = true
+                } else {
+                    // type 1：按 slice_type 判断 P(参考) / B(非参考)
+                    let st = Self.sliceType(nal)
+                    currentIsRef = (st == nil) || (st! % 5 == 0) || (st! % 5 == 3) || (st! % 5 == 2)
+                }
                 currentHasVCL = true
             }
             current.append(nal)
@@ -266,6 +277,7 @@ final class TSDemuxer {
         if currentHasVCL {
             units.append(current)
             unitKeys.append(currentIsKey)
+            unitRefs.append(currentIsRef)
         }
 
         emitVideoInfoIfNeeded()
@@ -287,7 +299,7 @@ final class TSDemuxer {
             }
             let auDTS = (dts >= 0 ? dts : max(0, pts)) + Int64(index) * frameStep
             let auPTS = max((pts >= 0 ? pts : auDTS), auDTS) + Int64(index) * frameStep
-            onVideoFrame?(avcc, auPTS, auDTS, unitKeys[index])
+            onVideoFrame?(avcc, auPTS, auDTS, unitKeys[index], index < unitRefs.count ? unitRefs[index] : true)
         }
     }
 
@@ -378,14 +390,19 @@ final class TSDemuxer {
             // 结束位置 = 下一个起始码的起点（不能减 3/4，否则会残留 0x00）
             let end = index + 1 < codeStarts.count ? codeStarts[index + 1] : bytes.count
             guard start < end else { continue }
-            var nal = Data(bytes[start..<end])
-            // 去掉尾部可能残留的填充 0x00（不影响解码）
-            while nal.count > 1, nal.last == 0x00 { nal.removeLast() }
-            result.append(nal)
+            // 原样保留 NAL 字节（含尾部 cabac_zero_words），不做任何修剪以免损坏切片
+            result.append(Data(bytes[start..<end]))
         }
         return result
     }
 
+    /// 解析 slice_type（0=P 1=B 2=I 3=SP 4=SI），用于区分参考帧/B 帧
+    static func sliceType(_ nal: Data) -> Int? {
+        guard nal.count > 2 else { return nil }
+        var reader = BitReader(bytes: Array(nal.dropFirst()))
+        _ = reader.readUE()   // first_mb_in_slice
+        return reader.readUE()
+    }
     /// 从 SPS 里解析分辨率（严格按 H.264 语法，含 high profile 的 chroma 字段）
     static func parseSPSDimensions(_ sps: Data) -> (Int, Int) {
         let bytes = [UInt8](sps)

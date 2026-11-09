@@ -35,17 +35,15 @@ enum MediaConverter {
 
         var produced = false
 
-        // 1) 全 Apple 组件：预热 HLS 资产 → AVAssetReader 读压缩样本 → AVAssetWriter 写 MP4
+        // 1) 自研解复用 + AVAssetWriter（显示顺序由 I/P/B 推导，不依赖 PES 时间戳）
         do {
-            let playlist = dir.appendingPathComponent("index.m3u8")
-            let httpURL = try LocalHLS.playbackURL(playlistURL: playlist)
-            defer { LocalHLS.stopPlayback() }
             let start = Date()
-            try await PrimedRemuxer.remux(source: httpURL, destination: outputURL, progress: onProgress)
+            try await AVRemuxPipeline.remux(state: state, dir: dir, destination: outputURL,
+                                            onProgress: onProgress, videoOnly: false)
             produced = true
-            DiagnosticsLog.write(String(format: "[转MP4] Primed Reader→Writer 成功，耗时 %.1fs", Date().timeIntervalSince(start)))
+            DiagnosticsLog.write(String(format: "[转MP4] 自研封装成功，耗时 %.1fs", Date().timeIntervalSince(start)))
         } catch {
-            DiagnosticsLog.write("[转MP4] Primed Reader→Writer 失败：\(error.localizedDescription)")
+            DiagnosticsLog.write("[转MP4] 自研封装失败：\(error.localizedDescription)")
         }
 
         // 2) fMP4 或自研失败：走 AVFoundation（HLS 资产）
