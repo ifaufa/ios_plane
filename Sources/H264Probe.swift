@@ -45,7 +45,10 @@ enum H264Probe {
         }
         H264Probe.sharedCallback = callback
 
-        let record = VTDecompressionOutputCallbackRecord(callbackPointer: callback, refcon: nil)
+        let record = VTDecompressionOutputCallbackRecord(
+            decompressionOutputCallback: callback,
+            decompressionOutputRefCon: nil
+        )
 
         var session: VTDecompressionSession?
         let decoderParams = [kVTDecompressionPropertyKey_RealTime: false] as CFDictionary
