@@ -85,6 +85,12 @@ struct ContentView: View {
                                     Label("转 MP4", systemImage: "arrow.triangle.2.circlepath")
                                 }
                                 .tint(.blue)
+                                Button {
+                                    exportTS(item)
+                                } label: {
+                                    Label("导出 TS", systemImage: "doc.badge.arrow.up")
+                                }
+                                .tint(.orange)
                             } else if !library.isMissing(item) {
                                 Button {
                                     shareItem = ShareItem(url: library.localURL(for: item))
@@ -256,6 +262,17 @@ struct ContentView: View {
         }
     }
 
+    private func exportTS(_ item: VideoItem) {
+        let dir = library.localURL(for: item).deletingLastPathComponent()
+        Task {
+            do {
+                let url = try await MediaConverter.exportMergedTS(dir: dir, title: item.title)
+                shareItem = ShareItem(url: url)
+            } catch {
+                backup.alert = .init(title: "导出失败", message: error.localizedDescription)
+            }
+        }
+    }
     private func rebuildLibrary() {
         let count = library.rebuildFromAssets()
         backup.alert = .init(

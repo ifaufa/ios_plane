@@ -55,6 +55,9 @@ enum MediaConverter {
                 DiagnosticsLog.write("[转MP4] 自研封装成功（第\(attempt + 1)次 flags=\(flags)）耗时 \(String(format: "%.1f", Date().timeIntervalSince(start)))s 产物轨道 视频=\(videoCount) 音频=\(audioCount)")
                 if audioCount > 0 || videoCount == 0 {
                     produced = true
+                } else if attempt == 1 {
+                    produced = true
+                    DiagnosticsLog.write("[转MP4] 两次尝试均无音轨，已保留画面版本（音频待修）")
                 } else {
                     DiagnosticsLog.write("[转MP4] 产物缺音轨，换 ASBD flags 重转")
                 }
@@ -121,6 +124,24 @@ enum MediaConverter {
         return "总时长=\(String(format: "%.1f", duration))s | " + parts.joined(separator: " | ")
     }
 
+    /// 导出合并 TS（电脑端可用 ffmpeg -i merged.ts -c copy out.mp4 无损转换）
+    static func exportMergedTS(dir: URL, title: String) async throws -> URL {
+        try await Task.detached(priority: .userInitiated) {
+            let fm = FileManager.default
+            guard let state = loadState(dir: dir) else {
+                throw ConversionError(message: "缺少任务状态（state.json）")
+            }
+            let report = try LocalHLS.merge(state: state, dir: dir, container: state.container)
+            let ext = report.url.pathExtension.isEmpty ? "ts" : report.url.pathExtension
+            let base = title.isEmpty ? UUID().uuidString : title.replacingOccurrences(of: "/", with: "_")
+            let dest = VideoLibrary.assetsDir.appendingPathComponent("\(base)-合并.\(ext)")
+            try? fm.removeItem(at: dest)
+            try fm.moveItem(at: report.url, to: dest)
+            let size = (try? dest.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            DiagnosticsLog.write("[导出TS] 完成 \(dest.lastPathComponent) \(size)B")
+            return dest
+        }.value
+    }
     private static func loadState(dir: URL) -> SegmentJobState? {
         let stateURL = dir.appendingPathComponent("state.json")
         guard let data = try? Data(contentsOf: stateURL) else { return nil }
