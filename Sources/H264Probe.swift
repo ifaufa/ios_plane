@@ -118,7 +118,7 @@ enum H264Probe {
                                                                  frameRefcon: nil,
                                                                  infoFlagsOut: &infoFlags)
             if decodeStatus != noErr {
-                results(in: probe).append("#\(index) 调用失败=\(decodeStatus)")
+                probe.texts.append("#\(index) 调用失败=\(decodeStatus)")
             }
         }
 
