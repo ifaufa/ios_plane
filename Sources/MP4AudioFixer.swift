@@ -49,7 +49,7 @@ enum MP4AudioFixer {
         guard let trakRange = findTrak(in: moov, bodyStart: bodyStart, handlerType: handlerType) else {
             return "未找到 \(handlerType) 轨"
         }
-        guard let stsdRange = descend(moov, from: trakRange.lowerBound, upper: trakRange.upperBound, path: ["mdia", "minf", "stbl", "stsd"]),
+        guard let stsdRange = descend(moov, from: trakRange.lowerBound + 8, upper: trakRange.upperBound, path: ["mdia", "minf", "stbl", "stsd"]),
               let entryRange = firstSampleEntry(in: moov, stsdRange: stsdRange) else {
             return "未找到音频样本描述"
         }
@@ -73,9 +73,9 @@ enum MP4AudioFixer {
 
         // 5) 逐级修正父 box 尺寸（样本描述、stsd、stbl、minf、mdia、trak、moov）
         var containers: [Range<Int>] = [entryRange, stsdRange, trakRange]
-        if let stbl = descend(moov, from: trakRange.lowerBound, upper: trakRange.upperBound, path: ["mdia", "minf", "stbl"]) { containers.append(stbl) }
-        if let minf = descend(moov, from: trakRange.lowerBound, upper: trakRange.upperBound, path: ["mdia", "minf"]) { containers.append(minf) }
-        if let mdia = descend(moov, from: trakRange.lowerBound, upper: trakRange.upperBound, path: ["mdia"]) { containers.append(mdia) }
+        if let stbl = descend(moov, from: trakRange.lowerBound + 8, upper: trakRange.upperBound, path: ["mdia", "minf", "stbl"]) { containers.append(stbl) }
+        if let minf = descend(moov, from: trakRange.lowerBound + 8, upper: trakRange.upperBound, path: ["mdia", "minf"]) { containers.append(minf) }
+        if let mdia = descend(moov, from: trakRange.lowerBound + 8, upper: trakRange.upperBound, path: ["mdia"]) { containers.append(mdia) }
         // 从内到外（先小范围后大范围）修正尺寸，避免范围失效
         let ordered = containers.sorted { $0.count < $1.count }
         for range in ordered {
