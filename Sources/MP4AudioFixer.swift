@@ -61,15 +61,30 @@ enum MP4AudioFixer {
             return "音频样本描述类型=\(entryType)（非 mp4a）hex=\(hexHead)"
         }
 
-        // 3) 已有 esds？
+        // 3) 已有 esds？AVAssetWriter 可能写入"裸 ASC"（无描述符层级），必须替换
         let childrenStart = entryRange.lowerBound + 36
+        var replaceRange: Range<Int>?
+        let newESDS = buildESDS(asc: asc)
         if let existing = findChild(moov, from: childrenStart, to: entryRange.upperBound, type: "esds") {
-            return "esds 已存在 size=\(existing.count) hex=\(moov.subdata(in: existing).prefix(48).map { String(format: "%02x", $0) }.joined(separator: " "))"
+            let hex = moov.subdata(in: existing).prefix(48).map { String(format: "%02x", $0) }.joined(separator: " ")
+            let payloadTag = existing.lowerBound + 12 < existing.upperBound ? moov[moov.startIndex + existing.lowerBound + 12] : 0
+            if payloadTag == 0x03 {
+                return "esds 结构正常 size=\(existing.count) hex=\(hex)"
+            }
+            replaceRange = existing
+            DiagnosticsLog.write("[转MP4] esds 结构非法（裸 ASC），替换为合规描述符：原 hex=\(hex)")
         }
 
-        // 4) 构造 esds 并插入
-        let esds = buildESDS(asc: asc)
-        moov.insert(contentsOf: esds, at: entryRange.upperBound)
+        // 4) 写入 esds（替换非法的 / 插入缺失的）
+        let delta: Int
+        if let replaceRange {
+            delta = newESDS.count - replaceRange.count
+            moov.replaceSubrange(replaceRange, with: newESDS)
+        } else {
+            delta = newESDS.count
+            moov.insert(contentsOf: newESDS, at: entryRange.upperBound)
+        }
+        let esds = Data(repeating: 0, count: delta)   // 仅用于尺寸换算
 
         // 5) 逐级修正父 box 尺寸（样本描述、stsd、stbl、minf、mdia、trak、moov）
         var containers: [Range<Int>] = [entryRange, stsdRange, trakRange]
@@ -79,7 +94,7 @@ enum MP4AudioFixer {
         // 从内到外（先小范围后大范围）修正尺寸，避免范围失效
         let ordered = containers.sorted { $0.count < $1.count }
         for range in ordered {
-            let newSize = UInt32(range.count + esds.count)
+            let newSize = UInt32(range.count + delta)
             moov.replaceSubrange(range.lowerBound..<(range.lowerBound + 4), with: withUnsafeBytes(of: newSize.bigEndian) { Data($0) })
         }
         let newMoovSize = UInt32(moov.count)
@@ -90,7 +105,7 @@ enum MP4AudioFixer {
         try? handle.write(contentsOf: moov)
         try? handle.truncate(atOffset: moovOffset + UInt64(moov.count))
 
-        return "已补写 esds（\(esds.count)B，ASC=\(asc.map { String(format: "%02x", $0) }.joined())）"
+        return "esds 已写入（新增 \(delta)B，ASC=\(asc.map { String(format: "%02x", $0) }.joined())）"
     }
 
     // MARK: - esds 构造
