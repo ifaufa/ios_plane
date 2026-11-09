@@ -43,7 +43,15 @@ enum MediaConverter {
                 produced = true
                 DiagnosticsLog.write(String(format: "[转MP4] TS→MP4（AVAssetWriter）成功，耗时 %.1fs", Date().timeIntervalSince(start)))
             } catch {
-                DiagnosticsLog.write("[转MP4] AVAssetWriter 封装失败：\(error.localizedDescription)")
+                DiagnosticsLog.write("[转MP4] AVAssetWriter 封装失败：\(error.localizedDescription)，尝试仅视频轨")
+                do {
+                    try await AVRemuxPipeline.remux(state: state, dir: dir, destination: outputURL,
+                                                    onProgress: onProgress, videoOnly: true)
+                    produced = true
+                    DiagnosticsLog.write("[转MP4] 仅视频轨封装成功")
+                } catch {
+                    DiagnosticsLog.write("[转MP4] 仅视频轨封装也失败：\(error.localizedDescription)")
+                }
             }
         }
         if !produced {

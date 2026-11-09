@@ -12,9 +12,10 @@ enum AVRemuxPipeline {
     static func remux(state: SegmentJobState,
                       dir: URL,
                       destination: URL,
-                      onProgress: ((Double) -> Void)? = nil) async throws {
+                      onProgress: ((Double) -> Void)? = nil,
+                      videoOnly: Bool = false) async throws {
         try await Task.detached(priority: .userInitiated) {
-            try run(state: state, dir: dir, destination: destination, progress: onProgress)
+            try run(state: state, dir: dir, destination: destination, progress: onProgress, videoOnly: videoOnly)
         }.value
     }
 
@@ -22,7 +23,8 @@ enum AVRemuxPipeline {
     private static func run(state: SegmentJobState,
                             dir: URL,
                             destination: URL,
-                            progress: ((Double) -> Void)?) throws {
+                            progress: ((Double) -> Void)?,
+                            videoOnly: Bool) throws {
         let fm = FileManager.default
         if fm.fileExists(atPath: destination.path) {
             try fm.removeItem(at: destination)
@@ -91,7 +93,7 @@ enum AVRemuxPipeline {
             }
             newWriter.add(vInput)
 
-            if let audio = demuxer.audioInfo() {
+            if let audio = demuxer.audioInfo(), !videoOnly {
                 var asbd = AudioStreamBasicDescription(
                     mSampleRate: Float64(audio.sampleRate),
                     mFormatID: kAudioFormatMPEG4AAC,
@@ -135,6 +137,23 @@ enum AVRemuxPipeline {
             writer = newWriter
             videoInput = vInput
             videoFormat = videoDesc
+
+            // 补写 writer 创建前到达的音频帧（保持索引连续）
+            if audioInput != nil, !pendingAudio.isEmpty {
+                for data in pendingAudio {
+                    appendAudioSample(data: data,
+                                      format: audioFormat!,
+                                      input: audioInput!,
+                                      index: audioFrameIndex,
+                                      rate: audioRate,
+                                      offset: 0,
+                                      basePTS: 0) { message in
+                        if failure == nil { failure = message }
+                    }
+                    audioFrameIndex += 1
+                }
+                pendingAudio.removeAll()
+            }
             return newWriter
         }
 
