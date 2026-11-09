@@ -45,7 +45,7 @@ enum H264Probe {
         }
         H264Probe.sharedCallback = callback
 
-        let record = VTDecompressionOutputCallbackRecord(
+        var record = VTDecompressionOutputCallbackRecord(
             decompressionOutputCallback: callback,
             decompressionOutputRefCon: nil
         )
