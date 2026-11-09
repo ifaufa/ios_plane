@@ -201,6 +201,17 @@ enum AVRemuxPipeline {
                 failure = "创建视频样本失败"
                 return
             }
+            // appendSampleBuffer 遇到 kCMTimeInvalid 会抛 ObjC 异常（闪退），写入前先自检
+            if !CMSampleBufferIsValid(buffer)
+                || !CMSampleBufferGetDecodeTimeStamp(buffer).isValid
+                || !CMSampleBufferGetPresentationTimeStamp(buffer).isValid
+                || !CMSampleBufferGetDuration(buffer).isValid
+                || CMSampleBufferGetDataLength(buffer) <= 0 {
+                DiagnosticsLog.write("[转MP4] 跳过无效时间样本（第 \(videoFrames + 1) 帧）grid=\(gridTime)")
+                outputIndex += 1
+                videoFrames += 1
+                return
+            }
             var appended = false
             for _ in 0..<300 {
                 if currentWriter.status == .failed { break }
@@ -237,6 +248,14 @@ enum AVRemuxPipeline {
                                                 duration: 1024,
                                                 timescale: Int32(max(8000, audioRate))) else {
                 if failure == nil { failure = "创建音频样本失败" }
+                return
+            }
+            if !CMSampleBufferIsValid(buffer)
+                || !CMSampleBufferGetDecodeTimeStamp(buffer).isValid
+                || !CMSampleBufferGetPresentationTimeStamp(buffer).isValid
+                || !CMSampleBufferGetDuration(buffer).isValid {
+                DiagnosticsLog.write("[转MP4] 跳过无效时间音频样本（第 \(audioFrameIndex + 1) 帧）")
+                audioFrameIndex += 1
                 return
             }
             var appended = false

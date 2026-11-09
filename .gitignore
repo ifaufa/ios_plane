@@ -6,3 +6,4 @@ Payload/
 .DS_Store
 diagnostics.log
 diagnostics*.log
+*.ips
