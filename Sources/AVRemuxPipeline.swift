@@ -194,14 +194,20 @@ enum AVRemuxPipeline {
                 return
             }
             if !input.append(buffer) {
-                let error = writer.error as NSError?
-                let nalTypes = TSDemuxer.splitNALUnits(sample.data)
-                    .prefix(8)
-                    .map { String(Int($0.first ?? 0) & 0x1F) }
-                    .joined(separator: ",")
-                let probe = currentVideoInfo.map { H264Probe.decodeFirstFrame(avcc: sample.data, info: $0) } ?? "无参数"
-                DiagnosticsLog.write("[转MP4] 失败帧详情 NAL类型=[\(nalTypes)] 探测：\(probe)")
-                failure = "追加视频样本失败（第 \(videoFrames + 1) 帧，PTS=\(sample.pts) DTS=\(sample.dts) 大小=\(sample.data.count)B）：\(error?.domain ?? "-") \(error?.code ?? 0) \(error?.localizedDescription ?? "")"
+                // append 返回 false 多数是"此刻不接受"，等待重试；只有 writer 真正失败才终止
+                var appended = false
+                for _ in 0..<300 {
+                    if writer.status == .failed { break }
+                    Thread.sleep(forTimeInterval: 0.01)
+                    if input.append(buffer) {
+                        appended = true
+                        break
+                    }
+                }
+                if !appended {
+                    let error = writer.error as NSError?
+                    failure = "追加视频样本失败（第 \(videoFrames + 1) 帧，PTS=\(sample.pts) DTS=\(sample.dts) 大小=\(sample.data.count)B，writer状态=\(writer.status.rawValue)）：\(error?.domain ?? "-") \(error?.code ?? 0) \(error?.localizedDescription ?? "")"
+                }
             }
             videoFrames += 1
         }
@@ -381,7 +387,15 @@ enum AVRemuxPipeline {
             onError("创建音频样本失败")
             return
         }
-        if !input.append(buffer) {
+        var appended = false
+        for _ in 0..<300 {
+            if input.append(buffer) {
+                appended = true
+                break
+            }
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        if !appended {
             onError("追加音频样本失败")
         }
     }
