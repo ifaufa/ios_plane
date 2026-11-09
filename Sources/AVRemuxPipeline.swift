@@ -50,6 +50,7 @@ enum AVRemuxPipeline {
         var failure: String?
         var videoFrames = 0
         var audioFrames = 0
+        var currentVideoInfo: TSDemuxer.VideoInfo?
 
         func ensureWriter(video info: TSDemuxer.VideoInfo) throws -> AVAssetWriter {
             if let writer { return writer }
@@ -173,6 +174,12 @@ enum AVRemuxPipeline {
             }
             if !input.append(buffer) {
                 let error = writer.error as NSError?
+                let nalTypes = TSDemuxer.splitNALUnits(sample.data)
+                    .prefix(8)
+                    .map { String(Int($0.first ?? 0) & 0x1F) }
+                    .joined(separator: ",")
+                let probe = currentVideoInfo.map { H264Probe.decodeFirstFrame(avcc: sample.data, info: $0) } ?? "无参数"
+                DiagnosticsLog.write("[转MP4] 失败帧详情 NAL类型=[\(nalTypes)] 探测：\(probe)")
                 failure = "追加视频样本失败（第 \(videoFrames + 1) 帧，PTS=\(sample.pts) DTS=\(sample.dts) 大小=\(sample.data.count)B）：\(error?.domain ?? "-") \(error?.code ?? 0) \(error?.localizedDescription ?? "")"
             }
             videoFrames += 1
@@ -185,6 +192,7 @@ enum AVRemuxPipeline {
             guard let info = demuxer.videoInfo() else { return }
             do {
                 _ = try ensureWriter(video: info)
+                currentVideoInfo = info
             } catch {
                 failure = error.localizedDescription
                 return
