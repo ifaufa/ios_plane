@@ -51,7 +51,7 @@ enum H264Probe {
         }
         H264Probe.sharedCallback = callback
 
-        let record = VTDecompressionOutputCallbackRecord(
+        var record = VTDecompressionOutputCallbackRecord(
             decompressionOutputCallback: callback,
             decompressionOutputRefCon: nil
         )
@@ -81,7 +81,7 @@ enum H264Probe {
                                                                  flags: 0,
                                                                  blockBufferOut: &blockBuffer)
             guard blockStatus == noErr, let blockBuffer else {
-                results(in: probe).append("#\(index) 块创建失败")
+                probe.texts.append("#\(index) 块创建失败")
                 continue
             }
             _ = frame.data.withUnsafeBytes { buffer -> OSStatus in
@@ -108,7 +108,7 @@ enum H264Probe {
                                                     sampleSizeArray: &sampleSize,
                                                     sampleBufferOut: &sampleBuffer)
             guard sampleStatus == noErr, let sampleBuffer else {
-                results(in: probe).append("#\(index) 样本创建失败")
+                probe.texts.append("#\(index) 样本创建失败")
                 continue
             }
             var infoFlags = VTDecodeInfoFlags(rawValue: 0)
@@ -139,10 +139,6 @@ enum H264Probe {
             lines.append("#\(index)[\(frames[index].data.count)B \(head) \(verdict)]")
         }
         return "顺序解码：" + lines.joined(separator: " ")
-    }
-
-    private static func results(in probe: ProbeSink) -> [String] {
-        probe.texts
     }
 
     fileprivate static func cleanup() {
