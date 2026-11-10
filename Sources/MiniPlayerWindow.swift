@@ -9,21 +9,21 @@ struct PlayerSurface: UIViewRepresentable {
 
     func makeUIView(context: Context) -> PlayerLayerContainer {
         let view = PlayerLayerContainer()
-        view.layer.player = player
-        view.layer.videoGravity = videoGravity
+        view.playerLayer.player = player
+        view.playerLayer.videoGravity = videoGravity
         return view
     }
 
     func updateUIView(_ uiView: PlayerLayerContainer, context: Context) {
-        if uiView.layer.player !== player {
-            uiView.layer.player = player
+        if uiView.playerLayer.player !== player {
+            uiView.playerLayer.player = player
         }
-        uiView.layer.videoGravity = videoGravity
+        uiView.playerLayer.videoGravity = videoGravity
     }
 
     final class PlayerLayerContainer: UIView {
         override class var layerClass: AnyClass { AVPlayerLayer.self }
-        var layer: AVPlayerLayer { self.layer as! AVPlayerLayer }
+        var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
     }
 }
 
