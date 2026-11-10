@@ -377,9 +377,11 @@ enum AVRemuxPipeline {
             }
         }
 
-        let total = max(1, state.segmentURLs.count)
+        let excludedIndices = Set(state.excluded ?? [])
+        let total = max(1, state.segmentURLs.count - excludedIndices.count)
         for index in state.durations.indices {
             if currentFailure() != nil { break }
+            guard !excludedIndices.contains(index) else { continue }
             let fileURL = dir.appendingPathComponent(LocalHLS.fileName(index: index))
             guard fm.fileExists(atPath: fileURL.path) else {
                 throw RemuxError(message: "缺少分片 \(index + 1)")

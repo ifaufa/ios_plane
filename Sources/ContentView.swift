@@ -5,6 +5,7 @@ struct ContentView: View {
     @EnvironmentObject private var library: VideoLibrary
     @EnvironmentObject private var downloads: DownloadManager
     @StateObject private var backup = BackupManager()
+    @ObservedObject private var segmentRunner = SegmentRunner.shared
     @State private var showAdd = false
     @State private var showBrowser = false
     @State private var showHeaders = false
@@ -190,6 +191,14 @@ struct ContentView: View {
             } message: { info in
                 Text(info.message)
             }
+            .alert(segmentRunner.excludedNotice ?? "", isPresented: Binding(
+                get: { segmentRunner.excludedNotice != nil },
+                set: { if !$0 { segmentRunner.excludedNotice = nil } }
+            )) {
+                Button("好", role: .cancel) {}
+            } message: {
+                Text("断点处的插入片段已自动跳过，其余内容完整保留。")
+            }
             .overlay {
                 if backup.isWorking {
                     ProgressView(backup.progressText)
@@ -360,7 +369,13 @@ private struct LibraryRow: View {
                 .font(.headline)
                 .lineLimit(1)
                 .foregroundStyle(isMissing ? .secondary : .primary)
-            HStack {
+            HStack(spacing: 6) {
+                Text(Self.kindLabel(for: item))
+                    .font(.caption2.weight(.semibold))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Self.kindColor(for: item).opacity(0.16), in: Capsule())
+                    .foregroundStyle(Self.kindColor(for: item))
                 Text(item.duration > 0 ? Self.formatDuration(item.duration) : "--:--")
                 Text(Self.formatSize(item.fileSize))
                 Text(item.createdAt, style: .date)
@@ -377,6 +392,22 @@ private struct LibraryRow: View {
             }
         }
         .padding(.vertical, 4)
+    }
+
+    static func kindLabel(for item: VideoItem) -> String {
+        let name = item.fileName.lowercased()
+        if name.hasSuffix(".movpkg") { return "系统缓存" }
+        if name.hasSuffix(".m3u8") { return "分片" }
+        if name.hasSuffix(".mp4") { return "MP4" }
+        return "文件"
+    }
+
+    static func kindColor(for item: VideoItem) -> Color {
+        let name = item.fileName.lowercased()
+        if name.hasSuffix(".movpkg") { return .purple }
+        if name.hasSuffix(".m3u8") { return .orange }
+        if name.hasSuffix(".mp4") { return .green }
+        return .gray
     }
 
     static func formatDuration(_ seconds: Double) -> String {
@@ -409,6 +440,16 @@ struct EngineSettingsView: View {
                     Toggle("分片引擎（可断点续传）", isOn: $segmentEnabled)
                 }
                 if segmentEnabled {
+                    Section {
+                        Toggle("断点处换密钥的分片也剔除（S2）", isOn: Binding(
+                            get: { UserDefaults.standard.bool(forKey: AdFilter.dropKeyChangedKey) },
+                            set: { UserDefaults.standard.set($0, forKey: AdFilter.dropKeyChangedKey) }
+                        ))
+                    } header: {
+                        Text("广告段处理")
+                    } footer: {
+                        Text("默认只剔除编码参数与主段不一致的插入片段（如分辨率变化）；开启后会一并剔除断点处更换密钥的片段。剔除结果会在下载完成时提示。")
+                    }
                     Section {
                         Picker("每任务", selection: $perTask) {
                             ForEach([1, 4, 6, 8, 10], id: \.self) { Text("\($0)").tag($0) }

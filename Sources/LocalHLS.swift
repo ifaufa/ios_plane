@@ -30,7 +30,13 @@ enum LocalHLS {
         if isMP4 {
             text += "#EXT-X-MAP:URI=\"init.mp4\"\n"
         }
+        let excluded = Set(state.excluded ?? [])
+        let boundaries = Set(state.discontinuities ?? [])
         for (index, duration) in state.durations.enumerated() {
+            guard !excluded.contains(index) else { continue }
+            if boundaries.contains(index) {
+                text += "#EXT-X-DISCONTINUITY\n"
+            }
             text += "#EXTINF:\(String(format: "%.3f", duration)),\n"
             text += fileName(index: index) + "\n"
         }
@@ -171,7 +177,9 @@ enum LocalHLS {
             }
         }
 
+        let excludedIndices = Set(state.excluded ?? [])
         for index in state.durations.indices {
+            guard !excludedIndices.contains(index) else { continue }
             let fileURL = dir.appendingPathComponent(fileName(index: index))
             guard fm.fileExists(atPath: fileURL.path) else {
                 throw PlaylistError.network("缺少分片 \(index + 1)")

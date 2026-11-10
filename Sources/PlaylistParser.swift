@@ -20,6 +20,10 @@ struct ParsedMediaPlaylist {
     var hasByteRange: Bool
     var mediaSequence: Int
     var targetDuration: Double
+    /// 断点起始分片索引（该分片起时间轴不连续）
+    var discontinuities: [Int] = []
+    /// 断点处更换了密钥的分片索引
+    var keyChanges: [Int] = []
 
     var totalDuration: Double { segments.reduce(0) { $0 + $1.duration } }
     var isEncrypted: Bool { key != nil }
@@ -119,6 +123,10 @@ enum PlaylistParser {
         var key: MediaKey?
         var initSegment: URL?
         var hasDiscontinuity = false
+        var pendingDiscontinuity = false
+        var discontinuities: [Int] = []
+        var keyChanges: [Int] = []
+        var pendingKeyChange = false
         var hasByteRange = false
         var mediaSequence = 0
         var targetDuration: Double = 0
@@ -146,6 +154,9 @@ enum PlaylistParser {
                     if let ivText = attrs["IV"] {
                         iv = dataFromHex(ivText)
                     }
+                    if let previous = key, previous.uri.absoluteString != uri.absoluteString {
+                        pendingKeyChange = true
+                    }
                     key = MediaKey(method: method, uri: uri, iv: iv)
                 } else {
                     throw PlaylistError.drmProtected
@@ -157,12 +168,21 @@ enum PlaylistParser {
                 }
             } else if line.hasPrefix("#EXT-X-DISCONTINUITY") {
                 hasDiscontinuity = true
+                pendingDiscontinuity = true
             } else if line.hasPrefix("#EXT-X-BYTERANGE") {
                 hasByteRange = true
             } else if line.hasPrefix("#EXT-X-ENDLIST") {
                 endList = true
             } else if !line.hasPrefix("#") {
                 if let duration = pendingDuration, let url = URL(string: line, relativeTo: baseURL) {
+                    if pendingDiscontinuity {
+                        discontinuities.append(segments.count)
+                        pendingDiscontinuity = false
+                    }
+                    if pendingKeyChange {
+                        keyChanges.append(segments.count)
+                        pendingKeyChange = false
+                    }
                     segments.append(MediaSegment(url: url, duration: duration))
                 }
                 pendingDuration = nil
@@ -172,7 +192,6 @@ enum PlaylistParser {
         guard !segments.isEmpty else { throw PlaylistError.empty }
         guard endList else { throw PlaylistError.liveStream }
         guard !hasByteRange else { throw PlaylistError.byteRangeUnsupported }
-        guard !hasDiscontinuity else { throw PlaylistError.discontinuityUnsupported }
 
         return ParsedMediaPlaylist(
             segments: segments,
@@ -182,7 +201,9 @@ enum PlaylistParser {
             hasDiscontinuity: hasDiscontinuity,
             hasByteRange: hasByteRange,
             mediaSequence: mediaSequence,
-            targetDuration: targetDuration
+            targetDuration: targetDuration,
+            discontinuities: discontinuities,
+            keyChanges: keyChanges
         )
     }
 

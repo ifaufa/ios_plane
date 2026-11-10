@@ -18,12 +18,21 @@ struct SegmentJobState: Codable {
     var keyIV: String?
     var paused: Bool
     var failure: String?
+    /// 断点起始分片索引（时间轴不连续处）
+    var discontinuities: [Int]? = nil
+    /// 断点处更换密钥的分片索引
+    var keyChanges: [Int]? = nil
+    /// 被判定为插入内容而剔除的分片索引
+    var excluded: [Int]? = nil
 }
 
 /// 分片下载引擎：后台 URLSession + 全局 8 / 每任务 4 并发 + 断点续传
 @MainActor
 final class SegmentRunner: NSObject, ObservableObject {
     static let shared = SegmentRunner()
+
+    /// 剔除插入内容后的用户提示（UI 监听）
+    @Published var excludedNotice: String?
 
     static let perTaskKey = "segments.perTask"
     static let globalKey = "segments.global"
@@ -156,12 +165,17 @@ final class SegmentRunner: NSObject, ObservableObject {
                     keyURI: playlist.key?.uri.absoluteString,
                     keyIV: playlist.key?.iv?.base64EncodedString(),
                     paused: false,
-                    failure: nil
+                    failure: nil,
+                    discontinuities: playlist.discontinuities,
+                    keyChanges: playlist.keyChanges,
+                    excluded: nil
                 )
                 state.updatedAt = Date()
                 jobs[id] = state
                 dirs[id] = dir
-                hashToID[dirName] = id
+                // 关键：taskDescription 用的是 directoryName(id)（无时间戳后缀），
+                // 映射键必须一致，否则新任务下载的分片会被静默丢弃
+                hashToID[Self.directoryName(for: id)] = id
                 persist(id)
 
                 // 有 init 段（fMP4）时先下它
@@ -347,8 +361,24 @@ final class SegmentRunner: NSObject, ObservableObject {
     }
 
     private func finish(_ jobId: String) {
-        guard let dir = dirs[jobId], let job = jobs[jobId] else { return }
+        guard let dir = dirs[jobId], var job = jobs[jobId] else { return }
         DiagnosticsLog.write("[5 分片完成] \(job.completed.count)/\(job.segmentURLs.count) 累计=\(jobBytes[jobId] ?? 0)B 目录=\(dir.lastPathComponent)")
+
+        // 断点插入内容识别（S1 默认；S2 可选剔除换密钥的区间）
+        if let discontinuities = job.discontinuities, !discontinuities.isEmpty {
+            let dropKeyChanged = UserDefaults.standard.bool(forKey: AdFilter.dropKeyChangedKey)
+            let result = AdFilter.analyze(state: job, dir: dir, dropKeyChanged: dropKeyChanged)
+            job.excluded = result.excluded.isEmpty ? nil : result.excluded
+            jobs[jobId] = job
+            persist(jobId)
+            if result.excluded.isEmpty {
+                DiagnosticsLog.write("[5 断点] 检出 \(discontinuities.count) 处断点，未发现插入内容")
+            } else {
+                DiagnosticsLog.write("[5 断点] 剔除 \(result.excluded.count) 个分片：\(result.descriptions.joined(separator: "，"))")
+                excludedNotice = "已剔除 \(result.excluded.count) 个分片（广告段）"
+            }
+        }
+
         do {
             let playlistURL = try LocalHLS.writePlaylist(state: job, dir: dir)
             onAllSegmentsDownloaded?(jobId, playlistURL)
@@ -443,6 +473,7 @@ extension SegmentRunner: URLSessionDownloadDelegate {
 
         Task {
             guard let jobId = await MainActor.run(body: { self.hashToID[hash] }) else {
+                DiagnosticsLog.write("[4 分片] 未找到任务映射 hash=\(hash) 已丢弃该分片")
                 try? FileManager.default.removeItem(at: staging)
                 return
             }
