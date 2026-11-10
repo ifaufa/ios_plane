@@ -11,7 +11,6 @@ struct ContentView: View {
     @State private var showBrowser = false
     @State private var showHeaders = false
     @State private var showImporter = false
-    @State private var playing: VideoItem?
     @State private var selectionMode = false
     @State private var selected: Set<UUID> = []
     @State private var convertingID: UUID?
@@ -71,7 +70,7 @@ struct ContentView: View {
                             if selectionMode {
                                 toggleSelection(item)
                             } else if !library.isMissing(item) {
-                                playing = item
+                                openPlayer(item)
                             }
                         }
                         .swipeActions {
@@ -442,6 +441,12 @@ struct EngineSettingsView: View {
     @State private var globalLimit =
         max(5, UserDefaults.standard.integer(forKey: SegmentRunner.globalKey) > 0
             ? UserDefaults.standard.integer(forKey: SegmentRunner.globalKey) : 20)
+    @State private var maxTasks =
+        { () -> Int in
+            let value = UserDefaults.standard.integer(forKey: DownloadManager.maxConcurrentKey)
+            return value <= 0 ? 5 : min(5, max(1, value))
+        }()
+    @State private var dropKeyChanged = UserDefaults.standard.bool(forKey: AdFilter.dropKeyChangedKey)
 
     var body: some View {
         NavigationStack {
@@ -451,23 +456,14 @@ struct EngineSettingsView: View {
                 }
                 if segmentEnabled {
                     Section {
-                        Toggle("断点处换密钥的分片也剔除（S2）", isOn: Binding(
-                            get: { UserDefaults.standard.bool(forKey: AdFilter.dropKeyChangedKey) },
-                            set: { UserDefaults.standard.set($0, forKey: AdFilter.dropKeyChangedKey) }
-                        ))
+                        Toggle("断点处换密钥的分片也剔除（S2）", isOn: $dropKeyChanged)
                     } header: {
                         Text("广告段处理")
                     } footer: {
                         Text("默认只剔除编码参数与主段不一致的插入片段（如分辨率变化）；开启后会一并剔除断点处更换密钥的片段。剔除结果会在下载完成时提示。")
                     }
                     Section {
-                        Picker("同时下载任务数", selection: Binding(
-                            get: {
-                                let value = UserDefaults.standard.integer(forKey: DownloadManager.maxConcurrentKey)
-                                return value <= 0 ? 5 : min(5, max(1, value))
-                            },
-                            set: { UserDefaults.standard.set($0, forKey: DownloadManager.maxConcurrentKey) }
-                        )) {
+                        Picker("同时下载任务数", selection: $maxTasks) {
                             ForEach([1, 2, 3, 4, 5], id: \.self) { Text("\($0)").tag($0) }
                         }
                     } footer: {
@@ -508,6 +504,8 @@ struct EngineSettingsView: View {
                                                   forKey: DownloadManager.engineKey)
                         UserDefaults.standard.set(perTask, forKey: SegmentRunner.perTaskKey)
                         UserDefaults.standard.set(globalLimit, forKey: SegmentRunner.globalKey)
+                        UserDefaults.standard.set(maxTasks, forKey: DownloadManager.maxConcurrentKey)
+                        UserDefaults.standard.set(dropKeyChanged, forKey: AdFilter.dropKeyChangedKey)
                         dismiss()
                     }
                 }
