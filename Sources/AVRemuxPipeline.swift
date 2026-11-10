@@ -12,6 +12,7 @@ enum AVRemuxPipeline {
     }
 
     /// 最近一次解析到的音频参数（供容器修补使用）
+    static var collectedAudioFrames: [Data] = []
     static var lastAudioASC: Data?
     static var lastAudioSampleRate: Int = 0
     static var lastAudioChannels: Int = 0
@@ -72,7 +73,8 @@ enum AVRemuxPipeline {
                             destination: URL,
                             progress: ((Double) -> Void)?,
                             videoOnly: Bool,
-                            audioFormatFlags: UInt32) throws {
+                            audioFormatFlags: UInt32,
+                            collectAudio: Bool) throws {
         let fm = FileManager.default
         if fm.fileExists(atPath: destination.path) {
             try fm.removeItem(at: destination)
@@ -84,6 +86,7 @@ enum AVRemuxPipeline {
         var audioInput: AVAssetWriterInput?
         var audioRate = 44100
 
+        var collected: [Data] = []
         let videoQueue = ItemQueue<VideoItem>(capacity: 300)
         let audioQueue = ItemQueue<Data>(capacity: 2000)
         let pumpQueue = DispatchQueue(label: "remux.pump", qos: .userInitiated)
@@ -208,6 +211,9 @@ enum AVRemuxPipeline {
                                                        mReserved: 0)
                 var desc: CMFormatDescription?
                 let asc = audio.audioSpecificConfig
+                // 直接把完整 esds 通过扩展交给 CoreMedia，避免 AVAssetWriter 只写裸 cookie
+                let atoms: [CFString: Any] = ["esds" as CFString: MP4AudioFixer.makeESDS(asc: asc)]
+                let extensions: CFDictionary? = [kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms: atoms] as CFDictionary
                 let audioStatus = asc.withUnsafeBytes { buffer -> OSStatus in
                     CMAudioFormatDescriptionCreate(allocator: kCFAllocatorDefault,
                                                    asbd: &asbd,
@@ -215,7 +221,7 @@ enum AVRemuxPipeline {
                                                    layout: nil,
                                                    magicCookieSize: asc.count,
                                                    magicCookie: buffer.baseAddress,
-                                                   extensions: nil,
+                                                   extensions: extensions,
                                                    formatDescriptionOut: &desc)
                 }
                 // 诊断：打印音频格式描述与 magic cookie，确认 ASC 是否有效
@@ -351,7 +357,11 @@ enum AVRemuxPipeline {
         }
 
         demuxer.onAudioFrame = { data, _ in
-            guard currentFailure() == nil, !videoOnly else { return }
+            guard currentFailure() == nil else { return }
+            if videoOnly {
+                if collectAudio { collected.append(data) }
+                return
+            }
             audioQueue.push(data)
             if writer == nil {
                 do { try makeWriterIfNeeded(force: false) } catch { setFailure(error.localizedDescription) }
@@ -401,6 +411,10 @@ enum AVRemuxPipeline {
             throw RemuxError(message: "转封装失败：没有可写入的视频帧")
         }
 
+        if collectAudio {
+            AVRemuxPipeline.collectedAudioFrames = collected
+            DiagnosticsLog.write("[转MP4] 已收集音频帧 \(collected.count) 个（用于自建音轨）")
+        }
         DiagnosticsLog.write("[转MP4] 封装完成 视频帧=\(videoFrames) 音频帧=\(audioFrameIndex) 帧间隔=\(frameStep)")
     }
 
@@ -409,10 +423,11 @@ enum AVRemuxPipeline {
                       destination: URL,
                       onProgress: ((Double) -> Void)? = nil,
                       videoOnly: Bool = false,
-                      audioFormatFlags: UInt32 = 2) async throws {
+                      audioFormatFlags: UInt32 = 2,
+                      collectAudio: Bool = false) async throws {
         try await Task.detached(priority: .userInitiated) {
             try run(state: state, dir: dir, destination: destination,
-                    progress: onProgress, videoOnly: videoOnly, audioFormatFlags: audioFormatFlags)
+                    progress: onProgress, videoOnly: videoOnly, audioFormatFlags: audioFormatFlags, collectAudio: collectAudio)
         }.value
     }
 

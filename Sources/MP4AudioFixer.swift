@@ -203,6 +203,9 @@ enum MP4AudioFixer {
     }
     // MARK: - esds 构造
 
+    /// 对外提供：构造完整的 esds（供格式描述扩展 / 自建音轨使用）
+    static func makeESDS(asc: Data) -> Data { buildESDS(asc: asc) }
+
     private static func buildESDS(asc: Data) -> Data {
         // DecoderSpecificInfo (0x05)
         var dsi = Data([0x05])

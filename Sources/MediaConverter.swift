@@ -35,37 +35,74 @@ enum MediaConverter {
 
         var produced = false
 
-        // 1) 自研解复用 + AVAssetWriter（显示顺序由 I/P/B 推导，不依赖 PES 时间戳）
-        // 音频 ASBD flags 做 A/B 自愈：产物若无音频轨，换另一组参数重转一次
-        for (attempt, flags) in [UInt32(2), UInt32(0)].enumerated() {
-            if produced { break }
+        // 1) 自研解复用 + AVAssetWriter（视频轨已验证正确）
+        //    S1：通过格式描述扩展提供完整 esds；S2：视频-only + 自建音频轨合并；S3：保留画面版本
+        let fm2 = FileManager.default
+        do {
+            let start = Date()
+            try await AVRemuxPipeline.remux(state: state, dir: dir, destination: outputURL,
+                                            onProgress: onProgress, videoOnly: false, audioFormatFlags: 2)
+            let sizeAfter = (try? outputURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            if let asc = AVRemuxPipeline.lastAudioASC, !asc.isEmpty {
+                let fixLog = MP4AudioFixer.fix(url: outputURL, asc: asc,
+                                               sampleRate: AVRemuxPipeline.lastAudioSampleRate,
+                                               audioChannels: AVRemuxPipeline.lastAudioChannels)
+                let sizePatched = (try? outputURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                DiagnosticsLog.write("[转MP4] esds 修补：\(fixLog)（文件 \(sizeAfter)B → \(sizePatched)B）")
+            }
+            DiagnosticsLog.write("[转MP4] 音频轨诊断 \(MP4AudioFixer.inspectAudioTrack(url: outputURL))")
+            let audioCount = ((try? await AVURLAsset(url: outputURL).loadTracks(withMediaType: .audio)) ?? []).count
+            DiagnosticsLog.write(String(format: "[转MP4] S1 完成 耗时 %.1fs 产物轨道 音频=%d", Date().timeIntervalSince(start), audioCount))
+            if audioCount > 0 {
+                produced = true
+            } else {
+                DiagnosticsLog.write("[转MP4] S1 无音轨，改用 S2（自建音频轨）")
+            }
+        } catch {
+            DiagnosticsLog.write("[转MP4] S1 失败：\(error.localizedDescription)")
+        }
+
+        // S2：视频-only 转换 + 收集音频帧 + 自建音频轨合并
+        if !produced {
             do {
                 let start = Date()
+                AVRemuxPipeline.collectedAudioFrames = []
                 try await AVRemuxPipeline.remux(state: state, dir: dir, destination: outputURL,
-                                                onProgress: onProgress, videoOnly: false,
-                                                audioFormatFlags: flags)
-                // 关键：若 AVAssetWriter 没写出可用的 esds，音频轨会被系统丢弃，这里手工补写
-                if let asc = AVRemuxPipeline.lastAudioASC, !asc.isEmpty {
-                    let fixLog = MP4AudioFixer.fix(url: outputURL, asc: asc, sampleRate: AVRemuxPipeline.lastAudioSampleRate, audioChannels: AVRemuxPipeline.lastAudioChannels)
-                    DiagnosticsLog.write("[转MP4] esds 修补：\(fixLog)")
-                }
-                DiagnosticsLog.write("[转MP4] 音频轨诊断 \(MP4AudioFixer.inspectAudioTrack(url: outputURL))")
+                                                onProgress: onProgress, videoOnly: true, collectAudio: true)
+                let frames = AVRemuxPipeline.collectedAudioFrames
+                let asc = AVRemuxPipeline.lastAudioASC ?? Data()
+                let rate = max(8000, AVRemuxPipeline.lastAudioSampleRate)
+                let channels = max(1, AVRemuxPipeline.lastAudioChannels)
+                let videoOnlyURL = VideoLibrary.assetsDir.appendingPathComponent(UUID().uuidString + ".vonly.mp4")
+                if fm2.fileExists(atPath: videoOnlyURL.path) { try? fm2.removeItem(at: videoOnlyURL) }
+                try fm2.moveItem(at: outputURL, to: videoOnlyURL)
+                let buildLog = try AudioTrackBuilder.build(videoURL: videoOnlyURL,
+                                                           audioFrames: frames,
+                                                           sampleRate: rate,
+                                                           channels: channels,
+                                                           asc: asc,
+                                                           destination: outputURL)
+                try? fm2.removeItem(at: videoOnlyURL)
+                DiagnosticsLog.write("[转MP4] \(buildLog)")
                 let audioCount = ((try? await AVURLAsset(url: outputURL).loadTracks(withMediaType: .audio)) ?? []).count
                 let videoCount = ((try? await AVURLAsset(url: outputURL).loadTracks(withMediaType: .video)) ?? []).count
-                DiagnosticsLog.write("[转MP4] 自研封装成功（第\(attempt + 1)次 flags=\(flags)）耗时 \(String(format: "%.1f", Date().timeIntervalSince(start)))s 产物轨道 视频=\(videoCount) 音频=\(audioCount)")
-                if audioCount > 0 || videoCount == 0 {
+                DiagnosticsLog.write(String(format: "[转MP4] S2 完成 耗时 %.1fs 产物轨道 视频=%d 音频=%d", Date().timeIntervalSince(start), videoCount, audioCount))
+                if audioCount > 0, videoCount > 0 {
                     produced = true
-                } else if attempt == 1 {
-                    produced = true
-                    DiagnosticsLog.write("[转MP4] 两次尝试均无音轨，已保留画面版本（音频待修）")
-                } else {
-                    DiagnosticsLog.write("[转MP4] 产物缺音轨，换 ASBD flags 重转")
                 }
             } catch {
-                DiagnosticsLog.write("[转MP4] 自研封装失败（flags=\(flags)）：\(error.localizedDescription)")
+                DiagnosticsLog.write("[转MP4] S2 失败：\(error.localizedDescription)")
             }
         }
 
+        // S3：兜底——只要有画面就保留（不再整体失败）
+        if !produced, fm2.fileExists(atPath: outputURL.path) {
+            let videoCount = ((try? await AVURLAsset(url: outputURL).loadTracks(withMediaType: .video)) ?? []).count
+            if videoCount > 0 {
+                produced = true
+                DiagnosticsLog.write("[转MP4] S3：保留画面版本（无音轨）")
+            }
+        }
         // 2) fMP4 或自研失败：走 AVFoundation（HLS 资产）
         if !produced {
             do {
