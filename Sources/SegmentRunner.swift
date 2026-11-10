@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 /// 分片任务落盘状态（支持杀进程后续传）
 struct SegmentJobState: Codable {

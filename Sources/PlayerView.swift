@@ -10,7 +10,7 @@ struct PlayerView: View {
     private var title: String { store.title }
     private var startPosition: Double { 0 }
     @StateObject private var gestures = PlayerGestureModel()
-    @State private var immersive = false
+    @State private var immersive = true
     @State private var timeObserver: Any?
     @State private var currentTime: Double = 0
     @State private var duration: Double = 0
@@ -65,12 +65,10 @@ struct PlayerView: View {
                 Spacer()
 
                 Button {
-                    withAnimation(.easeInOut(duration: 0.2)) { immersive.toggle() }
+                    store.exitFullscreen()
                     gestures.pokeChrome()
                 } label: {
-                    Image(systemName: immersive
-                          ? "arrow.down.right.and.arrow.up.left"
-                          : "arrow.up.left.and.arrow.down.right")
+                    Image(systemName: "arrow.down.right.and.arrow.up.left")
                         .font(.system(size: 20, weight: .semibold))
                         .foregroundStyle(.white)
                         .frame(width: 52, height: 52)

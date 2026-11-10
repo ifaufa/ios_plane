@@ -7,6 +7,8 @@ struct ContentView: View {
     @StateObject private var backup = BackupManager()
     @ObservedObject private var segmentRunner = SegmentRunner.shared
     @ObservedObject private var playback = PlaybackStore.shared
+    @State private var toastText: String?
+    @State private var pendingToast: String?
     @State private var showAdd = false
     @State private var showBrowser = false
     @State private var showHeaders = false
@@ -191,13 +193,22 @@ struct ContentView: View {
             } message: { info in
                 Text(info.message)
             }
-            .alert(segmentRunner.excludedNotice ?? "", isPresented: Binding(
-                get: { segmentRunner.excludedNotice != nil },
-                set: { if !$0 { segmentRunner.excludedNotice = nil } }
-            )) {
-                Button("好", role: .cancel) {}
-            } message: {
-                Text("断点处的插入片段已自动跳过，其余内容完整保留。")
+            .overlay(alignment: .top) { toastBanner }
+            .onChange(of: segmentRunner.excludedNotice) { newValue in
+                guard let text = newValue else { return }
+                segmentRunner.excludedNotice = nil
+                if playback.isFullscreen {
+                    pendingToast = text + "（退出全屏后提示）"
+                } else {
+                    showToast(text)
+                }
+            }
+            .onChange(of: playback.isFullscreen) { isFullscreen in
+                // 全屏消失后再展示，避免打断播放
+                if !isFullscreen, let text = pendingToast {
+                    pendingToast = nil
+                    showToast(text.replacingOccurrences(of: "（退出全屏后提示）", with: ""))
+                }
             }
             .overlay {
                 if backup.isWorking {
@@ -272,6 +283,31 @@ struct ContentView: View {
                 backup.alert = .init(title: "转换失败", message: error.localizedDescription)
             }
             convertingID = nil
+        }
+    }
+
+    @ViewBuilder
+    private var toastBanner: some View {
+        if let toastText {
+            Text(toastText)
+                .font(.footnote.weight(.medium))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(.black.opacity(0.82), in: Capsule())
+                .padding(.top, 8)
+                .transition(.move(edge: .top).combined(with: .opacity))
+                .allowsHitTesting(false)
+        }
+    }
+
+    private func showToast(_ text: String) {
+        withAnimation(.easeOut(duration: 0.2)) { toastText = text }
+        Task {
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            withAnimation(.easeIn(duration: 0.2)) {
+                if toastText == text { toastText = nil }
+            }
         }
     }
 

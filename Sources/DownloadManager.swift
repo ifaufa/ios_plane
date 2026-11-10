@@ -51,6 +51,8 @@ final class DownloadManager: NSObject, ObservableObject {
     }
 
     private var pending: [(url: URL, title: String)] = []
+    /// 因并发上限被挂起的"已有分片任务"（恢复而非重建，避免丢进度）
+    private var pendingSegmentResume: [String] = []
     private var pendingTitles: [String: String] = [:]
     private var durations: [String: Double] = [:]
     private var progressMarks: [String: CFTimeInterval] = [:]
@@ -134,6 +136,7 @@ final class DownloadManager: NSObject, ObservableObject {
         switch info.status {
         case .queued:
             pending.removeAll { $0.url.absoluteString == info.id }
+        pendingSegmentResume.removeAll { $0 == info.id }
             update(info.id) { $0.status = .paused }
         case .downloading:
             update(info.id) { $0.status = .paused; $0.stalled = false }
@@ -151,8 +154,13 @@ final class DownloadManager: NSObject, ObservableObject {
         update(info.id) { $0.status = .queued; $0.stalled = false }
 
         if SegmentRunner.shared.state(of: info.id) != nil {
-            SegmentRunner.shared.resume(info.id)
-            update(info.id) { $0.status = .downloading }
+            if activeCount < maxConcurrent {
+                SegmentRunner.shared.resume(info.id)
+                update(info.id) { $0.status = .downloading }
+            } else {
+                if !pendingSegmentResume.contains(info.id) { pendingSegmentResume.append(info.id) }
+                update(info.id) { $0.status = .queued }
+            }
             return
         }
         if activeCount < maxConcurrent {
@@ -166,6 +174,7 @@ final class DownloadManager: NSObject, ObservableObject {
     func remove(_ info: DownloadTaskInfo) {
         SegmentRunner.shared.remove(info.id)
         pending.removeAll { $0.url.absoluteString == info.id }
+        pendingSegmentResume.removeAll { $0 == info.id }
         tasks.removeAll { $0.id == info.id }
         pendingTitles.removeValue(forKey: info.id)
         durations.removeValue(forKey: info.id)
@@ -360,6 +369,13 @@ final class DownloadManager: NSObject, ObservableObject {
     }
 
     private func startNextIfNeeded() {
+        // 先恢复被并发上限挂起的分片任务（保留已有进度）
+        while activeCount < maxConcurrent, !pendingSegmentResume.isEmpty {
+            let id = pendingSegmentResume.removeFirst()
+            guard let task = tasks.first(where: { $0.id == id }) else { continue }
+            SegmentRunner.shared.resume(id)
+            update(id) { $0.status = .downloading; $0.stalled = false }
+        }
         while activeCount < maxConcurrent, !pending.isEmpty {
             let next = pending.removeFirst()
             begin(url: next.url, title: next.title)
