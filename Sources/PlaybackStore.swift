@@ -63,6 +63,12 @@ final class PlaybackStore: ObservableObject {
         }
     }
 
+    /// 由全屏页定期上报进度（用于视频库断点记忆）
+    func reportProgress(_ seconds: Double) {
+        guard let id = videoID else { return }
+        onProgress?(id, seconds)
+    }
+
     func togglePlay() {
         if player.rate > 0 {
             player.pause()

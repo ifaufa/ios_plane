@@ -3,13 +3,12 @@ import AVKit
 import UIKit
 
 struct PlayerView: View {
-    let url: URL
-    let title: String
-    let startPosition: Double
-    let onProgress: (Double) -> Void
+    @ObservedObject var store: PlaybackStore
 
     @Environment(\.dismiss) private var dismiss
-    @State private var player = AVPlayer()
+    private var player: AVPlayer { store.player }
+    private var title: String { store.title }
+    private var startPosition: Double { 0 }
     @StateObject private var gestures = PlayerGestureModel()
     @State private var immersive = false
     @State private var timeObserver: Any?
@@ -48,7 +47,7 @@ struct PlayerView: View {
         VStack(spacing: 0) {
             HStack(spacing: 14) {
                 Button {
-                    dismiss()
+                    store.close()
                 } label: {
                     Image(systemName: "xmark")
                         .font(.system(size: 20, weight: .semibold))
@@ -161,28 +160,8 @@ struct PlayerView: View {
         initialBrightness = ScreenBrightness.current
         OrientationLock.apply(.landscape)
 
-        // 分片态（index.m3u8）走本地 HTTP 服务，其余按普通文件播放
-        let item: AVPlayerItem
-        if url.pathExtension.lowercased() == "m3u8" {
-            if let httpURL = try? LocalHLS.playbackURL(playlistURL: url) {
-                item = AVPlayerItem(url: httpURL)
-            } else {
-                item = AVPlayerItem(url: url)
-            }
-        } else {
-            item = AVPlayerItem(url: url)
-        }
-        item.audioTimePitchAlgorithm = .timeDomain   // 倍速播放时保持音调不变
-        player.replaceCurrentItem(with: item)
-        if startPosition > 3 {
-            player.seek(to: CMTime(seconds: startPosition, preferredTimescale: 600),
-                        toleranceBefore: .zero,
-                        toleranceAfter: .zero)
-            currentTime = startPosition
-            lastSavedTime = startPosition
-        }
-        player.play()
-        gestures.isPlaying = true
+        if player.rate == 0 { player.play() }
+        gestures.isPlaying = player.rate > 0
         gestures.pokeChrome()
 
         let interval = CMTime(seconds: 0.5, preferredTimescale: 600)
@@ -200,25 +179,22 @@ struct PlayerView: View {
             }
             if abs(seconds - lastSavedTime) >= 5 {
                 lastSavedTime = seconds
-                onProgress(seconds)
+                store.reportProgress(seconds)
             }
         }
     }
-
     private func stopPlayback() {
         if let timeObserver {
             player.removeTimeObserver(timeObserver)
             self.timeObserver = nil
         }
         let current = player.currentTime().seconds
-        if current.isFinite { onProgress(current) }
+        if current.isFinite { store.reportProgress(current) }
 
-        player.pause()
         if initialBrightness >= 0 {
             ScreenBrightness.set(initialBrightness)
             initialBrightness = -1
         }
-        LocalHLS.stopPlayback()
         UIApplication.shared.isIdleTimerDisabled = false
         OrientationLock.apply(.all)
     }

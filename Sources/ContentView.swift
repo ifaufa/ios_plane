@@ -235,7 +235,7 @@ struct ContentView: View {
                 ShareSheet(items: [item.url])
             }
             .fullScreenCover(isPresented: $playback.isFullscreen) {
-                ImmersivePlayerView(store: playback)
+                PlayerView(store: playback)
             }
             .overlay(alignment: .topLeading) {
                 if playback.isActive, !playback.isFullscreen {
