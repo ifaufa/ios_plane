@@ -15,7 +15,7 @@ final class TSDemuxer {
         var audioSpecificConfig: Data
     }
 
-    var onVideoFrame: ((_ avcc: Data, _ pts: Int64, _ dts: Int64, _ isKey: Bool, _ isRef: Bool) -> Void)?
+    var onVideoFrame: ((_ avcc: Data, _ pts: Int64, _ dts: Int64, _ isKey: Bool, _ isRef: Bool, _ poc: Int?) -> Void)?
     var onAudioFrame: ((_ raw: Data, _ pts: Int64) -> Void)?
     var onInfo: ((VideoInfo?, AudioInfo?) -> Void)?
     var onError: ((String) -> Void)?
@@ -32,6 +32,10 @@ final class TSDemuxer {
     private var pendingPTS: Int64 = -1
     private var pendingDTS: Int64 = -1
 
+    private var pocParams: POCParams?
+    private var prevPocLsb = 0
+    private var prevPoc = 0
+    private var pocMissingCount = 0
     private var multiAUCount = 0
     /// 已学习到的帧间隔（90kHz ticks），用于同 PES 多帧的 DTS 递推
     private var frameStep: Int64 = 3750
@@ -245,10 +249,19 @@ final class TSDemuxer {
             let type = first & 0x1F
             if type == 7 {
                 sps = nal
+                if let parsed = Self.parsePOCParams(nal) {
+                    pocParams = parsed
+                    prevPocLsb = 0
+                    prevPoc = 0
+                }
                 continue
             }
             if type == 8 {
                 pps = nal
+                if let flag = Self.parsePPSBottomFieldFlag(nal), var current = pocParams {
+                    current.bottomFieldPocPresent = flag
+                    pocParams = current
+                }
                 continue
             }
             if type == 9 { continue } // AUD 丢弃
@@ -299,10 +312,35 @@ final class TSDemuxer {
             }
             let auDTS = (dts >= 0 ? dts : max(0, pts)) + Int64(index) * frameStep
             let auPTS = max((pts >= 0 ? pts : auDTS), auDTS) + Int64(index) * frameStep
-            onVideoFrame?(avcc, auPTS, auDTS, unitKeys[index], index < unitRefs.count ? unitRefs[index] : true)
+            let poc = pocForUnit(unit)
+            if poc == nil { pocMissingCount += 1 }
+            onVideoFrame?(avcc, auPTS, auDTS,
+                          unitKeys[index],
+                          index < unitRefs.count ? unitRefs[index] : true,
+                          poc)
         }
     }
 
+    /// 由 slice 头计算 POC（显示顺序）；失败返回 nil（调用方回退到启发式排序）
+    private func pocForUnit(_ unit: [Data]) -> Int? {
+        guard let params = pocParams, params.pocType == 0 else { return nil }
+        guard let vcl = unit.first(where: {
+            let type = ($0.first ?? 0) & 0x1F
+            return type == 1 || type == 5
+        }) else { return nil }
+        guard let (isIDR, lsb) = Self.slicePocLsb(vcl, params: params) else { return nil }
+        if isIDR {
+            prevPocLsb = lsb
+            prevPoc = 0
+            return 0
+        }
+        let maxLsb = 1 << params.log2MaxPocLsb
+        var delta = lsb - prevPocLsb
+        if delta < -(maxLsb / 2) { delta += maxLsb } else if delta > maxLsb / 2 { delta -= maxLsb }
+        prevPoc += delta
+        prevPocLsb = lsb
+        return prevPoc
+    }
     private func emitVideoInfoIfNeeded() {
         guard !videoInfoEmitted, let sps, let pps, sps.count > 3 else { return }
         videoInfoEmitted = true
@@ -314,6 +352,93 @@ final class TSDemuxer {
         onInfo?(info, nil)
     }
 
+    // MARK: - POC（显示顺序，来自码流本身，不依赖时间戳）
+
+    struct POCParams {
+        var log2MaxFrameNum = 4
+        var pocType = 0
+        var log2MaxPocLsb = 4
+        var frameMbsOnly = true
+        var bottomFieldPocPresent = false
+    }
+
+    static func parsePOCParams(_ sps: Data) -> POCParams? {
+        let bytes = [UInt8](sps)
+        guard bytes.count > 4 else { return nil }
+        let profile = bytes[1]
+        var reader = BitReader(bytes: Array(bytes[4...]))
+        var params = POCParams()
+        _ = reader.readUE()                              // sps_id
+
+        let highProfiles: Set<UInt8> = [100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135]
+        if highProfiles.contains(profile) {
+            let chromaFormat = reader.readUE()
+            if chromaFormat == 3 { _ = reader.readBits(1) }
+            _ = reader.readUE()
+            _ = reader.readUE()
+            _ = reader.readBits(1)
+            if reader.readBits(1) == 1 {
+                let count = chromaFormat == 3 ? 12 : 8
+                for _ in 0..<count {
+                    if reader.readBits(1) == 1 {
+                        reader.skipScalingList(size: 16)
+                        reader.skipScalingList(size: 64)
+                    }
+                }
+            }
+        }
+
+        params.log2MaxFrameNum = reader.readUE() + 4
+        params.pocType = reader.readUE()
+        if params.pocType == 0 {
+            params.log2MaxPocLsb = reader.readUE() + 4
+        } else if params.pocType == 1 {
+            _ = reader.readBits(1)
+            _ = reader.readSE()
+            _ = reader.readSE()
+            let count = reader.readUE()
+            for _ in 0..<count { _ = reader.readSE() }
+        } else if params.pocType != 2 {
+            return nil
+        }
+        _ = reader.readUE()                              // max_num_ref_frames
+        _ = reader.readBits(1)                           // gaps_in_frame_num_value_allowed
+        _ = reader.readUE()                              // width
+        _ = reader.readUE()                              // height
+        params.frameMbsOnly = reader.readBits(1) == 1
+        return params
+    }
+
+    static func parsePPSBottomFieldFlag(_ pps: Data) -> Bool? {
+        let bytes = [UInt8](pps)
+        guard bytes.count > 2 else { return nil }
+        var reader = BitReader(bytes: Array(bytes[1...]))
+        _ = reader.readUE()                              // pps_id
+        _ = reader.readUE()                              // sps_id
+        _ = reader.readBits(1)                           // entropy_coding_mode_flag
+        return reader.readBits(1) == 1
+    }
+
+    /// 读取 slice 的 POC lsb（poc_type == 0）
+    static func slicePocLsb(_ nal: Data, params: POCParams) -> (isIDR: Bool, lsb: Int)? {
+        guard params.pocType == 0 else { return nil }
+        let bytes = [UInt8](nal)
+        guard bytes.count > 1 else { return nil }
+        let nalType = bytes[0] & 0x1F
+        var reader = BitReader(bytes: Array(bytes[1...]))
+        _ = reader.readUE()                              // first_mb_in_slice
+        _ = reader.readUE()                              // slice_type
+        _ = reader.readUE()                              // pps_id
+        _ = reader.readBits(params.log2MaxFrameNum)      // frame_num
+        if !params.frameMbsOnly {
+            let fieldPic = reader.readBits(1)
+            if fieldPic == 1 { _ = reader.readBits(1) }
+        }
+        if nalType == 5 { _ = reader.readUE() }          // idr_pic_id
+        if params.bottomFieldPocPresent, !params.frameMbsOnly { _ = reader.readSE() }
+        let lsb = reader.readBits(params.log2MaxPocLsb)
+        return (nalType == 5, lsb)
+    }
     // MARK: - 音频
 
     private func handleAudioPES(_ pes: Data, pts: Int64) {

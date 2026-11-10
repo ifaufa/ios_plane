@@ -100,11 +100,13 @@ enum AVRemuxPipeline {
         var frameStep: Int64 = 3750
         var deltaSamples: [Int64] = []
         var lastRawDTS: Int64 = -1
-        var group: [Data] = []
-        var groupKeys: [Bool] = []
+        struct GopFrame { let data: Data; let isKey: Bool; let poc: Int? }
+        var gop: [GopFrame] = []
         var displayCursor: Int64 = 0
         var decodeCursor: Int64 = 0
         var pushedBeforeWriter = 0
+        var pocMissing = 0
+        var gopCount = 0
 
         func setFailure(_ message: String) {
             lock.lock()
@@ -118,31 +120,33 @@ enum AVRemuxPipeline {
             return failure
         }
 
-        func finalizeGroup() {
-            guard !group.isEmpty else { return }
-            let count = group.count
+        /// 一个 GOP 结束：按 POC（码流权威显示顺序）重排后，仍以解码序写入
+        func flushGop() {
+            guard !gop.isEmpty else { return }
+            gopCount += 1
+            let count = gop.count
             var ptsByIndex = [Int64](repeating: 0, count: count)
-            if count > 1 {
-                for index in 1..<count {
-                    ptsByIndex[index] = displayCursor
-                    displayCursor += 1
+            let pocs = gop.map { $0.poc }
+            if pocs.allSatisfy({ $0 != nil }) {
+                let order = (0..<count).sorted { (pocs[$0] ?? 0) < (pocs[$1] ?? 0) }
+                for (rank, idx) in order.enumerated() {
+                    ptsByIndex[idx] = displayCursor + Int64(rank)
                 }
+            } else {
+                pocMissing += count
+                for idx in 0..<count { ptsByIndex[idx] = displayCursor + Int64(idx) }
             }
-            ptsByIndex[0] = displayCursor
-            displayCursor += 1
-
             for index in 0..<count {
-                let item = VideoItem(data: group[index],
+                let item = VideoItem(data: gop[index].data,
                                      pts: ptsByIndex[index] * frameStep,
                                      dts: decodeCursor * frameStep,
-                                     isKey: groupKeys[index])
+                                     isKey: gop[index].isKey)
                 decodeCursor += 1
                 videoQueue.push(item)
             }
-            group.removeAll()
-            groupKeys.removeAll()
-            if currentFailure() != nil { videoQueue.finish(); return }
-            // 音频参数迟迟未就绪时，缓冲到一定量就强制创建（纯视频源兜底）
+            displayCursor += Int64(count)
+            gop.removeAll()
+            if currentFailure() != nil { videoQueue.finish() }
             if writer == nil {
                 pushedBeforeWriter += count
                 if pushedBeforeWriter >= 200 {
@@ -150,7 +154,6 @@ enum AVRemuxPipeline {
                 }
             }
         }
-
         func makeWriterIfNeeded(force: Bool) throws {
             guard writer == nil else { return }
             guard let info = demuxer.videoInfo() else { return }
@@ -333,7 +336,7 @@ enum AVRemuxPipeline {
 
         demuxer.onInfo = { _, _ in }
 
-        demuxer.onVideoFrame = { data, pts, dts, isKey, isRef in
+        demuxer.onVideoFrame = { data, pts, dts, isKey, isRef, poc in
             guard currentFailure() == nil else { return }
 
             if lastRawDTS >= 0 {
@@ -347,9 +350,9 @@ enum AVRemuxPipeline {
             }
             lastRawDTS = dts
 
-            if isRef { finalizeGroup() }
-            group.append(data)
-            groupKeys.append(isKey)
+            if isKey, !gop.isEmpty { flushGop() }
+            gop.append(GopFrame(data: data, isKey: isKey, poc: poc))
+            if gop.count > 600 { flushGop() }
 
             if writer == nil {
                 do { try makeWriterIfNeeded(force: false) } catch { setFailure(error.localizedDescription) }
@@ -387,7 +390,7 @@ enum AVRemuxPipeline {
             progress?(Double(index + 1) / Double(total))
         }
         demuxer.finish()
-        finalizeGroup()
+        flushGop()
         videoQueue.finish()
         audioQueue.finish()
 
@@ -415,7 +418,7 @@ enum AVRemuxPipeline {
             AVRemuxPipeline.collectedAudioFrames = collected
             DiagnosticsLog.write("[转MP4] 已收集音频帧 \(collected.count) 个（用于自建音轨）")
         }
-        DiagnosticsLog.write("[转MP4] 封装完成 视频帧=\(videoFrames) 音频帧=\(audioFrameIndex) 帧间隔=\(frameStep)")
+        DiagnosticsLog.write("[转MP4] 封装完成 视频帧=\(videoFrames) 音频帧=\(audioFrameIndex) GOP=\(gopCount) POC缺失=\(pocMissing) 帧间隔=\(frameStep)")
     }
 
     static func remux(state: SegmentJobState,

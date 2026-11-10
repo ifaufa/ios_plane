@@ -85,29 +85,44 @@ enum AudioTrackBuilder {
         }
         let ftypSize = ftypRange.size
 
-        // 4.2 mdat（视频，流式搬运）
+        // 4.2 单个 mdat：视频负载（原样）+ 音频负载
+        // 视频 mdat 头长度（8 或 16）
         try source.seek(toOffset: mdatRange.offset)
-        var remaining = mdatRange.size
+        guard let mdatHeader = try source.read(upToCount: 16), mdatHeader.count >= 8 else {
+            throw BuildError(message: "读取视频 mdat 头失败")
+        }
+        let videoHeaderLength: UInt64 = mdatHeader.u32(at: 0) == 1 ? 16 : 8
+        let videoPayloadSize = mdatRange.size - videoHeaderLength
+        var audioPayloadSize: UInt64 = 0
+        for frame in audioFrames { audioPayloadSize += UInt64(frame.count) }
+
+        // mdat 头（总负载）
+        try dest.write(contentsOf: boxHeader(type: "mdat", payloadSize: videoPayloadSize + audioPayloadSize))
+
+        // 视频负载（跳过原 mdat 头）
+        try source.seek(toOffset: mdatRange.offset + videoHeaderLength)
+        var remaining = videoPayloadSize
         while remaining > 0 {
             let chunkSize = Int(min(remaining, 4 << 20))
             guard let chunk = try source.read(upToCount: chunkSize), !chunk.isEmpty else { break }
             try dest.write(contentsOf: chunk)
             remaining -= UInt64(chunk.count)
         }
-        let mdatVideoSize = mdatRange.size
-        let audioDataStart = ftypSize + mdatVideoSize + 8   // 音频 mdat 头 8 字节
 
-        // 4.3 mdat（音频）
-        var audioPayloadSize: UInt64 = 0
-        for frame in audioFrames { audioPayloadSize += UInt64(frame.count) }
+        // 音频负载 + chunk 偏移（每 32 个样本一个 chunk）
+        let samplesPerChunk = 32
         var audioOffsets: [UInt32] = []
-        audioOffsets.reserveCapacity(audioFrames.count)
-        var running = audioDataStart
-        try dest.write(contentsOf: boxHeader(type: "mdat", payloadSize: audioPayloadSize))
-        for frame in audioFrames {
+        var running = ftypSize + 8 + videoPayloadSize
+        var index = 0
+        while index < audioFrames.count {
             audioOffsets.append(UInt32(min(running, UInt64(UInt32.max))))
-            try dest.write(contentsOf: frame)
-            running += UInt64(frame.count)
+            let end = min(index + samplesPerChunk, audioFrames.count)
+            for frameIndex in index..<end {
+                let frame = audioFrames[frameIndex]
+                try dest.write(contentsOf: frame)
+                running += UInt64(frame.count)
+            }
+            index = end
         }
 
         // 4.4 moov
@@ -126,6 +141,7 @@ enum AudioTrackBuilder {
         let trak = makeAudioTrak(frameCount: audioFrames.count,
                                  sizes: audioFrames.map { $0.count },
                                  offsets: audioOffsets,
+                                 samplesPerChunk: samplesPerChunk,
                                  sampleRate: sampleRate,
                                  channels: channels,
                                  esds: esds,
@@ -141,7 +157,7 @@ enum AudioTrackBuilder {
         moov.append(moovBody)
         try dest.write(contentsOf: moov)
 
-        let finalSize = ftypSize + mdatVideoSize + 8 + audioPayloadSize + UInt64(moov.count)
+        let finalSize = ftypSize + 8 + videoPayloadSize + audioPayloadSize + UInt64(moov.count)
         return "音频轨已自建并合并 帧=\(audioFrames.count) 采样率=\(sampleRate) 总大小=\(finalSize)B"
     }
 
@@ -150,6 +166,7 @@ enum AudioTrackBuilder {
     private static func makeAudioTrak(frameCount: Int,
                                       sizes: [Int],
                                       offsets: [UInt32],
+                                      samplesPerChunk: Int,
                                       sampleRate: Int,
                                       channels: Int,
                                       esds: Data,
@@ -240,13 +257,23 @@ enum AudioTrackBuilder {
         sttsBody.append(contentsOf: be32(1024))
         let stts = box(type: "stts", body: sttsBody)
 
-        // stsc：1 条记录，每 chunk 一个样本
+        // stsc：每 chunk 固定样本数，尾块单独一条
+        let chunkCount = max(1, offsets.count)
+        let remainder = frameCount % samplesPerChunk
+        var stscEntries: [(UInt32, UInt32)] = []
+        if remainder == 0 || chunkCount <= 1 {
+            stscEntries = [(1, UInt32(max(1, remainder == 0 ? samplesPerChunk : frameCount)))]
+        } else {
+            stscEntries = [(1, UInt32(samplesPerChunk)), (UInt32(chunkCount), UInt32(remainder))]
+        }
         var stscBody = Data()
         stscBody.append(contentsOf: [0x00, 0x00, 0x00, 0x00])
-        stscBody.append(contentsOf: be32(1))
-        stscBody.append(contentsOf: be32(1))
-        stscBody.append(contentsOf: be32(1))
-        stscBody.append(contentsOf: be32(1))
+        stscBody.append(contentsOf: be32(UInt32(stscEntries.count)))
+        for (firstChunk, samples) in stscEntries {
+            stscBody.append(contentsOf: be32(firstChunk))
+            stscBody.append(contentsOf: be32(samples))
+            stscBody.append(contentsOf: be32(1))
+        }
         let stsc = box(type: "stsc", body: stscBody)
 
         // stsz

@@ -34,7 +34,7 @@ enum TSRemuxPipeline {
             if let audio { audioInfo = audio }
         }
 
-        demuxer.onVideoFrame = { data, pts, dts, isKey, _ in
+        demuxer.onVideoFrame = { data, pts, dts, isKey, _, _ in
             guard failure == nil, let info = videoInfo else { return }
             if writer == nil {
                 do {

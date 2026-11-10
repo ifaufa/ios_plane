@@ -21,8 +21,8 @@ enum MediaConverter {
 
         let dirSize = directorySize(dir)
         if let available = availableCapacity(),
-           available < Int64(Double(dirSize) * 1.1) + 200 * 1024 * 1024 {
-            let need = Double(dirSize) * 1.1 / 1_073_741_824
+           available < Int64(Double(dirSize) * 2.3) + 200 * 1024 * 1024 {
+            let need = Double(dirSize) * 2.3 / 1_073_741_824
             let left = Double(available) / 1_073_741_824
             throw ConversionError(message: String(format: "空间不足：转 MP4 约需 %.1f GB，当前仅剩 %.1f GB。原分片已保留。", need, left))
         }
@@ -38,6 +38,8 @@ enum MediaConverter {
         // 1) 自研解复用 + AVAssetWriter（视频轨已验证正确）
         //    S1：通过格式描述扩展提供完整 esds；S2：视频-only + 自建音频轨合并；S3：保留画面版本
         let fm2 = FileManager.default
+        let tryS1 = UserDefaults.standard.bool(forKey: "mp4TryS1")
+        if tryS1 {
         do {
             let start = Date()
             try await AVRemuxPipeline.remux(state: state, dir: dir, destination: outputURL,
@@ -60,6 +62,7 @@ enum MediaConverter {
             }
         } catch {
             DiagnosticsLog.write("[转MP4] S1 失败：\(error.localizedDescription)")
+        }
         }
 
         // S2：视频-only 转换 + 收集音频帧 + 自建音频轨合并
@@ -139,7 +142,8 @@ enum MediaConverter {
         }
 
         try? fm.removeItem(at: dir)
-        let size = (try? outputURL.resourceValues(forKeys: [.fileSizeKey]).fileSize).flatMap { Int64($0) } ?? 0
+        let attrs = try? fm.attributesOfItem(atPath: outputURL.path)
+        let size = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
         DiagnosticsLog.write("[转MP4] 完成 时长=\(String(format: "%.1f", verify.duration))s 大小=\(size)B 已删除分片")
         return (outputName, verify.duration, size)
     }
@@ -155,7 +159,16 @@ enum MediaConverter {
         for track in tracks {
             let size = (try? await track.load(.naturalSize)) ?? .zero
             let range = (try? await track.load(.timeRange))?.duration.seconds ?? 0
-            parts.append("\(track.mediaType.rawValue) \(Int(size.width))x\(Int(size.height)) \(String(format: "%.1f", range))s")
+            if track.mediaType == .audio {
+                var description = "soun"
+                if let formats = try? await track.load(.formatDescriptions), let first = formats.first,
+                   let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(first)?.pointee {
+                    description += " \(Int(asbd.mChannelsPerFrame))ch/\(Int(asbd.mSampleRate))Hz"
+                }
+                parts.append("\(description) \(String(format: "%.1f", range))s")
+            } else {
+                parts.append("\(track.mediaType.rawValue) \(Int(size.width))x\(Int(size.height)) \(String(format: "%.1f", range))s")
+            }
         }
         let duration = (try? await asset.load(.duration))?.seconds ?? 0
         return "总时长=\(String(format: "%.1f", duration))s | " + parts.joined(separator: " | ")
