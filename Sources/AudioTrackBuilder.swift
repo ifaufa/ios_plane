@@ -78,12 +78,15 @@ enum AudioTrackBuilder {
         let dest = try FileHandle(forWritingTo: createFile(at: destination))
         defer { try? dest.close() }
 
-        // 4.1 ftyp（原样）
-        try source.seek(toOffset: ftypRange.offset)
-        if let ftyp = try source.read(upToCount: Int(ftypRange.size)) {
-            try dest.write(contentsOf: ftyp)
+        // 4.1 mdat 之前的全部内容（ftyp/free 等）原样搬运，保证视频绝对偏移不变
+        try source.seek(toOffset: 0)
+        var prefixRemaining = mdatRange.offset
+        while prefixRemaining > 0 {
+            let chunkSize = Int(min(prefixRemaining, 4 << 20))
+            guard let chunk = try source.read(upToCount: chunkSize), !chunk.isEmpty else { break }
+            try dest.write(contentsOf: chunk)
+            prefixRemaining -= UInt64(chunk.count)
         }
-        let ftypSize = ftypRange.size
 
         // 4.2 单个 mdat：视频负载（原样）+ 音频负载
         // 视频 mdat 头长度（8 或 16）
@@ -96,8 +99,21 @@ enum AudioTrackBuilder {
         var audioPayloadSize: UInt64 = 0
         for frame in audioFrames { audioPayloadSize += UInt64(frame.count) }
 
-        // mdat 头（总负载）
-        try dest.write(contentsOf: boxHeader(type: "mdat", payloadSize: videoPayloadSize + audioPayloadSize))
+        // mdat 头（总负载，沿用原头长度以保证负载起点一致）
+        let totalPayload = videoPayloadSize + audioPayloadSize
+        if videoHeaderLength == 16 {
+            var header = Data()
+            header.append(contentsOf: [0, 0, 0, 1])
+            header.append("mdat".data(using: .ascii)!)
+            let value = totalPayload + 16
+            header.append(contentsOf: (0..<8).map { UInt8((value >> (56 - $0 * 8)) & 0xFF) })
+            try dest.write(contentsOf: header)
+        } else {
+            guard totalPayload + 8 <= UInt64(UInt32.max) else {
+                throw BuildError(message: "单 mdat 超过 4GB，暂不支持")
+            }
+            try dest.write(contentsOf: boxHeader(type: "mdat", payloadSize: totalPayload))
+        }
 
         // 视频负载（跳过原 mdat 头）
         try source.seek(toOffset: mdatRange.offset + videoHeaderLength)
@@ -112,7 +128,7 @@ enum AudioTrackBuilder {
         // 音频负载 + chunk 偏移（每 32 个样本一个 chunk）
         let samplesPerChunk = 32
         var audioOffsets: [UInt32] = []
-        var running = ftypSize + 8 + videoPayloadSize
+        var running = mdatRange.offset + videoHeaderLength + videoPayloadSize
         var index = 0
         while index < audioFrames.count {
             audioOffsets.append(UInt32(min(running, UInt64(UInt32.max))))
@@ -157,7 +173,7 @@ enum AudioTrackBuilder {
         moov.append(moovBody)
         try dest.write(contentsOf: moov)
 
-        let finalSize = ftypSize + 8 + videoPayloadSize + audioPayloadSize + UInt64(moov.count)
+        let finalSize = mdatRange.offset + videoHeaderLength + videoPayloadSize + audioPayloadSize + UInt64(moov.count)
         return "音频轨已自建并合并 帧=\(audioFrames.count) 采样率=\(sampleRate) 总大小=\(finalSize)B"
     }
 

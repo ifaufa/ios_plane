@@ -361,6 +361,12 @@ enum AVRemuxPipeline {
 
         demuxer.onAudioFrame = { data, _ in
             guard currentFailure() == nil else { return }
+            // 纯视频模式下也要记录音频参数（自建音轨需要采样率/声道/ASC）
+            if let info = demuxer.audioInfo() {
+                AVRemuxPipeline.lastAudioASC = info.audioSpecificConfig
+                AVRemuxPipeline.lastAudioSampleRate = info.sampleRate
+                AVRemuxPipeline.lastAudioChannels = info.channels
+            }
             if videoOnly {
                 if collectAudio { collected.append(data) }
                 return
@@ -414,6 +420,11 @@ enum AVRemuxPipeline {
             throw RemuxError(message: "转封装失败：没有可写入的视频帧")
         }
 
+        if let info = demuxer.audioInfo() {
+            AVRemuxPipeline.lastAudioASC = info.audioSpecificConfig
+            AVRemuxPipeline.lastAudioSampleRate = info.sampleRate
+            AVRemuxPipeline.lastAudioChannels = info.channels
+        }
         if collectAudio {
             AVRemuxPipeline.collectedAudioFrames = collected
             DiagnosticsLog.write("[转MP4] 已收集音频帧 \(collected.count) 个（用于自建音轨）")
