@@ -31,7 +31,13 @@ final class DownloadManager: NSObject, ObservableObject {
     static var backgroundCompletionHandler: (() -> Void)?
 
     /// 同时下载上限，超出后排队
-    let maxConcurrent = 5
+    static let maxConcurrentKey = "downloads.maxConcurrent"
+
+    /// 同时下载的任务数（1–5，默认 5）
+    var maxConcurrent: Int {
+        let value = UserDefaults.standard.integer(forKey: Self.maxConcurrentKey)
+        return value <= 0 ? 5 : min(5, max(1, value))
+    }
     /// 进度停滞多少秒判定为卡住
     let stallTimeout: CFTimeInterval = 30
 

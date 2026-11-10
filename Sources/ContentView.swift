@@ -6,6 +6,7 @@ struct ContentView: View {
     @EnvironmentObject private var downloads: DownloadManager
     @StateObject private var backup = BackupManager()
     @ObservedObject private var segmentRunner = SegmentRunner.shared
+    @ObservedObject private var playback = PlaybackStore.shared
     @State private var showAdd = false
     @State private var showBrowser = false
     @State private var showHeaders = false
@@ -233,13 +234,17 @@ struct ContentView: View {
             .sheet(item: $shareItem) { item in
                 ShareSheet(items: [item.url])
             }
-            .fullScreenCover(item: $playing) { item in
-                PlayerView(
-                    url: library.localURL(for: item),
-                    title: item.title,
-                    startPosition: item.lastPosition ?? 0
-                ) { seconds in
-                    library.updateProgress(id: item.id, seconds: seconds)
+            .fullScreenCover(isPresented: $playback.isFullscreen) {
+                ImmersivePlayerView(store: playback)
+            }
+            .overlay(alignment: .topLeading) {
+                if playback.isActive, !playback.isFullscreen {
+                    MiniPlayerWindow(store: playback)
+                }
+            }
+            .onAppear {
+                playback.onProgress = { id, seconds in
+                    library.updateProgress(id: id, seconds: seconds)
                 }
             }
         }
@@ -269,6 +274,11 @@ struct ContentView: View {
             }
             convertingID = nil
         }
+    }
+
+    private func openPlayer(_ item: VideoItem) {
+        let url = library.localURL(for: item)
+        playback.open(video: item, url: url)
     }
 
     private func exportTS(_ item: VideoItem) {
@@ -449,6 +459,19 @@ struct EngineSettingsView: View {
                         Text("广告段处理")
                     } footer: {
                         Text("默认只剔除编码参数与主段不一致的插入片段（如分辨率变化）；开启后会一并剔除断点处更换密钥的片段。剔除结果会在下载完成时提示。")
+                    }
+                    Section {
+                        Picker("同时下载任务数", selection: Binding(
+                            get: {
+                                let value = UserDefaults.standard.integer(forKey: DownloadManager.maxConcurrentKey)
+                                return value <= 0 ? 5 : min(5, max(1, value))
+                            },
+                            set: { UserDefaults.standard.set($0, forKey: DownloadManager.maxConcurrentKey) }
+                        )) {
+                            ForEach([1, 2, 3, 4, 5], id: \.self) { Text("\($0)").tag($0) }
+                        }
+                    } footer: {
+                        Text("同时进行的下载任务数量（1–5），默认 5。任务越多越占带宽，弱网建议 2–3。")
                     }
                     Section {
                         Picker("每任务", selection: $perTask) {

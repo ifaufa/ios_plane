@@ -497,6 +497,7 @@ struct WebViewContainer: UIViewRepresentable {
 // MARK: - 页面
 
 struct WebSnifferBrowser: View {
+    @ObservedObject private var playback = PlaybackStore.shared
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var downloads: DownloadManager
     @StateObject private var model = BrowserModel()
@@ -513,6 +514,7 @@ struct WebSnifferBrowser: View {
 
     var body: some View {
         NavigationStack {
+            ZStack(alignment: .topLeading) {
             VStack(spacing: 0) {
                 addressBar
                 ZStack(alignment: .top) {
@@ -524,6 +526,11 @@ struct WebSnifferBrowser: View {
                     }
                 }
                 bottomBar
+            }
+            // 浏览网页时悬浮播放窗保持可见（与主界面共享同一个播放器）
+            if playback.isActive, !playback.isFullscreen {
+                MiniPlayerWindow(store: playback)
+            }
             }
             .navigationTitle("找视频")
             .navigationBarTitleDisplayMode(.inline)
