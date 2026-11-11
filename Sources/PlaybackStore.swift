@@ -27,6 +27,7 @@ final class PlaybackStore: ObservableObject {
     private var waitingTicks = 0
     private var pauseTicks = 0
     private var pauseRecoveries = 0
+    private var lastRecoveryTime = Date.distantPast
     private var recoveryAttempts = 0
     private var interruptionObserver: NSObjectProtocol?
 
@@ -157,9 +158,9 @@ final class PlaybackStore: ObservableObject {
         onProgress?(id, seconds)
     }
 
-    /// 让出音频会话（打开浏览器/外部媒体前调用），避免被系统判为占用
+    /// 打开浏览器前切到混音模式：与 WebView 音频共存，避免被中断（不能 setActive(false)，那会直接暂停播放）
     func prepareForExternalAudio() {
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        configureAudioSession(mixing: true)
     }
 
     /// 确保音频会话可用并继续播放（浏览器关闭、来电结束后调用）
@@ -185,23 +186,16 @@ final class PlaybackStore: ObservableObject {
         if player.rate == 0 { player.play() }
         isPlaying = player.rate > 0
         DiagnosticsLog.write("[播放] 恢复尝试 会话=\(sessionError) rate=\(String(format: "%.1f", player.rate)) status=\(player.currentItem?.status.rawValue ?? -1)")
-
-        // 仍有画面但不走时间轴：用静音检查兜底重建
-        if player.rate == 0, recoveryAttempts < 3 {
-            recoveryAttempts += 1
-            let position = player.currentTime().seconds
-            DiagnosticsLog.write("[播放] 会话恢复无效，重建播放项（第 \(recoveryAttempts) 次）")
-            loadItem(startAt: position.isFinite ? position : lastSaved)
-            player.play()
-            isPlaying = player.rate > 0
-        }
     }
 
     // MARK: - 内部
 
-    private func configureAudioSession() {
+    private func configureAudioSession(mixing: Bool = false) {
         let session = AVAudioSession.sharedInstance()
-        try? session.setCategory(.playback, mode: .moviePlayback, options: [.allowAirPlay, .allowBluetoothA2DP])
+        let options: AVAudioSession.CategoryOptions = mixing
+            ? [.mixWithOthers, .allowAirPlay, .allowBluetoothA2DP]
+            : [.allowAirPlay, .allowBluetoothA2DP]
+        try? session.setCategory(.playback, mode: .moviePlayback, options: options)
         try? session.setActive(true)
     }
 
@@ -255,9 +249,12 @@ final class PlaybackStore: ObservableObject {
             waitingTicks = 0
             if pauseTicks >= 4 {               // 约 2 秒
                 pauseTicks = 0
-                pauseRecoveries += 1
-                DiagnosticsLog.write("[播放] 检测到意外暂停，自动恢复（第 \(pauseRecoveries) 次）")
-                ensurePlaying()
+                if Date().timeIntervalSince(lastRecoveryTime) > 2, pauseRecoveries < 6 {
+                    lastRecoveryTime = Date()
+                    pauseRecoveries += 1
+                    DiagnosticsLog.write("[播放] 检测到意外暂停，自动恢复（第 \(pauseRecoveries) 次）")
+                    ensurePlaying()
+                }
             }
         } else {
             waitingTicks = 0

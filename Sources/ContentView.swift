@@ -238,7 +238,7 @@ struct ContentView: View {
                 }
                 // fullScreenCover dismiss 是异步的，WKWebView 随后还会动一次音频会话，
                 // 因此多次延后重试恢复，覆盖这个时间窗
-                for delay in [0.15, 0.5, 1.2] {
+                for delay in [1.5, 2.5, 4.0] {
                     Task {
                         try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
                         playback.ensurePlaying()
@@ -329,6 +329,12 @@ struct ContentView: View {
 
     private func openPlayer(_ item: VideoItem) {
         let url = library.localURL(for: item)
+        let exists = FileManager.default.fileExists(atPath: url.path)
+        DiagnosticsLog.write("[播放] 点击 \(item.title) 文件=\(item.fileName) 存在=\(exists)")
+        guard exists else {
+            showToast("文件不存在：\(item.fileName)")
+            return
+        }
         playback.open(video: item, url: url)
     }
 

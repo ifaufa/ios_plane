@@ -7,7 +7,8 @@ import CoreMedia
 /// MP4/movpkg 走 AVAssetImageGenerator；分片（HLS）走自研解复用 + VideoToolbox
 enum ThumbnailService {
     /// 缓存版本号：改动取帧策略时递增，旧图自动失效
-    private static let cacheVersion = "v2"
+    private static let cacheVersion = "v3"
+    private static var didPurge = false
     private static let fraction = 0.3
 
     private static var root: URL {
@@ -26,6 +27,7 @@ enum ThumbnailService {
     }
 
     static func ensureThumbnail(for item: VideoItem, localURL: URL) async -> UIImage? {
+        purgeOldCachesIfNeeded()
         if let cached = cached(for: item.id) { return cached }
         let isHLS = localURL.pathExtension.lowercased() == "m3u8"
         guard let image = await generate(localURL: localURL, isHLS: isHLS, knownDuration: item.duration) else {
@@ -35,6 +37,20 @@ enum ThumbnailService {
             try? data.write(to: fileURL(for: item.id), options: .atomic)
         }
         return image
+    }
+
+    /// 缓存版本升级时清掉旧图，避免继续显示历史（错误的）缩略图
+    private static func purgeOldCachesIfNeeded() {
+        guard !didPurge else { return }
+        didPurge = true
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else { return }
+        var removed = 0
+        for url in entries where !url.lastPathComponent.hasSuffix("-\(cacheVersion).jpg") {
+            try? fm.removeItem(at: url)
+            removed += 1
+        }
+        if removed > 0 { DiagnosticsLog.write("[缩略图] 清理旧缓存 \(removed) 个") }
     }
 
     // MARK: - 生成
@@ -50,23 +66,34 @@ enum ThumbnailService {
         return await imageFromAsset(localURL, knownDuration: knownDuration)
     }
 
-    /// movpkg 等目录型资产：对其内部体积最大的媒体分片直接取帧
+    /// movpkg 等目录型资产：先直接对包取帧，失败再找内部最大的媒体文件
     private static func imageFromBundle(_ dir: URL) async -> UIImage? {
+        if let image = await imageFromAsset(dir, knownDuration: 0) {
+            DiagnosticsLog.write("[缩略图] movpkg 直接取帧成功 \(dir.lastPathComponent)")
+            return image
+        }
+        DiagnosticsLog.write("[缩略图] movpkg 直接取帧失败，改为扫描内部文件")
+
         let fm = FileManager.default
-        guard let enumerator = fm.enumerator(at: dir, includingPropertiesForKeys: [.fileSizeKey]) else { return nil }
-        let mediaExtensions: Set<String> = ["mp4", "fmp4", "m4s", "m4v", "ts", "mov"]
-        var best: (url: URL, size: Int)?
+        guard let enumerator = fm.enumerator(at: dir, includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey]) else { return nil }
+        var candidates: [(url: URL, size: Int)] = []
         for case let url as URL in enumerator {
-            guard mediaExtensions.contains(url.pathExtension.lowercased()) else { continue }
-            let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-            if size > (best?.size ?? 0) { best = (url, size) }
+            let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+            guard values?.isRegularFile == true else { continue }
+            let size = values?.fileSize ?? 0
+            if size > 64 * 1024 { candidates.append((url, size)) }
         }
-        guard let candidate = best?.url else {
-            DiagnosticsLog.write("[缩略图] 目录内未找到媒体分片 \(dir.lastPathComponent)")
-            return nil
+        candidates.sort { $0.size > $1.size }
+        DiagnosticsLog.write("[缩略图] movpkg 内文件数=\(candidates.count) 最大三个=\(candidates.prefix(3).map { "\($0.url.lastPathComponent)(\($0.size / 1024)KB)" }.joined(separator: ","))")
+
+        for candidate in candidates.prefix(3) {
+            if let image = await imageFromAsset(candidate.url, knownDuration: 0) {
+                DiagnosticsLog.write("[缩略图] 使用内部文件 \(candidate.url.lastPathComponent) 成功")
+                return image
+            }
         }
-        DiagnosticsLog.write("[缩略图] 使用分片 \(candidate.lastPathComponent) \((best?.size ?? 0) / 1024)KB")
-        return await imageFromAsset(candidate, knownDuration: 0)
+        DiagnosticsLog.write("[缩略图] movpkg 内所有候选均取帧失败 \(dir.lastPathComponent)")
+        return nil
     }
 
     private static func imageFromAsset(_ url: URL, knownDuration: Double) async -> UIImage? {
@@ -115,6 +142,7 @@ enum ThumbnailService {
             }
         }
 
+        DiagnosticsLog.write("[缩略图] 分片目录 \(dir.lastPathComponent) 段数=\(durations.count) 总时长=\(Int(total))s 目标分片=#\(targetIndex)")
         // 优先取目标分片，失败则回退到第 1 个分片
         for index in [targetIndex, 0] {
             if let image = firstKeyframeImage(dir: dir, index: index) { return image }
