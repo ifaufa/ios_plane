@@ -11,7 +11,7 @@ extension Notification.Name {
 
 enum ThumbnailService {
     /// 缓存版本号：改动取帧策略时递增，旧图自动失效
-    private static let cacheVersion = "v3"
+    private static let cacheVersion = "v4"
     private static var didPurge = false
     private static let fraction = 0.3
 
@@ -30,13 +30,24 @@ enum ThumbnailService {
         purgeOldCachesIfNeeded()
         removeOrphans(validIDs: Set(items.map { $0.id }))
         var generated = 0
+        var cachedCount = 0
+        var missingCount = 0
         for item in items {
-            if cached(for: item.id) != nil { continue }
+            if cached(for: item.id) != nil { cachedCount += 1; continue }
             let url = urlFor(item)
-            guard FileManager.default.fileExists(atPath: url.path) else { continue }
+            var isDirectory: ObjCBool = false
+            let exists = FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
+            if !exists {
+                missingCount += 1
+                DiagnosticsLog.write("[缩略图] 跳过（文件不存在）\(item.fileName)")
+                continue
+            }
+            if url.pathExtension.lowercased() == "movpkg" {
+                DiagnosticsLog.write("[缩略图] movpkg 开始处理 \(url.lastPathComponent) 是目录=\(isDirectory.boolValue)")
+            }
             if await ensureThumbnail(for: item, localURL: url) != nil { generated += 1 }
         }
-        if generated > 0 { DiagnosticsLog.write("[缩略图] 后台预生成完成 \(generated) 个") }
+        DiagnosticsLog.write("[缩略图] 预生成检查 \(items.count) 个，命中缓存 \(cachedCount)，新生成 \(generated)，缺文件 \(missingCount)")
     }
 
     /// 删除库里已不存在的条目对应缩略图
@@ -103,6 +114,7 @@ enum ThumbnailService {
 
     /// movpkg 等目录型资产：先直接对包取帧，失败再找内部最大的媒体文件
     private static func imageFromBundle(_ dir: URL) async -> UIImage? {
+        DiagnosticsLog.write("[缩略图] movpkg 尝试直接取帧 \(dir.lastPathComponent)")
         if let image = await imageFromAsset(dir, knownDuration: 0) {
             DiagnosticsLog.write("[缩略图] movpkg 直接取帧成功 \(dir.lastPathComponent)")
             return image
@@ -142,28 +154,43 @@ enum ThumbnailService {
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
         generator.maximumSize = CGSize(width: 640, height: 360)
-        // 允许返回"最近的关键帧"：这批流的 GOP 较长，精确解码容易报 Cannot Decode
-        generator.requestedTimeToleranceBefore = .positiveInfinity
+        // 只允许"向后"放宽：允许取目标之后的最近关键帧，但不允许退回到更早的帧（避免变成首帧）
+        generator.requestedTimeToleranceBefore = .zero
         generator.requestedTimeToleranceAfter = .positiveInfinity
 
-        do {
-            let result = try await generator.image(at: CMTime(seconds: target, preferredTimescale: 600))
-            DiagnosticsLog.write("[缩略图] 生成成功 \(url.lastPathComponent) 目标=\(Int(target))s")
-            return UIImage(cgImage: result.image)
-        } catch {
-            let tracks = (try? await asset.load(.tracks)) ?? []
-            let videoTracks = tracks.filter { $0.mediaType == .video }
-            var sizeText = "-"
-            if let first = videoTracks.first, let natural = try? await first.load(.naturalSize) {
-                sizeText = "\(Int(natural.width))x\(Int(natural.height))"
+        var best: (image: CGImage, actual: Double)?
+        var lastError: String?
+
+        for attempt in [target, max(target * 0.6, 1), 1.0] {
+            do {
+                let result = try await generator.image(at: CMTime(seconds: attempt, preferredTimescale: 600))
+                let actual = result.actualTime.seconds
+                if best == nil || abs(actual - target) < abs((best?.actual ?? 0) - target) {
+                    best = (result.image, actual.isFinite ? actual : 0)
+                }
+                if attempt == target {
+                    DiagnosticsLog.write("[缩略图] 生成成功 \(url.lastPathComponent) 目标=\(Int(target))s 实得=\(Int(actual))s")
+                }
+                break
+            } catch {
+                lastError = error.localizedDescription
             }
-            DiagnosticsLog.write("[缩略图] 取帧失败 \(url.lastPathComponent) 目标=\(Int(target))s 时长=\(Int(duration))s 轨道=\(tracks.count)(视频\(videoTracks.count)) 尺寸=\(sizeText) 错误=\(error.localizedDescription)")
         }
-        for fallback in [1.0, 0.0] {
-            if let result = try? await generator.image(at: CMTime(seconds: fallback, preferredTimescale: 600)) {
-                return UIImage(cgImage: result.image)
+
+        if let best {
+            if best.actual < target * 0.5 {
+                DiagnosticsLog.write("[缩略图] 取偏 \(url.lastPathComponent) 目标=\(Int(target))s 实得=\(Int(best.actual))s")
             }
+            return UIImage(cgImage: best.image)
         }
+
+        let tracks = (try? await asset.load(.tracks)) ?? []
+        let videoTracks = tracks.filter { $0.mediaType == .video }
+        var sizeText = "-"
+        if let first = videoTracks.first, let natural = try? await first.load(.naturalSize) {
+            sizeText = "\(Int(natural.width))x\(Int(natural.height))"
+        }
+        DiagnosticsLog.write("[缩略图] 取帧失败 \(url.lastPathComponent) 目标=\(Int(target))s 时长=\(Int(duration))s 轨道=\(tracks.count)(视频\(videoTracks.count)) 尺寸=\(sizeText) 错误=\(lastError ?? "-")")
         return nil
     }
 
