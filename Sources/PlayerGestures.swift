@@ -238,12 +238,8 @@ final class PlayerHostViewController: UIViewController, UIGestureRecognizerDeleg
         } else if x > width * 2 / 3 {
             stepSeek(by: 10, kind: .stepForward, label: "＋10 秒")
         } else {
-            if player.rate > 0 {
-                player.pause()
-            } else {
-                player.play()
-            }
-            model.isPlaying = player.rate > 0
+            PlaybackStore.shared.togglePlay()
+            model.isPlaying = PlaybackStore.shared.isPlaying
             model.pokeChrome()
         }
     }
@@ -324,7 +320,7 @@ final class PlayerHostViewController: UIViewController, UIGestureRecognizerDeleg
         fastForwardMonitor?.invalidate()
         fastForwardMonitor = nil
         speedMode = .stepping
-        player.pause()
+        PlaybackStore.shared.pauseForPreview()
         previewTarget = max(0, player.currentTime().seconds)
         previewStep = 0.25
         startPreviewTimer()
@@ -337,7 +333,7 @@ final class PlayerHostViewController: UIViewController, UIGestureRecognizerDeleg
     private func beginRewind() {
         wasPlayingBeforeSpeed = player.rate > 0
         speedMode = .stepping
-        player.pause()
+        PlaybackStore.shared.pauseForPreview()
         previewTarget = max(0, player.currentTime().seconds)
         previewStep = -0.25
         startPreviewTimer()
@@ -384,9 +380,9 @@ final class PlayerHostViewController: UIViewController, UIGestureRecognizerDeleg
         speedMode = .none
 
         if wasPlayingBeforeSpeed {
-            player.play()
+            PlaybackStore.shared.resumeAfterPreview()
         } else {
-            player.pause()
+            PlaybackStore.shared.pauseForPreview()
         }
         wasPlayingBeforeSpeed = false
         model.isPlaying = player.rate > 0

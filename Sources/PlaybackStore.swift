@@ -162,21 +162,39 @@ final class PlaybackStore: ObservableObject {
         if expectsPlaying || player.rate > 0 { pause() } else { play() }
     }
 
-    /// 拖动进度条：先暂停并记住原意图
+    /// 拖动进度条：先暂停并记住原意图（幂等，避免重复进入覆盖原意图）
     func beginScrub() {
+        guard !scrubbing else { return }
         expectsPlayingBeforeScrub = expectsPlaying
+        DiagnosticsLog.write("[播放] 开始拖动 原意图=\(expectsPlaying)")
         expectPauseTemporarily()
     }
 
     /// 拖动结束：按原意图决定是否继续
     func endScrub(resume: Bool? = nil) {
+        // 若 beginScrub 未被调用（极端情况），回退到当前意图，避免"松手后一直暂停"
+        let wasScrubbing = scrubbing
+        let shouldPlay = resume ?? (wasScrubbing ? expectsPlayingBeforeScrub : expectsPlaying)
         scrubbing = false
-        let shouldPlay = resume ?? expectsPlayingBeforeScrub
+        DiagnosticsLog.write("[播放] 结束拖动 续播=\(shouldPlay)")
         if shouldPlay {
             play()
         } else {
             pause()
         }
+    }
+
+    /// 手势快进/后退预览期间的临时暂停（不改变用户意图）
+    func pauseForPreview() {
+        player.pause()
+        isPlaying = false
+    }
+
+    /// 预览结束：仅在用户原本希望播放时恢复
+    func resumeAfterPreview() {
+        guard expectsPlaying else { return }
+        player.play()
+        isPlaying = player.rate > 0
     }
 
     private func expectPauseTemporarily() {
