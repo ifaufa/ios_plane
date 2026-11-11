@@ -21,6 +21,19 @@ enum ThumbnailService {
         root.appendingPathComponent("\(id.uuidString)-\(cacheVersion).jpg")
     }
 
+    /// 启动后后台串行补齐所有缺失缩略图（含 movpkg），保证日志完整可诊断
+    static func pregenerate(items: [VideoItem], urlFor: @escaping (VideoItem) -> URL) async {
+        purgeOldCachesIfNeeded()
+        var generated = 0
+        for item in items {
+            if cached(for: item.id) != nil { continue }
+            let url = urlFor(item)
+            guard FileManager.default.fileExists(atPath: url.path) else { continue }
+            if await ensureThumbnail(for: item, localURL: url) != nil { generated += 1 }
+        }
+        if generated > 0 { DiagnosticsLog.write("[缩略图] 后台预生成完成 \(generated) 个") }
+    }
+
     static func cached(for id: UUID) -> UIImage? {
         guard let data = try? Data(contentsOf: fileURL(for: id)) else { return nil }
         return UIImage(data: data)
@@ -107,14 +120,21 @@ enum ThumbnailService {
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
         generator.maximumSize = CGSize(width: 640, height: 360)
-        generator.requestedTimeToleranceBefore = CMTime(seconds: 3, preferredTimescale: 600)
-        generator.requestedTimeToleranceAfter = CMTime(seconds: 3, preferredTimescale: 600)
+        // 允许返回"最近的关键帧"：这批流的 GOP 较长，精确解码容易报 Cannot Decode
+        generator.requestedTimeToleranceBefore = .positiveInfinity
+        generator.requestedTimeToleranceAfter = .positiveInfinity
 
         do {
             let result = try await generator.image(at: CMTime(seconds: target, preferredTimescale: 600))
             return UIImage(cgImage: result.image)
         } catch {
-            DiagnosticsLog.write("[缩略图] 取帧失败 \(url.lastPathComponent) 目标=\(Int(target))s 时长=\(Int(duration))s 错误=\(error.localizedDescription)")
+            let tracks = (try? await asset.load(.tracks)) ?? []
+            let videoTracks = tracks.filter { $0.mediaType == .video }
+            var sizeText = "-"
+            if let first = videoTracks.first, let natural = try? await first.load(.naturalSize) {
+                sizeText = "\(Int(natural.width))x\(Int(natural.height))"
+            }
+            DiagnosticsLog.write("[缩略图] 取帧失败 \(url.lastPathComponent) 目标=\(Int(target))s 时长=\(Int(duration))s 轨道=\(tracks.count)(视频\(videoTracks.count)) 尺寸=\(sizeText) 错误=\(error.localizedDescription)")
         }
         for fallback in [1.0, 0.0] {
             if let result = try? await generator.image(at: CMTime(seconds: fallback, preferredTimescale: 600)) {

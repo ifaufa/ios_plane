@@ -28,6 +28,9 @@ final class PlaybackStore: ObservableObject {
     private var pauseTicks = 0
     private var pauseRecoveries = 0
     private var lastRecoveryTime = Date.distantPast
+    private var loadStartedAt: Date?
+    private var loadReported = false
+    @Published var errorNotice: String?
     private var recoveryAttempts = 0
     private var interruptionObserver: NSObjectProtocol?
 
@@ -104,6 +107,8 @@ final class PlaybackStore: ObservableObject {
             item = AVPlayerItem(url: sourceURL)
         }
         item.audioTimePitchAlgorithm = .timeDomain
+        loadStartedAt = Date()
+        loadReported = false
         player.replaceCurrentItem(with: item)
         if seconds > 3 {
             player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600),
@@ -228,6 +233,23 @@ final class PlaybackStore: ObservableObject {
             pauseTicks = 0
             return
         }
+        // 加载超时：item 长时间停留在 .unknown，界面会一直黑屏且无任何日志
+        if let item = player.currentItem, item.status == .unknown,
+           let started = loadStartedAt, Date().timeIntervalSince(started) > 5, !loadReported {
+            loadReported = true
+            Task { await self.reportAssetInfo() }
+            if recoveryAttempts < 1 {
+                recoveryAttempts += 1
+                DiagnosticsLog.write("[播放] 加载超时，重建播放项")
+                loadItem(startAt: lastSaved)
+                player.play()
+            } else {
+                errorNotice = "该文件无法被系统解析，建议重新转换"
+                DiagnosticsLog.write("[播放] 加载超时且重建无效，判定文件异常")
+            }
+            return
+        }
+
         let failed = player.currentItem?.status == .failed
         if failed, let error = player.currentItem?.error as NSError? {
             DiagnosticsLog.write("[播放] item 失败 \(error.domain) \(error.code) \(error.localizedDescription)")
@@ -264,6 +286,19 @@ final class PlaybackStore: ObservableObject {
                 pauseRecoveries = 0
             }
         }
+    }
+
+    private func reportAssetInfo() async {
+        guard let url = sourceURL else { return }
+        let asset = AVURLAsset(url: url)
+        let tracks = (try? await asset.load(.tracks)) ?? []
+        let duration = (try? await asset.load(.duration))?.seconds ?? 0
+        var detail = ""
+        if let video = tracks.first(where: { $0.mediaType == .video }),
+           let natural = try? await video.load(.naturalSize) {
+            detail = "尺寸=\(Int(natural.width))x\(Int(natural.height))"
+        }
+        DiagnosticsLog.write("[播放] 资产自检 \(url.lastPathComponent) 轨道=\(tracks.count) 类型=\(tracks.map { $0.mediaType.rawValue }.joined(separator: ",")) 时长=\(Int(duration))s \(detail)")
     }
 
     private func recoverIfNeeded(force: Bool) {

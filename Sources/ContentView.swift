@@ -273,6 +273,14 @@ struct ContentView: View {
                     library.updateProgress(id: id, seconds: seconds)
                 }
             }
+            .task {
+                await ThumbnailService.pregenerate(items: library.items) { library.localURL(for: $0) }
+            }
+            .onChange(of: playback.errorNotice) { notice in
+                guard let notice else { return }
+                playback.errorNotice = nil
+                showToast(notice)
+            }
         }
     }
 
