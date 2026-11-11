@@ -4,6 +4,8 @@ import UIKit
 import Combine
 
 /// 共享播放器：悬浮窗与全屏共用同一 AVPlayer；自带会话隔离与自愈
+/// 「播放意图」expectsPlaying 是唯一真相：只有用户希望播放时才自动恢复，
+/// 用户主动暂停永远不会被自愈逻辑打断
 @MainActor
 final class PlaybackStore: ObservableObject {
     static let shared = PlaybackStore()
@@ -12,6 +14,8 @@ final class PlaybackStore: ObservableObject {
     @Published private(set) var title: String = ""
     @Published var isFullscreen = false
     @Published var isPlaying = false
+    @Published var expectsPlaying = false
+    @Published var errorNotice: String?
 
     let player = AVPlayer()
 
@@ -19,21 +23,21 @@ final class PlaybackStore: ObservableObject {
     var onClose: (() -> Void)?
 
     private var timeObserver: Any?
+    private var healthTimer: Timer?
+    private var tickCount = 0
     private var lastSaved: Double = 0
     private var session: LocalHLS.Session?
     private var sourceURL: URL?
     private var isHLS = false
-    private var userPaused = false
     private var waitingTicks = 0
     private var pauseTicks = 0
     private var pauseRecoveries = 0
     private var lastRecoveryTime = Date.distantPast
-    private var healthTimer: Timer?
-    private var tickCount = 0
+    private var recoveryAttempts = 0
     private var loadStartedAt: Date?
     private var loadReported = false
-    @Published var errorNotice: String?
-    private var recoveryAttempts = 0
+    private var scrubbing = false
+    private var expectsPlayingBeforeScrub = false
     private var interruptionObserver: NSObjectProtocol?
 
     var isActive: Bool { videoID != nil }
@@ -65,8 +69,7 @@ final class PlaybackStore: ObservableObject {
                 recoveryAttempts = 0
                 configureAudioSession()
                 loadItem(startAt: player.currentTime().seconds)
-                player.play()
-                isPlaying = true
+                play()
             } else {
                 ensurePlaying()
             }
@@ -79,22 +82,20 @@ final class PlaybackStore: ObservableObject {
         sourceURL = url
         isHLS = url.pathExtension.lowercased() == "m3u8"
         lastSaved = video.lastPosition ?? 0
-        userPaused = false
         recoveryAttempts = 0
         waitingTicks = 0
+        pauseTicks = 0
+        pauseRecoveries = 0
 
         configureAudioSession()
-        let start = video.lastPosition ?? 0
-        loadItem(startAt: start)
-        player.play()
-        isPlaying = true
+        loadItem(startAt: video.lastPosition ?? 0)
+        play()
         attachObserver()
         startHealthTimer()
         Task { await reportAssetInfo() }
         DiagnosticsLog.write("[播放] 打开 \(video.title) 源=\(url.lastPathComponent)")
     }
 
-    /// 重建播放项（首次打开或自愈时使用）
     private func loadItem(startAt seconds: Double) {
         guard let sourceURL else { return }
         session?.stop()
@@ -138,23 +139,50 @@ final class PlaybackStore: ObservableObject {
         title = ""
         isPlaying = false
         isFullscreen = false
-        userPaused = false
+        expectsPlaying = false
         if notify { onClose?() }
     }
 
-    // MARK: - 控制
+    // MARK: - 播放控制（用户意图入口，全屏与悬浮窗共用）
+
+    func play() {
+        expectsPlaying = true
+        if player.rate == 0 { player.play() }
+        isPlaying = player.rate > 0
+    }
+
+    func pause() {
+        expectsPlaying = false
+        pauseTicks = 0
+        player.pause()
+        isPlaying = false
+    }
 
     func togglePlay() {
-        if player.rate > 0 {
-            userPaused = true
-            player.pause()
-            isPlaying = false
+        if expectsPlaying || player.rate > 0 { pause() } else { play() }
+    }
+
+    /// 拖动进度条：先暂停并记住原意图
+    func beginScrub() {
+        expectsPlayingBeforeScrub = expectsPlaying
+        expectPauseTemporarily()
+    }
+
+    /// 拖动结束：按原意图决定是否继续
+    func endScrub(resume: Bool? = nil) {
+        scrubbing = false
+        let shouldPlay = resume ?? expectsPlayingBeforeScrub
+        if shouldPlay {
+            play()
         } else {
-            userPaused = false
-            recoverIfNeeded(force: false)
-            player.play()
-            isPlaying = true
+            pause()
         }
+    }
+
+    private func expectPauseTemporarily() {
+        scrubbing = true
+        player.pause()
+        isPlaying = false
     }
 
     func enterFullscreen() { isFullscreen = true }
@@ -169,14 +197,14 @@ final class PlaybackStore: ObservableObject {
         onProgress?(id, seconds)
     }
 
-    /// 打开浏览器前切到混音模式：与 WebView 音频共存，避免被中断（不能 setActive(false)，那会直接暂停播放）
+    /// 打开浏览器前切到混音模式：与 WebView 音频共存，避免被中断
     func prepareForExternalAudio() {
         configureAudioSession(mixing: true)
     }
 
-    /// 确保音频会话可用并继续播放（浏览器关闭、来电结束后调用）
+    /// 仅在"用户希望播放"时恢复；用户主动暂停时调用无副作用
     func ensurePlaying() {
-        guard isActive, !userPaused else { return }
+        guard isActive, expectsPlaying else { return }
 
         var sessionError = "ok"
         do {
@@ -224,7 +252,13 @@ final class PlaybackStore: ObservableObject {
         }
     }
 
-    /// 独立 0.5s 监督：不依赖播放时间轴推进（加载卡死时 periodic observer 不会回调）
+    private func detachObserver() {
+        if let timeObserver {
+            player.removeTimeObserver(timeObserver)
+            self.timeObserver = nil
+        }
+    }
+
     private func startHealthTimer() {
         stopHealthTimer()
         tickCount = 0
@@ -238,27 +272,21 @@ final class PlaybackStore: ObservableObject {
         healthTimer = nil
     }
 
-    private func detachObserver() {
-        if let timeObserver {
-            player.removeTimeObserver(timeObserver)
-            self.timeObserver = nil
-        }
-    }
-
-    /// 卡顿/失败/意外暂停检测：本地服务被抢占、网络中断、浏览器抢音频会话时自愈
     private func checkHealth() {
-        guard isActive, !userPaused else {
+        // 用户主动暂停 / 拖动中：只统计不干预
+        guard isActive, expectsPlaying, !scrubbing else {
             waitingTicks = 0
             pauseTicks = 0
             return
         }
+
         tickCount += 1
         let statusValue = player.currentItem?.status.rawValue ?? -1
         let abnormal = player.currentItem?.status == .failed || player.rate == 0
         if abnormal || tickCount % 20 == 0 {
             DiagnosticsLog.write("[播放] 监督 status=\(statusValue) rate=\(String(format: "%.1f", player.rate)) ctl=\(player.timeControlStatus.rawValue) tick=\(tickCount)")
         }
-        // 加载超时：item 长时间停留在 .unknown，界面会一直黑屏且无任何日志
+
         if let item = player.currentItem, item.status == .unknown,
            let started = loadStartedAt, Date().timeIntervalSince(started) > 5, !loadReported {
             loadReported = true
@@ -267,7 +295,7 @@ final class PlaybackStore: ObservableObject {
                 recoveryAttempts += 1
                 DiagnosticsLog.write("[播放] 加载超时，重建播放项")
                 loadItem(startAt: lastSaved)
-                player.play()
+                play()
             } else {
                 errorNotice = "该文件无法被系统解析，建议重新转换"
                 DiagnosticsLog.write("[播放] 加载超时且重建无效，判定文件异常")
@@ -287,14 +315,13 @@ final class PlaybackStore: ObservableObject {
         if failed || waiting {
             waitingTicks += 1
             pauseTicks = 0
-            if failed || waitingTicks >= 8 {   // 约 4 秒无进展
+            if failed || waitingTicks >= 8 {
                 recoverIfNeeded(force: failed)
             }
         } else if silentlyPaused {
-            // 典型场景：关闭浏览器后 WKWebView 让音频会话失活，播放器被静默暂停
             pauseTicks += 1
             waitingTicks = 0
-            if pauseTicks >= 4 {               // 约 2 秒
+            if pauseTicks >= 4 {
                 pauseTicks = 0
                 if Date().timeIntervalSince(lastRecoveryTime) > 2, pauseRecoveries < 6 {
                     lastRecoveryTime = Date()
@@ -327,7 +354,7 @@ final class PlaybackStore: ObservableObject {
     }
 
     private func recoverIfNeeded(force: Bool) {
-        guard isActive, !userPaused else { return }
+        guard isActive, expectsPlaying else { return }
         guard recoveryAttempts < 3 else { return }
         let failed = player.currentItem?.status == .failed
         guard force || failed else { return }
@@ -338,7 +365,6 @@ final class PlaybackStore: ObservableObject {
         let position = seconds.isFinite && seconds > 0 ? seconds : lastSaved
         DiagnosticsLog.write("[播放] 自愈第 \(recoveryAttempts) 次，位置=\(Int(position))s 失败=\(failed)")
         loadItem(startAt: position)
-        player.play()
-        isPlaying = true
+        play()
     }
 }

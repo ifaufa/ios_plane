@@ -114,15 +114,15 @@ struct PlayerView: View {
                     if editing {
                         isScrubbing = true
                         scrubTime = currentTime
-                        player.pause()
+                        store.beginScrub()
                         gestures.isPlaying = false
                     } else {
                         player.seek(to: CMTime(seconds: scrubTime, preferredTimescale: 600),
                                     toleranceBefore: .zero,
                                     toleranceAfter: .zero)
                         isScrubbing = false
-                        player.play()
-                        gestures.isPlaying = true
+                        store.endScrub()
+                        gestures.isPlaying = store.isPlaying
                     }
                     gestures.pokeChrome()
                 }
@@ -143,13 +143,8 @@ struct PlayerView: View {
     // MARK: - 播放控制
 
     private func togglePlay() {
-        if player.rate > 0 {
-            player.pause()
-            gestures.isPlaying = false
-        } else {
-            player.play()
-            gestures.isPlaying = true
-        }
+        store.togglePlay()
+        gestures.isPlaying = store.isPlaying
         gestures.pokeChrome()
     }
 
@@ -158,7 +153,7 @@ struct PlayerView: View {
         initialBrightness = ScreenBrightness.current
         OrientationLock.apply(.landscape)
 
-        if player.rate == 0 { player.play() }
+        if store.expectsPlaying, player.rate == 0 { player.play() }
         gestures.isPlaying = player.rate > 0
         gestures.pokeChrome()
 
