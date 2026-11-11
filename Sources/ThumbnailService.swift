@@ -11,7 +11,7 @@ extension Notification.Name {
 
 enum ThumbnailService {
     /// 缓存版本号：改动取帧策略时递增，旧图自动失效
-    private static let cacheVersion = "v4"
+    private static let cacheVersion = "v5"
     private static var didPurge = false
     private static var inFlight: Set<UUID> = []
     private static let inFlightLock = NSLock()
