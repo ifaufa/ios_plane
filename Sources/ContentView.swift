@@ -230,7 +230,15 @@ struct ContentView: View {
                 AddDownloadView()
             }
             .onChange(of: showBrowser) { isShowing in
-                if !isShowing { playback.ensurePlaying() }
+                guard !isShowing else { return }
+                // fullScreenCover dismiss 是异步的，WKWebView 随后还会动一次音频会话，
+                // 因此多次延后重试恢复，覆盖这个时间窗
+                for delay in [0.15, 0.5, 1.2] {
+                    Task {
+                        try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                        playback.ensurePlaying()
+                    }
+                }
             }
             .fullScreenCover(isPresented: $showBrowser) {
                 WebSnifferBrowser()

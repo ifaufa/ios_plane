@@ -3,8 +3,13 @@ import AVFoundation
 import VideoToolbox
 import CoreMedia
 
-/// 视频库预览图：MP4 走 AVAssetImageGenerator；分片（HLS）走自研解复用 + VideoToolbox 解首帧
+/// 视频库预览图：取「总时长 30%」处的一帧
+/// MP4/movpkg 走 AVAssetImageGenerator；分片（HLS）走自研解复用 + VideoToolbox
 enum ThumbnailService {
+    /// 缓存版本号：改动取帧策略时递增，旧图自动失效
+    private static let cacheVersion = "v2"
+    private static let fraction = 0.3
+
     private static var root: URL {
         let dir = VideoLibrary.assetsDir.appendingPathComponent(".thumbs", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -12,7 +17,7 @@ enum ThumbnailService {
     }
 
     static func fileURL(for id: UUID) -> URL {
-        root.appendingPathComponent(id.uuidString + ".jpg")
+        root.appendingPathComponent("\(id.uuidString)-\(cacheVersion).jpg")
     }
 
     static func cached(for id: UUID) -> UIImage? {
@@ -20,11 +25,12 @@ enum ThumbnailService {
         return UIImage(data: data)
     }
 
-    /// 已有则直接返回；否则生成并落盘
     static func ensureThumbnail(for item: VideoItem, localURL: URL) async -> UIImage? {
         if let cached = cached(for: item.id) { return cached }
         let isHLS = localURL.pathExtension.lowercased() == "m3u8"
-        guard let image = await generate(localURL: localURL, isHLS: isHLS) else { return nil }
+        guard let image = await generate(localURL: localURL, isHLS: isHLS, knownDuration: item.duration) else {
+            return nil
+        }
         if let data = image.jpegData(compressionQuality: 0.82) {
             try? data.write(to: fileURL(for: item.id), options: .atomic)
         }
@@ -33,33 +39,80 @@ enum ThumbnailService {
 
     // MARK: - 生成
 
-    private static func generate(localURL: URL, isHLS: Bool) async -> UIImage? {
+    private static func generate(localURL: URL, isHLS: Bool, knownDuration: Double) async -> UIImage? {
         if isHLS {
-            return await firstFrameFromSegments(dir: localURL.deletingLastPathComponent())
+            return await frameAtFractionFromSegments(dir: localURL.deletingLastPathComponent())
         }
-        return await imageFromAsset(localURL)
+        return await imageFromAsset(localURL, knownDuration: knownDuration)
     }
 
-    private static func imageFromAsset(_ url: URL) async -> UIImage? {
+    private static func imageFromAsset(_ url: URL, knownDuration: Double) async -> UIImage? {
         let asset = AVURLAsset(url: url)
+        var duration = knownDuration
+        if duration <= 0, let loaded = try? await asset.load(.duration) {
+            duration = loaded.seconds
+        }
+        let target = duration > 0 ? min(max(duration * fraction, 1), max(duration - 1, 1)) : 3
+
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
         generator.maximumSize = CGSize(width: 640, height: 360)
-        generator.requestedTimeToleranceBefore = CMTime(seconds: 2, preferredTimescale: 600)
-        generator.requestedTimeToleranceAfter = CMTime(seconds: 2, preferredTimescale: 600)
-        for seconds in [3.0, 1.0, 0.0] {
-            if let result = try? await generator.image(at: CMTime(seconds: seconds, preferredTimescale: 600)) {
+        generator.requestedTimeToleranceBefore = CMTime(seconds: 3, preferredTimescale: 600)
+        generator.requestedTimeToleranceAfter = CMTime(seconds: 3, preferredTimescale: 600)
+
+        if let result = try? await generator.image(at: CMTime(seconds: target, preferredTimescale: 600)) {
+            return UIImage(cgImage: result.image)
+        }
+        for fallback in [1.0, 0.0] {
+            if let result = try? await generator.image(at: CMTime(seconds: fallback, preferredTimescale: 600)) {
                 return UIImage(cgImage: result.image)
             }
         }
         return nil
     }
 
-    /// 从第一个 TS 分片解出关键帧并解码成图片
-    private static func firstFrameFromSegments(dir: URL) async -> UIImage? {
-        let candidateNames = [LocalHLS.fileName(index: 0), "seg-000000.ts"]
-        guard let file = candidateNames.map({ dir.appendingPathComponent($0) })
-            .first(where: { FileManager.default.fileExists(atPath: $0.path) }),
+    // MARK: - 分片（HLS）
+
+    private static func frameAtFractionFromSegments(dir: URL) async -> UIImage? {
+        let playlistURL = dir.appendingPathComponent("index.m3u8")
+        let durations = parseDurations(playlistURL)
+        let total = durations.reduce(0, +)
+
+        var targetIndex = 0
+        if total > 0, !durations.isEmpty {
+            let target = total * fraction
+            var accumulated: Double = 0
+            for (index, duration) in durations.enumerated() {
+                if accumulated + duration > target { targetIndex = index; break }
+                accumulated += duration
+                targetIndex = index
+            }
+        }
+
+        // 优先取目标分片，失败则回退到第 1 个分片
+        for index in [targetIndex, 0] {
+            if let image = firstKeyframeImage(dir: dir, index: index) { return image }
+        }
+        return nil
+    }
+
+    private static func parseDurations(_ playlistURL: URL) -> [Double] {
+        guard let text = try? String(contentsOf: playlistURL, encoding: .utf8) else { return [] }
+        var durations: [Double] = []
+        for line in text.split(separator: "\n") {
+            if line.hasPrefix("#EXTINF:") {
+                let value = line.dropFirst("#EXTINF:".count).split(separator: ",").first ?? ""
+                if let duration = Double(value.trimmingCharacters(in: .whitespaces)) {
+                    durations.append(duration)
+                }
+            }
+        }
+        return durations
+    }
+
+    private static func firstKeyframeImage(dir: URL, index: Int) -> UIImage? {
+        let file = dir.appendingPathComponent(LocalHLS.fileName(index: index))
+        guard FileManager.default.fileExists(atPath: file.path),
               let handle = try? FileHandle(forReadingFrom: file) else { return nil }
         defer { try? handle.close() }
 

@@ -532,6 +532,7 @@ struct WebSnifferBrowser: View {
                 MiniPlayerWindow(store: playback)
             }
             }
+            .onDisappear { playback.ensurePlaying() }
             .navigationTitle("找视频")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

@@ -25,6 +25,8 @@ final class PlaybackStore: ObservableObject {
     private var isHLS = false
     private var userPaused = false
     private var waitingTicks = 0
+    private var pauseTicks = 0
+    private var pauseRecoveries = 0
     private var recoveryAttempts = 0
     private var interruptionObserver: NSObjectProtocol?
 
@@ -189,22 +191,42 @@ final class PlaybackStore: ObservableObject {
         }
     }
 
-    /// 卡顿/失败检测：本地服务被抢占或网络中断时自动重建播放项
+    /// 卡顿/失败/意外暂停检测：本地服务被抢占、网络中断、浏览器抢音频会话时自愈
     private func checkHealth() {
         guard isActive, !userPaused else {
             waitingTicks = 0
+            pauseTicks = 0
             return
         }
         let failed = player.currentItem?.status == .failed
         let waiting = player.timeControlStatus == .waitingToPlayAtSpecifiedRate
+        let silentlyPaused = player.rate == 0
+            && player.timeControlStatus == .paused
+            && player.currentItem?.status == .readyToPlay
+
         if failed || waiting {
             waitingTicks += 1
+            pauseTicks = 0
             if failed || waitingTicks >= 8 {   // 约 4 秒无进展
                 recoverIfNeeded(force: failed)
             }
+        } else if silentlyPaused {
+            // 典型场景：关闭浏览器后 WKWebView 让音频会话失活，播放器被静默暂停
+            pauseTicks += 1
+            waitingTicks = 0
+            if pauseTicks >= 4 {               // 约 2 秒
+                pauseTicks = 0
+                pauseRecoveries += 1
+                DiagnosticsLog.write("[播放] 检测到意外暂停，自动恢复（第 \(pauseRecoveries) 次）")
+                ensurePlaying()
+            }
         } else {
             waitingTicks = 0
-            if player.rate > 0 { recoveryAttempts = 0 }
+            pauseTicks = 0
+            if player.rate > 0 {
+                recoveryAttempts = 0
+                pauseRecoveries = 0
+            }
         }
     }
 
