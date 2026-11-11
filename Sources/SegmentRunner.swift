@@ -368,7 +368,8 @@ final class SegmentRunner: NSObject, ObservableObject {
         // 断点插入内容识别（S1 默认；S2 可选剔除换密钥的区间）
         if let discontinuities = job.discontinuities, !discontinuities.isEmpty {
             let dropKeyChanged = UserDefaults.standard.bool(forKey: AdFilter.dropKeyChangedKey)
-            let result = AdFilter.analyze(state: job, dir: dir, dropKeyChanged: dropKeyChanged)
+            let useFingerprint = UserDefaults.standard.bool(forKey: AdFilter.fingerprintKey)
+            let result = AdFilter.analyze(state: job, dir: dir, dropKeyChanged: dropKeyChanged, useFingerprint: useFingerprint)
             job.excluded = result.excluded.isEmpty ? nil : result.excluded
             jobs[jobId] = job
             persist(jobId)

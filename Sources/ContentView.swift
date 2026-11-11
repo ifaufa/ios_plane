@@ -548,6 +548,7 @@ struct EngineSettingsView: View {
             return value <= 0 ? 5 : min(5, max(1, value))
         }()
     @State private var dropKeyChanged = UserDefaults.standard.bool(forKey: AdFilter.dropKeyChangedKey)
+    @State private var adFingerprint = UserDefaults.standard.bool(forKey: AdFilter.fingerprintKey)
 
     var body: some View {
         NavigationStack {
@@ -558,10 +559,11 @@ struct EngineSettingsView: View {
                 if segmentEnabled {
                     Section {
                         Toggle("断点处换密钥的分片也剔除（S2）", isOn: $dropKeyChanged)
+                        Toggle("判定模式升级为编码参数指纹（S1）", isOn: $adFingerprint)
                     } header: {
                         Text("广告段处理")
                     } footer: {
-                        Text("默认只剔除编码参数与主段不一致的插入片段（如分辨率变化）；开启后会一并剔除断点处更换密钥的片段。剔除结果会在下载完成时提示。")
+                        Text("默认按分辨率判定插入片段；开启「指纹」后改为比对 SPS/PPS 编码参数，可识别分辨率相同但编码器不同的广告段；S2 会一并剔除断点处更换密钥的片段。剔除结果会在下载完成时提示。")
                     }
                     Section {
                         Picker("同时下载任务数", selection: $maxTasks) {
@@ -607,6 +609,7 @@ struct EngineSettingsView: View {
                         UserDefaults.standard.set(globalLimit, forKey: SegmentRunner.globalKey)
                         UserDefaults.standard.set(maxTasks, forKey: DownloadManager.maxConcurrentKey)
                         UserDefaults.standard.set(dropKeyChanged, forKey: AdFilter.dropKeyChangedKey)
+                        UserDefaults.standard.set(adFingerprint, forKey: AdFilter.fingerprintKey)
                         dismiss()
                     }
                 }
