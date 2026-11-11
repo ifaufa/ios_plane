@@ -61,24 +61,40 @@ enum PlayerFrameGrabber {
             return nil
         }
 
-        // 4) 让播放器解码出一帧
-        player.play()
+        // 4) 让播放器解码出帧，并用缓冲真实显示时间校验（避免拿到 t≈0 的旧帧）
         let itemTime = CMTime(seconds: target, preferredTimescale: 600)
-        let gotFrame = await waitUntil(timeout: 2.0) {
-            output.hasNewPixelBuffer(forItemTime: itemTime)
+        var buffer: CVPixelBuffer?
+        var actualSeconds: Double = -1
+
+        let deadline = Date().addingTimeInterval(3.0)
+        player.play()
+        while Date() < deadline {
+            if output.hasNewPixelBuffer(forItemTime: itemTime) {
+                var actual = CMTime.invalid
+                if let candidate = output.copyPixelBuffer(forItemTime: itemTime, itemTimeForDisplay: &actual) {
+                    let secondsActual = actual.seconds
+                    if secondsActual.isFinite, abs(secondsActual - target) <= tolerance {
+                        buffer = candidate
+                        actualSeconds = secondsActual
+                        break
+                    }
+                    if secondsActual.isFinite { actualSeconds = secondsActual }
+                }
+            }
+            try? await Task.sleep(nanoseconds: 100_000_000)
         }
         player.pause()
 
-        guard gotFrame,
-              let buffer = output.copyPixelBuffer(forItemTime: itemTime, itemTimeForDisplay: nil) else {
-            DiagnosticsLog.write("[抓帧] 未取得像素 \(url.lastPathComponent) 目标=\(Int(target))s")
+        guard let buffer else {
+            DiagnosticsLog.write("[抓帧] 缓冲过旧 \(url.lastPathComponent) 目标=\(Int(target))s 实际=\(Int(actualSeconds))s")
             return nil
         }
+        _ = actualSeconds
 
         let ciImage = CIImage(cvPixelBuffer: buffer)
         let context = CIContext(options: nil)
         guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else { return nil }
-        DiagnosticsLog.write("[抓帧] 成功 \(url.lastPathComponent) 目标=\(Int(target))s")
+        DiagnosticsLog.write("[抓帧] 成功 \(url.lastPathComponent) 目标=\(Int(target))s 实得=\(Int(actualSeconds))s")
         return UIImage(cgImage: cgImage)
     }
 

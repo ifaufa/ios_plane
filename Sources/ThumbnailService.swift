@@ -11,7 +11,7 @@ extension Notification.Name {
 
 enum ThumbnailService {
     /// 缓存版本号：改动取帧策略时递增，旧图自动失效
-    private static let cacheVersion = "v5"
+    private static let cacheVersion = "v6"
     private static var didPurge = false
     private static var inFlight: Set<UUID> = []
     private static let inFlightLock = NSLock()
@@ -132,6 +132,12 @@ enum ThumbnailService {
 
         if let image = await PlayerFrameGrabber.image(url: localURL, at: target) {
             DiagnosticsLog.write("[缩略图] 播放链路抓帧成功 \(localURL.lastPathComponent) 目标=\(Int(target))s 时长=\(Int(duration))s")
+            return image
+        }
+
+        // 回退 2：AVAssetReader 确定性解码（与播放器状态无关）
+        if let image = await AssetReaderFrameGrabber.image(url: localURL, at: target) {
+            DiagnosticsLog.write("[缩略图] 解码器抓帧成功 \(localURL.lastPathComponent) 目标=\(Int(target))s")
             return image
         }
 
