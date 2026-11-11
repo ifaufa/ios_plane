@@ -83,11 +83,11 @@ enum ThumbnailService {
 
 /// 单帧 H.264 解码（AVCC 样本 + SPS/PPS）
 enum FirstFrameDecoder {
-    private final class Sink {
+    fileprivate final class Sink {
         var image: CGImage?
     }
 
-    fileprivate static var sink: Sink?
+    private static var sink: Sink?
 
     private static let callback: VTDecompressionOutputCallback = { _, _, status, _, imageBuffer, _, _ in
         guard status == noErr, let imageBuffer, let sink else { return }
