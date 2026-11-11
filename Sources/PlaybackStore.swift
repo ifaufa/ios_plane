@@ -28,6 +28,8 @@ final class PlaybackStore: ObservableObject {
     private var pauseTicks = 0
     private var pauseRecoveries = 0
     private var lastRecoveryTime = Date.distantPast
+    private var healthTimer: Timer?
+    private var tickCount = 0
     private var loadStartedAt: Date?
     private var loadReported = false
     @Published var errorNotice: String?
@@ -87,6 +89,9 @@ final class PlaybackStore: ObservableObject {
         player.play()
         isPlaying = true
         attachObserver()
+        startHealthTimer()
+        Task { await reportAssetInfo() }
+        DiagnosticsLog.write("[播放] 打开 \(video.title) 源=\(url.lastPathComponent)")
     }
 
     /// 重建播放项（首次打开或自愈时使用）
@@ -117,6 +122,7 @@ final class PlaybackStore: ObservableObject {
     }
 
     func close(notify: Bool = true) {
+        stopHealthTimer()
         detachObserver()
         let seconds = player.currentTime().seconds
         if seconds.isFinite, let id = videoID, abs(seconds - lastSaved) >= 1 {
@@ -215,8 +221,21 @@ final class PlaybackStore: ObservableObject {
                 if let id = self.videoID { self.onProgress?(id, seconds) }
             }
             self.isPlaying = self.player.rate > 0
-            self.checkHealth()
         }
+    }
+
+    /// 独立 0.5s 监督：不依赖播放时间轴推进（加载卡死时 periodic observer 不会回调）
+    private func startHealthTimer() {
+        stopHealthTimer()
+        tickCount = 0
+        healthTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.checkHealth() }
+        }
+    }
+
+    private func stopHealthTimer() {
+        healthTimer?.invalidate()
+        healthTimer = nil
     }
 
     private func detachObserver() {
@@ -232,6 +251,12 @@ final class PlaybackStore: ObservableObject {
             waitingTicks = 0
             pauseTicks = 0
             return
+        }
+        tickCount += 1
+        let statusValue = player.currentItem?.status.rawValue ?? -1
+        let abnormal = player.currentItem?.status == .failed || player.rate == 0
+        if abnormal || tickCount % 20 == 0 {
+            DiagnosticsLog.write("[播放] 监督 status=\(statusValue) rate=\(String(format: "%.1f", player.rate)) ctl=\(player.timeControlStatus.rawValue) tick=\(tickCount)")
         }
         // 加载超时：item 长时间停留在 .unknown，界面会一直黑屏且无任何日志
         if let item = player.currentItem, item.status == .unknown,

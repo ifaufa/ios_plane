@@ -5,6 +5,10 @@ import CoreMedia
 
 /// 视频库预览图：取「总时长 30%」处的一帧
 /// MP4/movpkg 走 AVAssetImageGenerator；分片（HLS）走自研解复用 + VideoToolbox
+extension Notification.Name {
+    static let thumbnailReady = Notification.Name("thumbnail.ready")
+}
+
 enum ThumbnailService {
     /// 缓存版本号：改动取帧策略时递增，旧图自动失效
     private static let cacheVersion = "v3"
@@ -24,6 +28,7 @@ enum ThumbnailService {
     /// 启动后后台串行补齐所有缺失缩略图（含 movpkg），保证日志完整可诊断
     static func pregenerate(items: [VideoItem], urlFor: @escaping (VideoItem) -> URL) async {
         purgeOldCachesIfNeeded()
+        removeOrphans(validIDs: Set(items.map { $0.id }))
         var generated = 0
         for item in items {
             if cached(for: item.id) != nil { continue }
@@ -32,6 +37,22 @@ enum ThumbnailService {
             if await ensureThumbnail(for: item, localURL: url) != nil { generated += 1 }
         }
         if generated > 0 { DiagnosticsLog.write("[缩略图] 后台预生成完成 \(generated) 个") }
+    }
+
+    /// 删除库里已不存在的条目对应缩略图
+    private static func removeOrphans(validIDs: Set<UUID>) {
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else { return }
+        var removed = 0
+        for url in entries where url.lastPathComponent.hasSuffix("-\(cacheVersion).jpg") {
+            let name = url.lastPathComponent
+            let idPart = name.replacingOccurrences(of: "-\(cacheVersion).jpg", with: "")
+            if let id = UUID(uuidString: idPart), !validIDs.contains(id) {
+                try? fm.removeItem(at: url)
+                removed += 1
+            }
+        }
+        if removed > 0 { DiagnosticsLog.write("[缩略图] 清理孤儿缩略图 \(removed) 个") }
     }
 
     static func cached(for id: UUID) -> UIImage? {
@@ -48,6 +69,7 @@ enum ThumbnailService {
         }
         if let data = image.jpegData(compressionQuality: 0.82) {
             try? data.write(to: fileURL(for: item.id), options: .atomic)
+            NotificationCenter.default.post(name: .thumbnailReady, object: item.id)
         }
         return image
     }
@@ -126,6 +148,7 @@ enum ThumbnailService {
 
         do {
             let result = try await generator.image(at: CMTime(seconds: target, preferredTimescale: 600))
+            DiagnosticsLog.write("[缩略图] 生成成功 \(url.lastPathComponent) 目标=\(Int(target))s")
             return UIImage(cgImage: result.image)
         } catch {
             let tracks = (try? await asset.load(.tracks)) ?? []
@@ -165,8 +188,12 @@ enum ThumbnailService {
         DiagnosticsLog.write("[缩略图] 分片目录 \(dir.lastPathComponent) 段数=\(durations.count) 总时长=\(Int(total))s 目标分片=#\(targetIndex)")
         // 优先取目标分片，失败则回退到第 1 个分片
         for index in [targetIndex, 0] {
-            if let image = firstKeyframeImage(dir: dir, index: index) { return image }
+            if let image = firstKeyframeImage(dir: dir, index: index) {
+                DiagnosticsLog.write("[缩略图] 分片生成成功 段#\(index) 目录=\(dir.lastPathComponent)")
+                return image
+            }
         }
+        DiagnosticsLog.write("[缩略图] 分片生成失败 目录=\(dir.lastPathComponent)")
         return nil
     }
 

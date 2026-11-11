@@ -477,6 +477,12 @@ private struct LibraryRow: View {
             guard thumbnail == nil, !isMissing else { return }
             thumbnail = await ThumbnailService.ensureThumbnail(for: item, localURL: localURL)
         }
+        .onReceive(NotificationCenter.default.publisher(for: .thumbnailReady)) { note in
+            guard let readyID = note.object as? UUID, readyID == item.id else { return }
+            if let cached = ThumbnailService.cached(for: item.id) {
+                thumbnail = cached
+            }
+        }
     }
 
     private var thumbnailView: some View {
