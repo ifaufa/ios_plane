@@ -54,6 +54,37 @@ enum LocalHLS {
     // MARK: - 播放
 
     /// 启动本地服务并返回 http://127.0.0.1:port/index.m3u8
+    /// 独立播放会话：持有自己的本地服务实例，互不影响
+    final class Session {
+        let url: URL
+        private let server: LocalHTTPServer
+        private var stopped = false
+
+        init(url: URL, server: LocalHTTPServer) {
+            self.url = url
+            self.server = server
+        }
+
+        func stop() {
+            guard !stopped else { return }
+            stopped = true
+            server.stop()
+        }
+    }
+
+    /// 为某个分片目录开启独立服务（不影响其它正在播放/校验的会话）
+    static func open(playlistURL: URL) throws -> Session {
+        let dir = playlistURL.deletingLastPathComponent()
+        let server = LocalHTTPServer()
+        let port = try server.start(root: dir)
+        guard let url = URL(string: "http://127.0.0.1:\(port)/index.m3u8") else {
+            server.stop()
+            throw PlaylistError.network("本地播放地址构造失败")
+        }
+        return Session(url: url, server: server)
+    }
+
+    /// 兼容旧调用（使用共享实例，仅建议在没有并发播放/校验时使用）
     static func playbackURL(playlistURL: URL) throws -> URL {
         let dir = playlistURL.deletingLastPathComponent()
         let port = try LocalHTTPServer.shared.start(root: dir)

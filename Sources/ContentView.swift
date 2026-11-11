@@ -65,7 +65,7 @@ struct ContentView: View {
                                 Image(systemName: selected.contains(item.id) ? "checkmark.circle.fill" : "circle")
                                     .foregroundStyle(selected.contains(item.id) ? Color.accentColor : .secondary)
                             }
-                            LibraryRow(item: item, isMissing: library.isMissing(item))
+                            LibraryRow(item: item, isMissing: library.isMissing(item), localURL: library.localURL(for: item))
                         }
                         .contentShape(Rectangle())
                         .onTapGesture {
@@ -229,6 +229,9 @@ struct ContentView: View {
             .sheet(isPresented: $showAdd) {
                 AddDownloadView()
             }
+            .onChange(of: showBrowser) { isShowing in
+                if !isShowing { playback.ensurePlaying() }
+            }
             .fullScreenCover(isPresented: $showBrowser) {
                 WebSnifferBrowser()
             }
@@ -352,7 +355,7 @@ struct DownloadRow: View {
 
             switch task.status {
             case .queued:
-                Text("排队等待中（已有 5 个任务在下载）")
+                Text("排队等待中（已有 \(downloads.maxConcurrent) 个任务在下载）")
                     .font(.caption).foregroundStyle(.secondary)
             case .downloading:
                 ProgressView(value: task.progress)
@@ -407,9 +410,14 @@ struct DownloadRow: View {
 private struct LibraryRow: View {
     let item: VideoItem
     let isMissing: Bool
+    let localURL: URL
+
+    @State private var thumbnail: UIImage?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        HStack(alignment: .top, spacing: 10) {
+            thumbnailView
+            VStack(alignment: .leading, spacing: 4) {
             Text(item.title)
                 .font(.headline)
                 .lineLimit(1)
@@ -435,8 +443,32 @@ private struct LibraryRow: View {
                 Text("文件已丢失（重装 App 会清空本地数据），需重新下载")
                     .font(.caption).foregroundStyle(.red)
             }
+            }
         }
         .padding(.vertical, 4)
+        .task {
+            guard thumbnail == nil, !isMissing else { return }
+            thumbnail = await ThumbnailService.ensureThumbnail(for: item, localURL: localURL)
+        }
+    }
+
+    private var thumbnailView: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.secondary.opacity(0.18))
+            if let thumbnail {
+                Image(uiImage: thumbnail)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+            } else {
+                Image(systemName: "film")
+                    .font(.system(size: 16))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(width: 84, height: 48)
+        .clipped()
     }
 
     static func kindLabel(for item: VideoItem) -> String {

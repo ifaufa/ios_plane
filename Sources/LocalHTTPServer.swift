@@ -10,7 +10,8 @@ final class LocalHTTPServer {
     private(set) var port: UInt16?
     private let queue = DispatchQueue(label: "local.http.server")
 
-    private init() {}
+    /// 允许多实例：每个 root 独立端口，互不干扰（播放 / 校验 / 转换各用各的）
+    init() {}
 
     /// 启动或复用服务；root 变化会重启
     @discardableResult

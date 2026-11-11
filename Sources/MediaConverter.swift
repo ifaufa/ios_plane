@@ -110,8 +110,9 @@ enum MediaConverter {
         if !produced {
             do {
                 let playlist = dir.appendingPathComponent("index.m3u8")
-                let httpURL = try LocalHLS.playbackURL(playlistURL: playlist)
-                defer { LocalHLS.stopPlayback() }
+                let session = try LocalHLS.open(playlistURL: playlist)
+                defer { session.stop() }
+                let httpURL = session.url
                 try await TSRemuxer.remux(source: httpURL, destination: outputURL)
                 produced = true
                 DiagnosticsLog.write("[转MP4] AVFoundation 转封装成功")
