@@ -7,6 +7,7 @@ struct ContentView: View {
     @StateObject private var backup = BackupManager()
     @ObservedObject private var segmentRunner = SegmentRunner.shared
     @ObservedObject private var playback = PlaybackStore.shared
+    @AppStorage(LibrarySortMode.storageKey) private var sortModeRaw = LibrarySortMode.timeDesc.rawValue
     @State private var toastText: String?
     @State private var pendingToast: String?
     @State private var showAdd = false
@@ -59,7 +60,7 @@ struct ContentView: View {
                     }
                 }
                 Section("视频库 (\(library.items.count))") {
-                    ForEach(library.items) { item in
+                    ForEach(sortedItems) { item in
                         HStack(spacing: 12) {
                             if selectionMode {
                                 Image(systemName: selected.contains(item.id) ? "checkmark.circle.fill" : "circle")
@@ -134,6 +135,24 @@ struct ContentView: View {
                             .disabled(selected.isEmpty)
                         }
                     }
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Menu {
+                        ForEach(LibrarySortMode.allCases) { mode in
+                            Button {
+                                sortModeRaw = mode.rawValue
+                            } label: {
+                                if sortModeRaw == mode.rawValue {
+                                    Label(mode.title, systemImage: "checkmark")
+                                } else {
+                                    Text(mode.title)
+                                }
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "arrow.up.arrow.down")
+                    }
+                    .disabled(library.items.isEmpty)
                 }
                 ToolbarItem(placement: .primaryAction) {
                     Menu {
@@ -333,6 +352,11 @@ struct ContentView: View {
                 if toastText == text { toastText = nil }
             }
         }
+    }
+
+    private var sortedItems: [VideoItem] {
+        let mode = LibrarySortMode(rawValue: sortModeRaw) ?? .timeDesc
+        return library.items.sorted(by: mode)
     }
 
     private func openPlayer(_ item: VideoItem) {
