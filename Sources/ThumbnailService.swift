@@ -141,6 +141,14 @@ enum ThumbnailService {
             return image
         }
 
+        // 回退 3：旧产物缺少 stss 表、无法 seek，只能从开头解码（取 1s 附近）
+        for fallback in [1.0, 0.5] {
+            if let image = await AssetReaderFrameGrabber.image(url: localURL, at: fallback) {
+                DiagnosticsLog.write("[缩略图] 旧文件回退取帧 \(localURL.lastPathComponent) 位置=\(fallback)s")
+                return image
+            }
+        }
+
         // 回退：AVAssetImageGenerator（可能仍失败）
         var isDirectory: ObjCBool = false
         if FileManager.default.fileExists(atPath: localURL.path, isDirectory: &isDirectory), isDirectory.boolValue {

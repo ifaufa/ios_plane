@@ -278,7 +278,8 @@ enum AVRemuxPipeline {
                                                         pts: item.pts,
                                                         dts: item.dts,
                                                         duration: frameStep,
-                                                        timescale: 90000) else {
+                                                        timescale: 90000,
+                                                        isKey: item.isKey) else {
                         setFailure("创建视频样本失败")
                         if !videoPumpFinished { videoPumpFinished = true; doneGroup.leave() }
                         vInput.markAsFinished()
@@ -454,7 +455,8 @@ enum AVRemuxPipeline {
                                          pts: Int64,
                                          dts: Int64,
                                          duration: Int64,
-                                         timescale: Int32) -> CMSampleBuffer? {
+                                         timescale: Int32,
+                                         isKey: Bool = true) -> CMSampleBuffer? {
         guard !data.isEmpty else { return nil }
         var blockBuffer: CMBlockBuffer?
         guard CMBlockBufferCreateWithMemoryBlock(allocator: kCFAllocatorDefault,
@@ -494,6 +496,16 @@ enum AVRemuxPipeline {
                                           sampleSizeEntryCount: 1,
                                           sampleSizeArray: &sampleSize,
                                           sampleBufferOut: &sampleBuffer)
-        return status == noErr ? sampleBuffer : nil
+        guard status == noErr, let sampleBuffer else { return nil }
+
+        // 关键：非关键帧必须标记 NotSync，否则 AVAssetWriter 会认为所有样本都是同步样本，
+        // 结果是不写 stss 表 → 之后任何 seek / 按时间抓帧都会失败
+        if !isKey {
+            CMSetAttachment(sampleBuffer,
+                            key: kCMSampleAttachmentKey_NotSync,
+                            value: kCFBooleanTrue,
+                            attachmentMode: kCMAttachmentMode_ShouldPropagate)
+        }
+        return sampleBuffer
     }
 }
