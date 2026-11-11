@@ -13,6 +13,8 @@ enum ThumbnailService {
     /// 缓存版本号：改动取帧策略时递增，旧图自动失效
     private static let cacheVersion = "v4"
     private static var didPurge = false
+    private static var inFlight: Set<UUID> = []
+    private static let inFlightLock = NSLock()
     private static let fraction = 0.3
 
     private static var root: URL {
@@ -74,6 +76,20 @@ enum ThumbnailService {
     static func ensureThumbnail(for item: VideoItem, localURL: URL) async -> UIImage? {
         purgeOldCachesIfNeeded()
         if let cached = cached(for: item.id) { return cached }
+
+        inFlightLock.lock()
+        if inFlight.contains(item.id) {
+            inFlightLock.unlock()
+            return nil
+        }
+        inFlight.insert(item.id)
+        inFlightLock.unlock()
+        defer {
+            inFlightLock.lock()
+            inFlight.remove(item.id)
+            inFlightLock.unlock()
+        }
+
         let isHLS = localURL.pathExtension.lowercased() == "m3u8"
         guard let image = await generate(localURL: localURL, isHLS: isHLS, knownDuration: item.duration) else {
             return nil
@@ -105,11 +121,26 @@ enum ThumbnailService {
         if isHLS {
             return await frameAtFractionFromSegments(dir: localURL.deletingLastPathComponent())
         }
+
+        // 非分片：先算目标时间，再用播放链路抓帧（imageGenerator 对这批文件会 Cannot Decode）
+        var duration = knownDuration
+        if duration <= 0 {
+            let asset = AVURLAsset(url: localURL)
+            duration = (try? await asset.load(.duration))?.seconds ?? 0
+        }
+        let target = duration > 0 ? min(max(duration * fraction, 1), max(duration - 1, 1)) : 3
+
+        if let image = await PlayerFrameGrabber.image(url: localURL, at: target) {
+            DiagnosticsLog.write("[缩略图] 播放链路抓帧成功 \(localURL.lastPathComponent) 目标=\(Int(target))s 时长=\(Int(duration))s")
+            return image
+        }
+
+        // 回退：AVAssetImageGenerator（可能仍失败）
         var isDirectory: ObjCBool = false
         if FileManager.default.fileExists(atPath: localURL.path, isDirectory: &isDirectory), isDirectory.boolValue {
             return await imageFromBundle(localURL)
         }
-        return await imageFromAsset(localURL, knownDuration: knownDuration)
+        return await imageFromAsset(localURL, knownDuration: duration)
     }
 
     /// movpkg 等目录型资产：先直接对包取帧，失败再找内部最大的媒体文件
