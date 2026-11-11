@@ -73,6 +73,8 @@ struct ContentView: View {
                                 toggleSelection(item)
                             } else if !library.isMissing(item) {
                                 openPlayer(item)
+                            } else {
+                                showToast("文件已丢失（重装 App 会清空本地数据），需重新下载")
                             }
                         }
                         .swipeActions {
@@ -230,7 +232,10 @@ struct ContentView: View {
                 AddDownloadView()
             }
             .onChange(of: showBrowser) { isShowing in
-                guard !isShowing else { return }
+                if isShowing {
+                    playback.prepareForExternalAudio()
+                    return
+                }
                 // fullScreenCover dismiss 是异步的，WKWebView 随后还会动一次音频会话，
                 // 因此多次延后重试恢复，覆盖这个时间窗
                 for delay in [0.15, 0.5, 1.2] {

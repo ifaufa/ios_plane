@@ -43,7 +43,30 @@ enum ThumbnailService {
         if isHLS {
             return await frameAtFractionFromSegments(dir: localURL.deletingLastPathComponent())
         }
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: localURL.path, isDirectory: &isDirectory), isDirectory.boolValue {
+            return await imageFromBundle(localURL)
+        }
         return await imageFromAsset(localURL, knownDuration: knownDuration)
+    }
+
+    /// movpkg 等目录型资产：对其内部体积最大的媒体分片直接取帧
+    private static func imageFromBundle(_ dir: URL) async -> UIImage? {
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(at: dir, includingPropertiesForKeys: [.fileSizeKey]) else { return nil }
+        let mediaExtensions: Set<String> = ["mp4", "fmp4", "m4s", "m4v", "ts", "mov"]
+        var best: (url: URL, size: Int)?
+        for case let url as URL in enumerator {
+            guard mediaExtensions.contains(url.pathExtension.lowercased()) else { continue }
+            let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            if size > (best?.size ?? 0) { best = (url, size) }
+        }
+        guard let candidate = best?.url else {
+            DiagnosticsLog.write("[缩略图] 目录内未找到媒体分片 \(dir.lastPathComponent)")
+            return nil
+        }
+        DiagnosticsLog.write("[缩略图] 使用分片 \(candidate.lastPathComponent) \((best?.size ?? 0) / 1024)KB")
+        return await imageFromAsset(candidate, knownDuration: 0)
     }
 
     private static func imageFromAsset(_ url: URL, knownDuration: Double) async -> UIImage? {
@@ -60,8 +83,11 @@ enum ThumbnailService {
         generator.requestedTimeToleranceBefore = CMTime(seconds: 3, preferredTimescale: 600)
         generator.requestedTimeToleranceAfter = CMTime(seconds: 3, preferredTimescale: 600)
 
-        if let result = try? await generator.image(at: CMTime(seconds: target, preferredTimescale: 600)) {
+        do {
+            let result = try await generator.image(at: CMTime(seconds: target, preferredTimescale: 600))
             return UIImage(cgImage: result.image)
+        } catch {
+            DiagnosticsLog.write("[缩略图] 取帧失败 \(url.lastPathComponent) 目标=\(Int(target))s 时长=\(Int(duration))s 错误=\(error.localizedDescription)")
         }
         for fallback in [1.0, 0.0] {
             if let result = try? await generator.image(at: CMTime(seconds: fallback, preferredTimescale: 600)) {
@@ -135,17 +161,18 @@ enum ThumbnailService {
 }
 
 /// 单帧 H.264 解码（AVCC 样本 + SPS/PPS）
+/// 并发安全：解码结果通过 sourceFrameRefCon 绑定到每次调用独立的上下文，
+/// 不使用全局变量（否则并发生成缩略图会串图）
 enum FirstFrameDecoder {
     fileprivate final class Sink {
         var image: CGImage?
     }
 
-    private static var sink: Sink?
-
-    private static let callback: VTDecompressionOutputCallback = { _, _, status, _, imageBuffer, _, _ in
-        guard status == noErr, let imageBuffer, let sink else { return }
+    private static let callback: VTDecompressionOutputCallback = { _, sourceRefCon, status, _, imageBuffer, _, _ in
+        guard status == noErr, let imageBuffer, let sourceRefCon else { return }
         var cgImage: CGImage?
         VTCreateCGImageFromCVPixelBuffer(imageBuffer, options: nil, imageOut: &cgImage)
+        let sink = Unmanaged<Sink>.fromOpaque(sourceRefCon).takeUnretainedValue()
         sink.image = cgImage
     }
 
@@ -173,9 +200,8 @@ enum FirstFrameDecoder {
         }
         guard status == noErr, let format else { return nil }
 
-        let newSink = Sink()
-        sink = newSink
-        defer { sink = nil }
+        let result = Sink()
+        let resultPointer = Unmanaged.passUnretained(result).toOpaque()
 
         var record = VTDecompressionOutputCallbackRecord(
             decompressionOutputCallback: callback,
@@ -196,10 +222,10 @@ enum FirstFrameDecoder {
         guard VTDecompressionSessionDecodeFrame(session,
                                                 sampleBuffer: sample,
                                                 flags: [VTDecodeFrameFlags._EnableAsynchronousDecompression],
-                                                frameRefcon: nil,
+                                                frameRefcon: resultPointer,
                                                 infoFlagsOut: nil) == noErr else { return nil }
         VTDecompressionSessionWaitForAsynchronousFrames(session)
-        return newSink.image.map { UIImage(cgImage: $0) }
+        return result.image.map { UIImage(cgImage: $0) }
     }
 
     private static func makeSampleBuffer(avcc: Data, format: CMFormatDescription) -> CMSampleBuffer? {

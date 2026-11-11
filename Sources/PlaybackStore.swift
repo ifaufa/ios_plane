@@ -53,7 +53,17 @@ final class PlaybackStore: ObservableObject {
 
     func open(video: VideoItem, url: URL) {
         if videoID == video.id {
-            ensurePlaying()
+            let needsReload = player.currentItem == nil || player.currentItem?.status == .failed
+            if needsReload {
+                DiagnosticsLog.write("[播放] 同一条目重新加载（状态=\(player.currentItem?.status.rawValue ?? -1)）")
+                recoveryAttempts = 0
+                configureAudioSession()
+                loadItem(startAt: player.currentTime().seconds)
+                player.play()
+                isPlaying = true
+            } else {
+                ensurePlaying()
+            }
             return
         }
         close(notify: false)
@@ -147,17 +157,43 @@ final class PlaybackStore: ObservableObject {
         onProgress?(id, seconds)
     }
 
+    /// 让出音频会话（打开浏览器/外部媒体前调用），避免被系统判为占用
+    func prepareForExternalAudio() {
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+    }
+
     /// 确保音频会话可用并继续播放（浏览器关闭、来电结束后调用）
     func ensurePlaying() {
-        configureAudioSession()
         guard isActive, !userPaused else { return }
+
+        var sessionError = "ok"
+        do {
+            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback,
+                                                            options: [.allowAirPlay, .allowBluetoothA2DP])
+            try AVAudioSession.sharedInstance().setActive(true)
+        } catch {
+            sessionError = error.localizedDescription
+        }
+
         if player.currentItem?.status == .failed {
+            DiagnosticsLog.write("[播放] 会话=\(sessionError) item 已失败，强制重建")
+            recoveryAttempts = 0
             recoverIfNeeded(force: true)
             return
         }
-        if player.rate == 0 {
+
+        if player.rate == 0 { player.play() }
+        isPlaying = player.rate > 0
+        DiagnosticsLog.write("[播放] 恢复尝试 会话=\(sessionError) rate=\(String(format: "%.1f", player.rate)) status=\(player.currentItem?.status.rawValue ?? -1)")
+
+        // 仍有画面但不走时间轴：用静音检查兜底重建
+        if player.rate == 0, recoveryAttempts < 3 {
+            recoveryAttempts += 1
+            let position = player.currentTime().seconds
+            DiagnosticsLog.write("[播放] 会话恢复无效，重建播放项（第 \(recoveryAttempts) 次）")
+            loadItem(startAt: position.isFinite ? position : lastSaved)
             player.play()
-            isPlaying = true
+            isPlaying = player.rate > 0
         }
     }
 
@@ -199,6 +235,9 @@ final class PlaybackStore: ObservableObject {
             return
         }
         let failed = player.currentItem?.status == .failed
+        if failed, let error = player.currentItem?.error as NSError? {
+            DiagnosticsLog.write("[播放] item 失败 \(error.domain) \(error.code) \(error.localizedDescription)")
+        }
         let waiting = player.timeControlStatus == .waitingToPlayAtSpecifiedRate
         let silentlyPaused = player.rate == 0
             && player.timeControlStatus == .paused
