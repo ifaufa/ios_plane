@@ -110,7 +110,7 @@ enum AudioTrackBuilder {
         let videoHeaderLength: UInt64 = mdatHeader.u32(at: 0) == 1 ? 16 : 8
         let videoPayloadSize = mdatRange.size - videoHeaderLength
         var audioPayloadSize: UInt64 = 0
-        for size in audioFrameSizes { audioPayloadSize += UInt64(size) }
+        for frame in audioFrames { audioPayloadSize += UInt64(frame.count) }
 
         // mdat 头（总负载，沿用原头长度以保证负载起点一致）
         let totalPayload = videoPayloadSize + audioPayloadSize
