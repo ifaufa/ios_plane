@@ -116,7 +116,7 @@ enum AVRemuxPipeline {
         keyframeLock.lock()
         lastKeyframeIndices = []
         keyframeLock.unlock()
-        let videoQueue = ItemQueue<VideoItem>(capacity: 32)
+        let videoQueue = ItemQueue<VideoItem>(capacity: 300)
         let audioQueue = ItemQueue<Data>(capacity: 2000)
         let pumpQueue = DispatchQueue(label: "remux.pump", qos: .userInitiated)
         let doneGroup = DispatchGroup()
@@ -518,6 +518,7 @@ enum AVRemuxPipeline {
             let handle = try FileHandle(forReadingFrom: fileURL)
             while let chunk = try handle.read(upToCount: 1 << 20), !chunk.isEmpty {
                 autoreleasepool { demuxer.consume(chunk) }
+            demuxer.updateDebugSnapshot()
                 if currentFailure() != nil { break }
             }
             try? handle.close()

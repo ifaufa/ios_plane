@@ -22,10 +22,23 @@ final class TSDemuxer {
 
     private var buffer = Data()
 
-    /// 诊断用：内部缓冲大小（用于定位内存/性能问题）
+    private let debugLock = NSLock()
+    private var debugSnapshot: (pes: Int, buf: Int) = (0, 0)
+
+    /// 由解复用线程调用（避免跨线程读取 Data 造成锁竞争/COW 抖动）
+    func updateDebugSnapshot() {
+        debugLock.lock()
+        debugSnapshot = (videoPES.count + audioPES.count, buffer.count)
+        debugLock.unlock()
+    }
+
+    /// 诊断用：内部缓冲大小（心跳线程读取快照，无锁竞争）
     func debugBufferSizes() -> String {
-        let pesMB = Double(videoPES.count + audioPES.count) / (1024 * 1024)
-        let bufMB = Double(buffer.count) / (1024 * 1024)
+        debugLock.lock()
+        let snapshot = debugSnapshot
+        debugLock.unlock()
+        let pesMB = Double(snapshot.pes) / (1024 * 1024)
+        let bufMB = Double(snapshot.buf) / (1024 * 1024)
         return String(format: "pes=%.1fMB buf=%.1fMB", pesMB, bufMB)
     }
     private var pmtPID: Int?
