@@ -348,7 +348,7 @@ enum AudioTrackBuilder {
 
     // MARK: - 音频 trak
 
-    private static func makeAudioTrak(frameCount: Int,
+    static func makeAudioTrak(frameCount: Int,
                                       sizes: [Int],
                                       offsets: [UInt32],
                                       samplesPerChunk: Int,

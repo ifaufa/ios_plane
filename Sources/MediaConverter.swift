@@ -91,6 +91,16 @@ enum MediaConverter {
         }
         }
 
+        // S2-分段：大文件先分段转，避免单个 writer 处理 2GB+ 产物导致内存积压
+        if !produced, dirSize > 1_200_000_000 {
+            do {
+                try await convertSegmented(state: state, dir: dir, outputURL: outputURL, dirSize: dirSize, onProgress: onProgress)
+                produced = true
+            } catch {
+                DiagnosticsLog.write("[转MP4] 分段转换失败：\(error.localizedDescription)")
+            }
+        }
+
         // S2：视频-only 转换 + 收集音频帧 + 自建音频轨合并
         if !produced {
             do {

@@ -18,6 +18,17 @@ enum AVRemuxPipeline {
     static var lastAudioFrameSizes: [Int] = []
     /// 关键帧样本序号（0-based），用于补写 stss
     static var lastKeyframeIndices: [Int32] = []
+    /// 每个样本的字节数（用于分段合并时重建 stsz）
+    static var lastVideoSizes: [Int32] = []
+    /// 每个样本的 ctts 偏移（pts - dts，单位 90000）
+    static var lastCtts: [Int32] = []
+    /// 帧间隔（ticks）
+    static var lastFrameStep: Int64 = 3750
+    /// 视频参数（分段合并重建 stsd 用）
+    static var lastVideoWidth: Int = 0
+    static var lastVideoHeight: Int = 0
+    static var lastVideoSPS: Data = Data()
+    static var lastVideoPPS: Data = Data()
     private static let keyframeLock = NSLock()
     private static let spoolLock = NSLock()
     static var lastAudioASC: Data?
@@ -87,7 +98,9 @@ enum AVRemuxPipeline {
                             progress: ((Double) -> Void)?,
                             videoOnly: Bool,
                             audioFormatFlags: UInt32,
-                            collectAudio: Bool) throws {
+                            collectAudio: Bool,
+                            segmentRange: Range<Int>?,
+                            resetAudioSpool: Bool) throws {
         let fm = FileManager.default
         if fm.fileExists(atPath: destination.path) {
             try fm.removeItem(at: destination)
@@ -104,17 +117,26 @@ enum AVRemuxPipeline {
         var spoolHandle: FileHandle?
         var spoolSizes: [Int] = []
         if collectAudio {
-            if let previous = AVRemuxPipeline.lastAudioSpoolURL { try? FileManager.default.removeItem(at: previous) }
-            let url = FileManager.default.temporaryDirectory
-                .appendingPathComponent("audio-spool-" + UUID().uuidString + ".aac")
-            FileManager.default.createFile(atPath: url.path, contents: nil)
-            spoolURL = url
-            spoolHandle = try? FileHandle(forWritingTo: url)
-            AVRemuxPipeline.lastAudioSpoolURL = url
-            AVRemuxPipeline.lastAudioFrameSizes = []
+            if resetAudioSpool {
+                if let previous = AVRemuxPipeline.lastAudioSpoolURL { try? FileManager.default.removeItem(at: previous) }
+                let url = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("audio-spool-" + UUID().uuidString + ".aac")
+                FileManager.default.createFile(atPath: url.path, contents: nil)
+                spoolURL = url
+                spoolHandle = try? FileHandle(forWritingTo: url)
+                AVRemuxPipeline.lastAudioSpoolURL = url
+                AVRemuxPipeline.lastAudioFrameSizes = []
+            } else if let existing = AVRemuxPipeline.lastAudioSpoolURL {
+                spoolURL = existing
+                spoolSizes = AVRemuxPipeline.lastAudioFrameSizes
+                spoolHandle = try? FileHandle(forWritingTo: existing)
+                try? spoolHandle?.seekToEnd()
+            }
         }
         keyframeLock.lock()
         lastKeyframeIndices = []
+        lastVideoSizes = []
+        lastCtts = []
         keyframeLock.unlock()
         let videoQueue = ItemQueue<VideoItem>(capacity: 300)
         let audioQueue = ItemQueue<Data>(capacity: 2000)
@@ -199,6 +221,11 @@ enum AVRemuxPipeline {
                 return
             }
             // 音频参数未就绪时先不创建 writer（保证音轨可用），除非强制
+
+            let videoWidth = info.width
+            let videoHeight = info.height
+            let videoSPS = info.sps
+            let videoPPS = info.pps
 
             var videoDesc: CMFormatDescription?
             let status: OSStatus = info.sps.withUnsafeBytes { spsBuffer -> OSStatus in
@@ -290,6 +317,7 @@ enum AVRemuxPipeline {
             }
             newWriter.startSession(atSourceTime: .zero)
 
+            AVRemuxPipeline.lastFrameStep = frameStep
             writer = newWriter
             videoInput = vInput
             audioInput = aInput
@@ -343,11 +371,17 @@ enum AVRemuxPipeline {
                         vInput.markAsFinished()
                         return
                     }
-                    if item.isKey {
-                        keyframeLock.lock()
-                        lastKeyframeIndices.append(Int32(sampleIndex))
-                        keyframeLock.unlock()
+                    keyframeLock.lock()
+                    if item.isKey { lastKeyframeIndices.append(Int32(sampleIndex)) }
+                    lastVideoSizes.append(Int32(item.data.count))
+                    lastCtts.append(Int32(item.pts - item.dts))
+                    if lastVideoWidth == 0 {
+                        lastVideoWidth = videoWidth
+                        lastVideoHeight = videoHeight
+                        lastVideoSPS = videoSPS
+                        lastVideoPPS = videoPPS
                     }
+                    keyframeLock.unlock()
                     lock.lock()
                     videoFrames += 1
                     lastVideoPTS = item.pts
@@ -504,6 +538,7 @@ enum AVRemuxPipeline {
         for index in state.durations.indices {
             if currentFailure() != nil { break }
             guard !excludedIndices.contains(index) else { continue }
+            if let segmentRange, !segmentRange.contains(index) { continue }
             let fileURL = dir.appendingPathComponent(LocalHLS.fileName(index: index))
             guard fm.fileExists(atPath: fileURL.path) else {
                 throw RemuxError(message: "缺少分片 \(index + 1)")
@@ -607,10 +642,13 @@ enum AVRemuxPipeline {
                       onProgress: ((Double) -> Void)? = nil,
                       videoOnly: Bool = false,
                       audioFormatFlags: UInt32 = 2,
-                      collectAudio: Bool = false) async throws {
+                      collectAudio: Bool = false,
+                      segmentRange: Range<Int>? = nil,
+                      resetAudioSpool: Bool = true) async throws {
         try await Task.detached(priority: .userInitiated) {
             try run(state: state, dir: dir, destination: destination,
-                    progress: onProgress, videoOnly: videoOnly, audioFormatFlags: audioFormatFlags, collectAudio: collectAudio)
+                    progress: onProgress, videoOnly: videoOnly, audioFormatFlags: audioFormatFlags,
+                    collectAudio: collectAudio, segmentRange: segmentRange, resetAudioSpool: resetAudioSpool)
         }.value
     }
 
