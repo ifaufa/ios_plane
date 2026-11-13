@@ -13,9 +13,13 @@ enum AVRemuxPipeline {
 
     /// 最近一次解析到的音频参数（供容器修补使用）
     static var collectedAudioFrames: [Data] = []
+    /// 音频帧落盘文件（避免全部驻留内存）
+    static var lastAudioSpoolURL: URL?
+    static var lastAudioFrameSizes: [Int] = []
     /// 关键帧样本序号（0-based），用于补写 stss
     static var lastKeyframeIndices: [Int32] = []
     private static let keyframeLock = NSLock()
+    private static let spoolLock = NSLock()
     static var lastAudioASC: Data?
     static var lastAudioSampleRate: Int = 0
     static var lastAudioChannels: Int = 0
@@ -90,6 +94,19 @@ enum AVRemuxPipeline {
         var audioRate = 44100
 
         var collected: [Data] = []
+        var spoolURL: URL?
+        var spoolHandle: FileHandle?
+        var spoolSizes: [Int] = []
+        if collectAudio {
+            if let previous = AVRemuxPipeline.lastAudioSpoolURL { try? FileManager.default.removeItem(at: previous) }
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("audio-spool-" + UUID().uuidString + ".aac")
+            FileManager.default.createFile(atPath: url.path, contents: nil)
+            spoolURL = url
+            spoolHandle = try? FileHandle(forWritingTo: url)
+            AVRemuxPipeline.lastAudioSpoolURL = url
+            AVRemuxPipeline.lastAudioFrameSizes = []
+        }
         keyframeLock.lock()
         lastKeyframeIndices = []
         keyframeLock.unlock()
@@ -381,7 +398,12 @@ enum AVRemuxPipeline {
                 AVRemuxPipeline.lastAudioChannels = info.channels
             }
             if videoOnly {
-                if collectAudio { collected.append(data) }
+                if collectAudio {
+                    spoolLock.lock()
+                    try? spoolHandle?.write(contentsOf: data)
+                    spoolSizes.append(data.count)
+                    spoolLock.unlock()
+                }
                 return
             }
             audioQueue.push(data)
@@ -441,8 +463,13 @@ enum AVRemuxPipeline {
             AVRemuxPipeline.lastAudioChannels = info.channels
         }
         if collectAudio {
-            AVRemuxPipeline.collectedAudioFrames = collected
-            DiagnosticsLog.write("[转MP4] 已收集音频帧 \(collected.count) 个（用于自建音轨）")
+            try? spoolHandle?.close()
+            spoolHandle = nil
+            AVRemuxPipeline.collectedAudioFrames = []
+            AVRemuxPipeline.lastAudioSpoolURL = spoolURL
+            AVRemuxPipeline.lastAudioFrameSizes = spoolSizes
+            let totalMB = spoolSizes.reduce(0, +) / (1024 * 1024)
+            DiagnosticsLog.write("[转MP4] 音频帧已落盘 \(spoolSizes.count) 个 共 \(totalMB)MB（内存零驻留）")
         }
                 DiagnosticsLog.write("[转MP4] 关键帧数=\(lastKeyframeIndices.count)/\(videoFrames) 用于补写 stss")
         DiagnosticsLog.write("[转MP4] 封装完成 视频帧=\(videoFrames) 音频帧=\(audioFrameIndex) GOP=\(gopCount) POC缺失=\(pocMissing) 帧间隔=\(frameStep)")

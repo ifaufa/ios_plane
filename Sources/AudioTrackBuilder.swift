@@ -110,7 +110,7 @@ enum AudioTrackBuilder {
         let videoHeaderLength: UInt64 = mdatHeader.u32(at: 0) == 1 ? 16 : 8
         let videoPayloadSize = mdatRange.size - videoHeaderLength
         var audioPayloadSize: UInt64 = 0
-        for frame in audioFrames { audioPayloadSize += UInt64(frame.count) }
+        for size in audioFrameSizes { audioPayloadSize += UInt64(size) }
 
         // mdat 头（总负载，沿用原头长度以保证负载起点一致）
         let totalPayload = videoPayloadSize + audioPayloadSize
@@ -196,14 +196,19 @@ enum AudioTrackBuilder {
     /// 截掉旧 moov → 改写 mdat 尺寸 → 追加音频负载 → 追加新 moov
     /// 峰值磁盘 = 分片 + 这一个文件（≈2S），不再产生第二份完整副本
     static func mergeInPlace(videoURL: URL,
-                             audioFrames: [Data],
+                             audioSpoolURL: URL,
+                             audioFrameSizes: [Int],
                              sampleRate: Int,
                              channels: Int,
                              asc: Data,
                              keyframeIndices: [Int32] = []) throws -> String {
-        guard !audioFrames.isEmpty else {
+        guard !audioFrameSizes.isEmpty else {
             throw BuildError(message: "没有音频帧")
         }
+        guard let spool = try? FileHandle(forReadingFrom: audioSpoolURL) else {
+            throw BuildError(message: "音频临时文件打开失败")
+        }
+        defer { try? spool.close() }
 
         let handle = try FileHandle(forUpdating: videoURL)
         defer { try? handle.close() }
@@ -255,7 +260,7 @@ enum AudioTrackBuilder {
         let ascData = asc.isEmpty ? Data([0x11, 0x90]) : asc
         let esds = MP4AudioFixer.makeESDS(asc: ascData)
         let timescale = mvhd.u32(at: 20)
-        let audioSeconds = Double(audioFrames.count) * 1024.0 / Double(max(1, sampleRate))
+        let audioSeconds = Double(audioFrameSizes.count) * 1024.0 / Double(max(1, sampleRate))
 
         try handle.seek(toOffset: mdatRange.offset)
         guard let mdatHeader = try handle.read(upToCount: 16), mdatHeader.count >= 8 else {
@@ -264,7 +269,7 @@ enum AudioTrackBuilder {
         let headerLength: UInt64 = mdatHeader.u32(at: 0) == 1 ? 16 : 8
         let videoPayloadSize = mdatRange.size - headerLength
         var audioPayloadSize: UInt64 = 0
-        for frame in audioFrames { audioPayloadSize += UInt64(frame.count) }
+        for size in audioFrameSizes { audioPayloadSize += UInt64(size) }
         let totalPayload = videoPayloadSize + audioPayloadSize
 
         // 4) 截掉旧 moov
@@ -293,13 +298,16 @@ enum AudioTrackBuilder {
         var running = mdatRange.offset + headerLength + videoPayloadSize
         var index = 0
         try handle.seek(toOffset: running)
-        while index < audioFrames.count {
+        while index < audioFrameSizes.count {
             audioOffsets.append(UInt32(min(running, UInt64(UInt32.max))))
-            let end = min(index + samplesPerChunk, audioFrames.count)
+            let end = min(index + samplesPerChunk, audioFrameSizes.count)
             for frameIndex in index..<end {
-                let frame = audioFrames[frameIndex]
-                try handle.write(contentsOf: frame)
-                running += UInt64(frame.count)
+                let size = audioFrameSizes[frameIndex]
+                guard let chunk = try spool.read(upToCount: size), chunk.count == size else {
+                    throw BuildError(message: "音频临时文件读取不完整（帧 \(frameIndex)）")
+                }
+                try handle.write(contentsOf: chunk)
+                running += UInt64(size)
             }
             index = end
         }
@@ -314,8 +322,8 @@ enum AudioTrackBuilder {
                                         with: withUnsafeBytes(of: audioDuration.bigEndian) { Data($0) })
         }
 
-        let audioTrak = makeAudioTrak(frameCount: audioFrames.count,
-                                      sizes: audioFrames.map { $0.count },
+        let audioTrak = makeAudioTrak(frameCount: audioFrameSizes.count,
+                                      sizes: audioFrameSizes,
                                       offsets: audioOffsets,
                                       samplesPerChunk: samplesPerChunk,
                                       sampleRate: sampleRate,
@@ -335,7 +343,7 @@ enum AudioTrackBuilder {
         try handle.write(contentsOf: moov)
 
         let finalSize = running + UInt64(moov.count)
-        return "原地合并完成 帧=\(audioFrames.count) 采样率=\(sampleRate) 总大小=\(finalSize)B"
+        return "原地合并完成 帧=\(audioFrameSizes.count) 采样率=\(sampleRate) 总大小=\(finalSize)B"
     }
 
     // MARK: - 音频 trak

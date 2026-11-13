@@ -72,14 +72,18 @@ enum MediaConverter {
                 AVRemuxPipeline.collectedAudioFrames = []
                 try await AVRemuxPipeline.remux(state: state, dir: dir, destination: outputURL,
                                                 onProgress: onProgress, videoOnly: true, collectAudio: true)
-                let frames = AVRemuxPipeline.collectedAudioFrames
                 let asc = AVRemuxPipeline.lastAudioASC ?? Data()
                 let rate = max(8000, AVRemuxPipeline.lastAudioSampleRate)
                 let channels = max(1, AVRemuxPipeline.lastAudioChannels)
+                guard let spoolURL = AVRemuxPipeline.lastAudioSpoolURL else {
+                    throw PlaylistError.network("转换失败：音频临时文件缺失")
+                }
+                defer { try? FileManager.default.removeItem(at: spoolURL) }
                 // 原地合并：直接在 AVAssetWriter 产出的文件上追加音频 + 重写 moov，
-                // 不产生第三份完整副本（峰值磁盘 ≈ 分片 + 一个成品）
+                // 音频帧流式从临时文件读取，不产生第三份副本、内存零驻留
                 let buildLog = try AudioTrackBuilder.mergeInPlace(videoURL: outputURL,
-                                                                  audioFrames: frames,
+                                                                  audioSpoolURL: spoolURL,
+                                                                  audioFrameSizes: AVRemuxPipeline.lastAudioFrameSizes,
                                                                   sampleRate: rate,
                                                                   channels: channels,
                                                                   asc: asc,
