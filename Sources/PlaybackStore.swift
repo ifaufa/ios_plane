@@ -37,6 +37,7 @@ final class PlaybackStore: ObservableObject {
     private var loadStartedAt: Date?
     private var loadReported = false
     private var didMuteProbe = false
+    private var didFallbackToZero = false
     private var intendedStart: Double = 0
     private var scrubbing = false
     private var expectsPlayingBeforeScrub = false
@@ -92,15 +93,14 @@ final class PlaybackStore: ObservableObject {
         configureAudioSession()
 
         let resumePosition = video.lastPosition ?? 0
-        var seekable = true
-        if !isHLS {
-            seekable = Self.hasSyncSampleTable(url) ?? false
-        }
-        let startAt = seekable ? resumePosition : 0
+        let startAt = resumePosition > 3 ? resumePosition : 0
         intendedStart = startAt
         didMuteProbe = false
-        if !seekable, resumePosition > 3 {
-            DiagnosticsLog.write("[播放] 该文件缺少同步样本表(stss)，忽略续播进度 \(Int(resumePosition))s，改为从头播放")
+        didFallbackToZero = false
+
+        let syncInfo = isHLS ? "HLS" : Self.syncSampleInfo(url)
+        if !isHLS {
+            DiagnosticsLog.write("[播放] 同步样本表探测 \(url.lastPathComponent)：\(syncInfo)")
         }
 
         loadItem(startAt: startAt)
@@ -108,7 +108,7 @@ final class PlaybackStore: ObservableObject {
         attachObserver()
         startHealthTimer()
         Task { await reportAssetInfo() }
-        DiagnosticsLog.write("[播放] 打开 \(video.title) 源=\(url.lastPathComponent) 续播=\(Int(startAt))s 可精确seek=\(seekable)")
+        DiagnosticsLog.write("[播放] 打开 \(video.title) 源=\(url.lastPathComponent) 续播=\(Int(startAt))s")
     }
 
     private func loadItem(startAt seconds: Double) {
@@ -364,6 +364,17 @@ final class PlaybackStore: ObservableObject {
                     let keepUp = player.currentItem?.isPlaybackLikelyToKeepUp ?? false
                     DiagnosticsLog.write("[播放] 检测到意外暂停（第 \(pauseRecoveries) 次）位置=\(Int(current.isFinite ? current : -1))s 期望=\(Int(intendedStart))s 原因=\(reason) 可播=\(keepUp)")
 
+                    // 续播失败：seek 卡在非 IDR / 位置没到位 → 回退从头，且只做一次
+                    if !didFallbackToZero, intendedStart > 3, player.rate == 0,
+                       abs(current - intendedStart) > 3 {
+                        didFallbackToZero = true
+                        DiagnosticsLog.write("[播放] 续播起播失败（位置=\(Int(current))s 目标=\(Int(intendedStart))s），回退从头播放")
+                        intendedStart = 0
+                        loadItem(startAt: 0)
+                        play()
+                        return
+                    }
+
                     // 位置明显没到位：退回从头播放
                     if abs(current - intendedStart) > max(3, intendedStart * 0.1), current < intendedStart - 1 {
                         DiagnosticsLog.write("[播放] seek 未到位，回退从头播放")
@@ -398,14 +409,14 @@ final class PlaybackStore: ObservableObject {
         }
     }
 
-    /// 探测 MP4 是否含同步样本表（stss）；缺失时精确 seek 不可靠
-    private static func hasSyncSampleTable(_ url: URL) -> Bool? {
-        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+    /// 结构化探测同步样本表：moov → trak(视频) → mdia → minf → stbl → stss
+    private static func syncSampleInfo(_ url: URL) -> String {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return "无法打开" }
         defer { try? handle.close() }
-        guard let size = try? handle.seekToEnd() else { return nil }
+        guard let fileSize = try? handle.seekToEnd() else { return "无法读取大小" }
 
         var offset: UInt64 = 0
-        while offset + 8 <= size {
+        while offset + 8 <= fileSize {
             try? handle.seek(toOffset: offset)
             guard let header = try? handle.read(upToCount: 16), header.count >= 8 else { break }
             var boxSize = UInt64(header.u32(at: 0))
@@ -415,19 +426,65 @@ final class PlaybackStore: ObservableObject {
                 boxSize = header.u64(at: 8)
                 headerLength = 16
             } else if boxSize == 0 {
-                boxSize = size - offset
+                boxSize = fileSize - offset
             }
             guard boxSize >= headerLength else { break }
+
             if type == "moov" {
                 try? handle.seek(toOffset: offset)
-                guard let data = try? handle.read(upToCount: Int(min(boxSize, 16 << 20))) else { return nil }
-                return data.range(of: Data("stss".utf8)) != nil
+                guard let moov = try? handle.read(upToCount: Int(min(boxSize, 32 << 20))) else {
+                    return "读取 moov 失败"
+                }
+                let body = Int(headerLength)..<moov.count
+                var cursor = body.lowerBound
+                while cursor + 8 <= body.upperBound {
+                    let size = Int(moov.u32(at: cursor))
+                    let boxType = moov.ascii(at: cursor + 4, length: 4)
+                    guard size >= 8, cursor + size <= body.upperBound else { break }
+                    if boxType == "trak" {
+                        let trakRange = cursor..<(cursor + size)
+                        let isVideo = moov.range(of: Data("vmhd".utf8), in: trakRange) != nil
+                        if isVideo {
+                            if let stbl = descendant(moov, in: trakRange, path: ["mdia", "minf", "stbl"]) {
+                                if let stss = child(moov, in: stbl, type: "stss") {
+                                    let entries = moov.u32(at: stss.lowerBound + 12)
+                                    return "moov=\(boxSize / 1024)KB stss(entries=\(entries))"
+                                }
+                                return "moov=\(boxSize / 1024)KB 视频轨无 stss"
+                            }
+                        }
+                    }
+                    cursor += size
+                }
+                return "moov=\(boxSize / 1024)KB 未找到视频 trak"
             }
             offset += boxSize
+        }
+        return "未找到 moov"
+    }
+
+    private static func child(_ data: Data, in range: Range<Int>, type: String) -> Range<Int>? {
+        var cursor = range.lowerBound
+        while cursor + 8 <= range.upperBound {
+            let size = Int(data.u32(at: cursor))
+            let boxType = data.ascii(at: cursor + 4, length: 4)
+            guard size >= 8, cursor + size <= range.upperBound else { return nil }
+            if boxType == type { return cursor..<(cursor + size) }
+            cursor += size
         }
         return nil
     }
 
+    private static func descendant(_ data: Data, in range: Range<Int>, path: [String]) -> Range<Int>? {
+        var current = range
+        for type in path {
+            guard let found = child(data, in: (current.lowerBound + 8)..<current.upperBound, type: type) else {
+                return nil
+            }
+            current = found
+        }
+        return current
+    }
     private func reportAssetInfo() async {
         guard let url = sourceURL else { return }
         let asset = AVURLAsset(url: url)
