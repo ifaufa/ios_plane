@@ -28,8 +28,12 @@ enum MP4Inspector {
             }
             if type == "moov" {
                 try? handle.seek(toOffset: offset + headerLength)
-                let body = (try? handle.read(upToCount: Int(min(size - headerLength, 4_000_000)))) ?? Data()
-                parts.append("moov[\(dump(body, limit: 4))]")
+                // 大文件的 moov 会因 ctts/stsz 条目多而膨胀到数 MB：上限提到 64MB，避免截断造成误报 trak(bad)
+                let moovCap: UInt64 = 64_000_000
+                let bodySize = size - headerLength
+                let body = (try? handle.read(upToCount: Int(min(bodySize, moovCap)))) ?? Data()
+                let truncated = bodySize > moovCap ? "…(truncated \(bodySize)B)" : ""
+                parts.append("moov[\(dump(body, limit: 4))\(truncated)]")
             } else {
                 parts.append("\(type)(\(size)B)")
             }
