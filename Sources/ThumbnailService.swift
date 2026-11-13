@@ -13,6 +13,8 @@ enum ThumbnailService {
     /// 缓存版本号：改动取帧策略时递增，旧图自动失效
     private static let cacheVersion = "v6"
     private static var didPurge = false
+    /// 转换期间暂停后台缩略图生成，避免抢占磁盘 I/O
+    static var isPaused = false
     private static var inFlight: Set<UUID> = []
     private static let inFlightLock = NSLock()
     private static let fraction = 0.3
@@ -35,6 +37,10 @@ enum ThumbnailService {
         var cachedCount = 0
         var missingCount = 0
         for item in items {
+            if isPaused {
+                DiagnosticsLog.write("[缩略图] 检测到转换进行中，暂停后台预生成")
+                break
+            }
             if cached(for: item.id) != nil { cachedCount += 1; continue }
             let url = urlFor(item)
             var isDirectory: ObjCBool = false

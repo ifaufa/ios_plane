@@ -116,13 +116,15 @@ enum AVRemuxPipeline {
         keyframeLock.lock()
         lastKeyframeIndices = []
         keyframeLock.unlock()
-        let videoQueue = ItemQueue<VideoItem>(capacity: 300)
+        let videoQueue = ItemQueue<VideoItem>(capacity: 64)
         let audioQueue = ItemQueue<Data>(capacity: 2000)
         let pumpQueue = DispatchQueue(label: "remux.pump", qos: .userInitiated)
         let doneGroup = DispatchGroup()
         let lock = NSLock()
         var failure: String?
         var videoFrames = 0
+        var lastVideoPTS: Int64 = 0
+        var lastVideoDTS: Int64 = 0
         var audioFrameIndex: Int64 = 0
 
         // 时间轴
@@ -343,6 +345,8 @@ enum AVRemuxPipeline {
                     }
                     lock.lock()
                     videoFrames += 1
+                    lastVideoPTS = item.pts
+                    lastVideoDTS = item.dts
                     lock.unlock()
                 }
             }
@@ -455,16 +459,36 @@ enum AVRemuxPipeline {
         heartbeat.setEventHandler {
             lock.lock()
             let frames = videoFrames
+            let pts = lastVideoPTS
+            let dts = lastVideoDTS
             lock.unlock()
+
             if frames == lastFrameSnapshot, writer?.status == .writing {
                 stallTicks += 1
             } else {
                 stallTicks = 0
             }
             lastFrameSnapshot = frames
-            DiagnosticsLog.write("[转MP4] 心跳 段=\(processedSegments) 帧=\(frames) 队列=\(videoQueue.depth) ready=\(videoInput?.isReadyForMoreMediaData ?? false) status=\(writer?.status.rawValue ?? -1) 停滞=\(stallTicks)")
-            if stallTicks >= 12 {
-                DiagnosticsLog.write("[转MP4] 检测到写入停滞约 60 秒，强制中止")
+
+            let ready = videoInput?.isReadyForMoreMediaData ?? false
+            let status = writer?.status.rawValue ?? -1
+            DiagnosticsLog.write("[转MP4] 心跳 段=\(processedSegments) 帧=\(frames) 队列=\(videoQueue.depth) ready=\(ready) status=\(status) 停滞=\(stallTicks)")
+
+            // 30 秒无进展：打一次现场，但不中止（可能只是写得慢）
+            if stallTicks == 6 {
+                let error = (writer?.error as NSError?)?.localizedDescription ?? "-"
+                let free = (Self.availableBytes() ?? 0) / (1024 * 1024)
+                let memory = os_proc_available_memory() / (1024 * 1024)
+                DiagnosticsLog.write("[转MP4] 写入变慢 30s 现场：ready=\(ready) status=\(status) 队列=\(videoQueue.depth) 最后PTS=\(pts) DTS=\(dts) writer错误=\(error) 可用磁盘=\(free)MB 可用内存=\(memory)MB")
+            }
+
+            // 5 分钟完全零进展：判定真停滞，安全中止（并解开队列，避免二次死锁）
+            if stallTicks >= 60 {
+                let error = (writer?.error as NSError?)?.localizedDescription ?? "-"
+                DiagnosticsLog.write("[转MP4] 判定写入停滞 5 分钟：ready=\(ready) status=\(status) 队列=\(videoQueue.depth) 最后PTS=\(pts) DTS=\(dts) writer错误=\(error)")
+                videoQueue.finish()
+                audioQueue.finish()
+                setFailure("写入停滞超过 5 分钟（设备 I/O 繁忙或文件过大）")
                 writer?.cancelWriting()
             }
         }

@@ -42,9 +42,10 @@ enum MediaConverter {
                                         Double(available) / 1_073_741_824,
                                         Double(required) / 1_073_741_824))
             if available < required {
-                throw ConversionError(message: String(format: "空间不足：分片 %.1f GB + 预估成品 %.1f GB（余量 0.3 GB），共需约 %.1f GB，当前仅剩 %.1f GB。原分片已保留。",
+                throw ConversionError(message: String(format: "空间不足：分片 %.1f GB + 预估成品 %.1f GB + 临时文件 %.1f GB + 安全余量 1.0 GB，共需约 %.1f GB，当前仅剩 %.1f GB。原分片已保留。",
                                                      Double(dirSize) / 1_073_741_824,
                                                      Double(estimatedFinal) / 1_073_741_824,
+                                                     Double(audioSpool) / 1_073_741_824,
                                                      Double(required) / 1_073_741_824,
                                                      Double(available) / 1_073_741_824))
             }
@@ -57,6 +58,8 @@ enum MediaConverter {
         }
 
         var produced = false
+        ThumbnailService.isPaused = true
+        defer { ThumbnailService.isPaused = false }
 
         // 1) 自研解复用 + AVAssetWriter（视频轨已验证正确）
         //    S1：通过格式描述扩展提供完整 esds；S2：视频-only + 自建音频轨合并；S3：保留画面版本
@@ -181,7 +184,10 @@ enum MediaConverter {
         guard verify.playable, verify.duration > 1 else {
             // 保留产物，便于导出到电脑上比对（不删除，也不入库）
             DiagnosticsLog.write("[转MP4] 校验未通过，产物已保留：\(outputURL.lastPathComponent)")
-            throw ConversionError(message: "转换后校验失败（\(verify.detail)；\(trackInfo)）。原分片已保留，产物 \(outputName) 也在「文件」App 里，可导出到电脑用 VLC 验证。")
+            let bigFileHint = dirSize > 2_000_000_000
+                ? "。源较大，若多次失败建议关闭其它 App 后重试，或用「导出分片」在电脑上转换"
+                : ""
+            throw ConversionError(message: "转换后校验失败（\(verify.detail)；\(trackInfo)）。原分片已保留，产物 \(outputName) 也在「文件」App 里，可导出到电脑用 VLC 验证\(bigFileHint)。")
         }
 
         try? fm.removeItem(at: dir)
