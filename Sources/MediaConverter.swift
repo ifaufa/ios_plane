@@ -21,8 +21,8 @@ enum MediaConverter {
 
         let dirSize = directorySize(dir)
         if let available = availableCapacity(),
-           available < Int64(Double(dirSize) * 2.3) + 200 * 1024 * 1024 {
-            let need = Double(dirSize) * 2.3 / 1_073_741_824
+           available < Int64(Double(dirSize) * 2.1) + 200 * 1024 * 1024 {
+            let need = Double(dirSize) * 2.1 / 1_073_741_824
             let left = Double(available) / 1_073_741_824
             throw ConversionError(message: String(format: "空间不足：转 MP4 约需 %.1f GB，当前仅剩 %.1f GB。原分片已保留。", need, left))
         }
@@ -76,17 +76,14 @@ enum MediaConverter {
                 let asc = AVRemuxPipeline.lastAudioASC ?? Data()
                 let rate = max(8000, AVRemuxPipeline.lastAudioSampleRate)
                 let channels = max(1, AVRemuxPipeline.lastAudioChannels)
-                let videoOnlyURL = VideoLibrary.assetsDir.appendingPathComponent(UUID().uuidString + ".vonly.mp4")
-                if fm2.fileExists(atPath: videoOnlyURL.path) { try? fm2.removeItem(at: videoOnlyURL) }
-                try fm2.moveItem(at: outputURL, to: videoOnlyURL)
-                let buildLog = try AudioTrackBuilder.build(videoURL: videoOnlyURL,
-                                                           audioFrames: frames,
-                                                           sampleRate: rate,
-                                                           channels: channels,
-                                                           asc: asc,
-                                                           destination: outputURL,
-                                                           keyframeIndices: AVRemuxPipeline.lastKeyframeIndices)
-                try? fm2.removeItem(at: videoOnlyURL)
+                // 原地合并：直接在 AVAssetWriter 产出的文件上追加音频 + 重写 moov，
+                // 不产生第三份完整副本（峰值磁盘 ≈ 分片 + 一个成品）
+                let buildLog = try AudioTrackBuilder.mergeInPlace(videoURL: outputURL,
+                                                                  audioFrames: frames,
+                                                                  sampleRate: rate,
+                                                                  channels: channels,
+                                                                  asc: asc,
+                                                                  keyframeIndices: AVRemuxPipeline.lastKeyframeIndices)
                 DiagnosticsLog.write("[转MP4] \(buildLog)")
 
                 // 产物级校验：视频 1 条 + 音频 1 条 + stss 已写入，任一不满足即明确失败（不静默降级）

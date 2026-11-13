@@ -190,6 +190,154 @@ enum AudioTrackBuilder {
         return "音频轨已自建并合并 帧=\(audioFrames.count) 采样率=\(sampleRate) 总大小=\(finalSize)B"
     }
 
+    // MARK: - 原地合并（P1：不产生第三份副本）
+
+    /// 直接把 AVAssetWriter 产出的纯视频文件「就地」升级为含音频的最终 MP4：
+    /// 截掉旧 moov → 改写 mdat 尺寸 → 追加音频负载 → 追加新 moov
+    /// 峰值磁盘 = 分片 + 这一个文件（≈2S），不再产生第二份完整副本
+    static func mergeInPlace(videoURL: URL,
+                             audioFrames: [Data],
+                             sampleRate: Int,
+                             channels: Int,
+                             asc: Data,
+                             keyframeIndices: [Int32] = []) throws -> String {
+        guard !audioFrames.isEmpty else {
+            throw BuildError(message: "没有音频帧")
+        }
+
+        let handle = try FileHandle(forUpdating: videoURL)
+        defer { try? handle.close() }
+        let fileSize = try handle.seekToEnd()
+
+        // 1) 扫描顶层 box
+        var mdatRange: (offset: UInt64, size: UInt64)?
+        var moovRange: (offset: UInt64, size: UInt64)?
+        var cursor: UInt64 = 0
+        while cursor + 8 <= fileSize {
+            try handle.seek(toOffset: cursor)
+            guard let header = try handle.read(upToCount: 16), header.count >= 8 else { break }
+            var size = UInt64(header.u32(at: 0))
+            let type = header.ascii(at: 4, length: 4)
+            var headerLength: UInt64 = 8
+            if size == 1, header.count >= 16 { size = header.u64(at: 8); headerLength = 16 }
+            else if size == 0 { size = fileSize - cursor }
+            guard size >= headerLength else { break }
+            if type == "mdat" { mdatRange = (cursor, size) }
+            if type == "moov" { moovRange = (cursor, size) }
+            cursor += size
+        }
+        guard let mdatRange, let moovRange else {
+            throw BuildError(message: "原地合并失败：缺少 mdat/moov")
+        }
+        guard moovRange.offset > mdatRange.offset else {
+            throw BuildError(message: "原地合并失败：moov 不在 mdat 之后")
+        }
+
+        // 2) 读旧 moov，取 mvhd 与视频 trak
+        try handle.seek(toOffset: moovRange.offset)
+        guard let moovData = try handle.read(upToCount: Int(moovRange.size)) else {
+            throw BuildError(message: "读取 moov 失败")
+        }
+        guard let mvhd = childBox(in: moovData, from: 8, to: moovData.count, type: "mvhd") else {
+            throw BuildError(message: "moov 缺少 mvhd")
+        }
+        guard var videoTrak = videoTrackBox(in: moovData) else {
+            throw BuildError(message: "moov 缺少视频 trak")
+        }
+
+        let writeStss = UserDefaults.standard.object(forKey: "mp4WriteStss") as? Bool ?? true
+        if writeStss, !keyframeIndices.isEmpty {
+            let patched = try addSyncSampleTable(to: videoTrak, indices: keyframeIndices)
+            if patched.count > videoTrak.count { videoTrak = patched }
+        }
+
+        // 3) 计算音频参数与负载尺寸
+        let ascData = asc.isEmpty ? Data([0x11, 0x90]) : asc
+        let esds = MP4AudioFixer.makeESDS(asc: ascData)
+        let timescale = mvhd.u32(at: 20)
+        let audioSeconds = Double(audioFrames.count) * 1024.0 / Double(max(1, sampleRate))
+
+        try handle.seek(toOffset: mdatRange.offset)
+        guard let mdatHeader = try handle.read(upToCount: 16), mdatHeader.count >= 8 else {
+            throw BuildError(message: "读取 mdat 头失败")
+        }
+        let headerLength: UInt64 = mdatHeader.u32(at: 0) == 1 ? 16 : 8
+        let videoPayloadSize = mdatRange.size - headerLength
+        var audioPayloadSize: UInt64 = 0
+        for frame in audioFrames { audioPayloadSize += UInt64(frame.count) }
+        let totalPayload = videoPayloadSize + audioPayloadSize
+
+        // 4) 截掉旧 moov
+        try handle.truncate(atOffset: moovRange.offset)
+
+        // 5) 改写 mdat 尺寸（原地，只动头部的 size 字段）
+        var newHeader = Data()
+        if headerLength == 16 {
+            newHeader.append(contentsOf: [0, 0, 0, 1])
+            newHeader.append("mdat".data(using: .ascii)!)
+            let value = totalPayload + 16
+            newHeader.append(contentsOf: (0..<8).map { UInt8((value >> (56 - UInt64($0) * 8)) & 0xFF) })
+        } else {
+            guard totalPayload + 8 <= UInt64(UInt32.max) else {
+                throw BuildError(message: "单 mdat 超过 4GB，暂不支持原地合并")
+            }
+            newHeader.append(contentsOf: be32(UInt32(totalPayload + 8)))
+            newHeader.append("mdat".data(using: .ascii)!)
+        }
+        try handle.seek(toOffset: mdatRange.offset)
+        try handle.write(contentsOf: newHeader)
+
+        // 6) 追加音频负载（chunk 偏移 = 绝对位置）
+        let samplesPerChunk = 32
+        var audioOffsets: [UInt32] = []
+        var running = mdatRange.offset + headerLength + videoPayloadSize
+        var index = 0
+        try handle.seek(toOffset: running)
+        while index < audioFrames.count {
+            audioOffsets.append(UInt32(min(running, UInt64(UInt32.max))))
+            let end = min(index + samplesPerChunk, audioFrames.count)
+            for frameIndex in index..<end {
+                let frame = audioFrames[frameIndex]
+                try handle.write(contentsOf: frame)
+                running += UInt64(frame.count)
+            }
+            index = end
+        }
+
+        // 7) 组装并追加新 moov
+        var mvhdPatched = mvhd
+        if timescale > 0, 28 <= mvhdPatched.count {
+            var audioDuration = UInt32(min(Double(UInt32.max), audioSeconds * Double(timescale)))
+            let current = mvhdPatched.u32(at: 24)
+            if audioDuration < current { audioDuration = current }
+            mvhdPatched.replaceSubrange(24..<28,
+                                        with: withUnsafeBytes(of: audioDuration.bigEndian) { Data($0) })
+        }
+
+        let audioTrak = makeAudioTrak(frameCount: audioFrames.count,
+                                      sizes: audioFrames.map { $0.count },
+                                      offsets: audioOffsets,
+                                      samplesPerChunk: samplesPerChunk,
+                                      sampleRate: sampleRate,
+                                      channels: channels,
+                                      esds: esds,
+                                      timescale: timescale,
+                                      duration: audioSeconds,
+                                      trackID: 2)
+
+        var moovBody = Data()
+        moovBody.append(mvhdPatched)
+        moovBody.append(videoTrak)
+        moovBody.append(audioTrak)
+        var moov = boxHeader(type: "moov", payloadSize: UInt64(moovBody.count))
+        moov.append(moovBody)
+        try handle.seek(toOffset: running)
+        try handle.write(contentsOf: moov)
+
+        let finalSize = running + UInt64(moov.count)
+        return "原地合并完成 帧=\(audioFrames.count) 采样率=\(sampleRate) 总大小=\(finalSize)B"
+    }
+
     // MARK: - 音频 trak
 
     private static func makeAudioTrak(frameCount: Int,
