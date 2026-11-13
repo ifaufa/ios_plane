@@ -72,7 +72,7 @@ enum AudioTrackBuilder {
         // 补写同步样本表：现有产物全部缺 stss，导致 seek 可能落在非 IDR 帧
         let writeStss = UserDefaults.standard.object(forKey: "mp4WriteStss") as? Bool ?? true
         if writeStss, !keyframeIndices.isEmpty {
-            let patched = addSyncSampleTable(to: videoTrak, indices: keyframeIndices)
+            let patched = try addSyncSampleTable(to: videoTrak, indices: keyframeIndices)
             if patched.count > videoTrak.count {
                 videoTrak = patched
                 DiagnosticsLog.write("[转MP4] 已补写 stss 条目=\(keyframeIndices.count)")
@@ -349,7 +349,7 @@ enum AudioTrackBuilder {
     // MARK: - stss 补写
 
     /// 在视频 trak 的 stbl 末尾插入 stss，并逐级修正父 box 尺寸
-    private static func addSyncSampleTable(to trak: Data, indices: [Int32]) -> Data {
+    private static func addSyncSampleTable(to trak: Data, indices: [Int32]) throws -> Data {
         guard let mdia = childRange(trak, in: 8..<trak.count, type: "mdia"),
               let minf = childRange(trak, in: (mdia.lowerBound + 8)..<mdia.upperBound, type: "minf"),
               let stbl = childRange(trak, in: (minf.lowerBound + 8)..<minf.upperBound, type: "stbl") else {
@@ -360,10 +360,35 @@ enum AudioTrackBuilder {
             return trak
         }
 
+        // 样本总数（stsz 的 sample_count 位于 box 起始 +16）
+        guard let stsz = childRange(trak, in: (stbl.lowerBound + 8)..<stbl.upperBound, type: "stsz") else {
+            throw BuildError(message: "stss 写入失败：缺少 stsz，无法校验样本范围")
+        }
+        let sampleCount = Int(trak.u32(at: stsz.lowerBound + 16))
+        guard sampleCount > 0 else {
+            throw BuildError(message: "stss 写入失败：stsz 样本数为 0")
+        }
+
+        // ISO BMFF：sample_number 从 1 开始，且必须严格递增、不超过样本总数
+        var entries: [UInt32] = []
+        entries.reserveCapacity(indices.count)
+        var lastEntry: UInt32 = 0
+        for index in indices {
+            let number = UInt32(index) + 1
+            guard number >= 1, number > lastEntry, number <= UInt32(sampleCount) else {
+                throw BuildError(message: "stss 写入失败：样本号 \(number) 非法（范围 1…\(sampleCount)）")
+            }
+            lastEntry = number
+            entries.append(number)
+        }
+        guard !entries.isEmpty else {
+            throw BuildError(message: "stss 写入失败：关键帧序号为空")
+        }
+
         var payload = Data()
         payload.append(contentsOf: [0, 0, 0, 0])                 // version/flags
-        payload.append(contentsOf: be32(UInt32(indices.count)))  // entry_count
-        for index in indices { payload.append(contentsOf: be32(UInt32(index))) }
+        payload.append(contentsOf: be32(UInt32(entries.count)))  // entry_count
+        for number in entries { payload.append(contentsOf: be32(number)) }
 
         var stss = Data()
         stss.append(contentsOf: be32(UInt32(payload.count + 8)))
@@ -393,9 +418,9 @@ enum AudioTrackBuilder {
             sum += size
         }
         guard sum == result.count else {
-            DiagnosticsLog.write("[转MP4] stss 补写自检失败（\(sum) ≠ \(result.count)），放弃补写")
-            return trak
+            throw BuildError(message: "stss 写入失败：尺寸链不自洽（\(sum) ≠ \(result.count)）")
         }
+        DiagnosticsLog.write("[转MP4] stss 写入自检通过 条目=\(entries.count) 首个=\(entries.first ?? 0) 末个=\(entries.last ?? 0) 样本总数=\(sampleCount)")
         return result
     }
 

@@ -86,15 +86,26 @@ enum MediaConverter {
                                                            asc: asc,
                                                            destination: outputURL,
                                                            keyframeIndices: AVRemuxPipeline.lastKeyframeIndices)
-                DiagnosticsLog.write("[转MP4] stss 校验 \(MP4Inspector.describe(outputURL).contains("stss(") ? "通过" : "未写入")")
                 try? fm2.removeItem(at: videoOnlyURL)
                 DiagnosticsLog.write("[转MP4] \(buildLog)")
-                let audioCount = ((try? await AVURLAsset(url: outputURL).loadTracks(withMediaType: .audio)) ?? []).count
-                let videoCount = ((try? await AVURLAsset(url: outputURL).loadTracks(withMediaType: .video)) ?? []).count
-                DiagnosticsLog.write(String(format: "[转MP4] S2 完成 耗时 %.1fs 产物轨道 视频=%d 音频=%d", Date().timeIntervalSince(start), videoCount, audioCount))
-                if audioCount > 0, videoCount > 0 {
-                    produced = true
+
+                // 产物级校验：视频 1 条 + 音频 1 条 + stss 已写入，任一不满足即明确失败（不静默降级）
+                let builtAsset = AVURLAsset(url: outputURL)
+                let audioCount = ((try? await builtAsset.loadTracks(withMediaType: .audio)) ?? []).count
+                let videoCount = ((try? await builtAsset.loadTracks(withMediaType: .video)) ?? []).count
+                let wroteStss = MP4Inspector.describe(outputURL).contains("stss(")
+                DiagnosticsLog.write(String(format: "[转MP4] S2 完成 耗时 %.1fs 产物轨道 视频=%d 音频=%d stss=%@",
+                                            Date().timeIntervalSince(start), videoCount, audioCount,
+                                            wroteStss ? "已写入" : "未写入"))
+
+                if videoCount != 1 || audioCount < 1 || !wroteStss {
+                    var reasons: [String] = []
+                    if videoCount != 1 { reasons.append("产物视频轨=\(videoCount)") }
+                    if audioCount < 1 { reasons.append("产物无音频轨") }
+                    if !wroteStss { reasons.append("stss 未写入") }
+                    throw RemuxError(message: "转换失败：\(reasons.joined(separator: "，"))。可在设置中关闭“转换时写入同步样本表(stss)”后重试，或反馈该日志")
                 }
+                produced = true
             } catch {
                 DiagnosticsLog.write("[转MP4] S2 失败：\(error.localizedDescription)")
             }
