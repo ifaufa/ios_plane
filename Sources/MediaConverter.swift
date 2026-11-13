@@ -147,7 +147,11 @@ enum MediaConverter {
             }
         }
         // 2) fMP4 或自研失败：走 AVFoundation（HLS 资产）
-        if !produced {
+        //    大文件跳过：该路径对 HLS 基本不可用（Operation Stopped），且会大量占用内存导致被杀
+        if !produced, dirSize > 1_000_000_000 {
+            DiagnosticsLog.write("[转MP4] 跳过 AVFoundation 兜底（源 \(dirSize / (1024 * 1024))MB 过大）")
+        }
+        if !produced, dirSize <= 1_000_000_000 {
             do {
                 let playlist = dir.appendingPathComponent("index.m3u8")
                 let session = try LocalHLS.open(playlistURL: playlist)

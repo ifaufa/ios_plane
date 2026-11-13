@@ -512,8 +512,21 @@ enum AVRemuxPipeline {
             if index % 100 == 0, let free = Self.availableBytes(), free < 500 * 1024 * 1024 {
                 throw RemuxError(message: "空间不足，已在第 \(index) 个分片处安全中止（原分片已保留）")
             }
-            if index % 100 == 0, os_proc_available_memory() < 200 * 1024 * 1024 {
-                throw RemuxError(message: "内存不足，已在第 \(index) 个分片处安全中止（原分片已保留）。请关闭其它 App 后重试")
+            if index % 50 == 0 {
+                let available = os_proc_available_memory()
+                if available < 300 * 1024 * 1024 {
+                    // 内存吃紧：暂停喂数据，等系统回收（最多 90 秒），而不是直接放弃已完成的工作
+                    let startWait = Date()
+                    while os_proc_available_memory() < 500 * 1024 * 1024,
+                          Date().timeIntervalSince(startWait) < 90 {
+                        Thread.sleep(forTimeInterval: 0.5)
+                    }
+                    let after = os_proc_available_memory()
+                    DiagnosticsLog.write("[转MP4] 内存吃紧，暂停喂数据 \(Int(Date().timeIntervalSince(startWait)))s 后恢复 内存=\(after / (1024 * 1024))MB")
+                    if after < 80 * 1024 * 1024 {
+                        throw RemuxError(message: "内存严重不足（\(after / (1024 * 1024))MB），已在第 \(index) 个分片处安全中止（原分片已保留）")
+                    }
+                }
             }
             let handle = try FileHandle(forReadingFrom: fileURL)
             while let chunk = try handle.read(upToCount: 1 << 20), !chunk.isEmpty {
