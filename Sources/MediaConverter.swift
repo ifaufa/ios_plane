@@ -19,12 +19,25 @@ enum MediaConverter {
             throw ConversionError(message: "缺少分片状态文件，无法转换")
         }
 
+        cleanStaleTemps(in: dir)
+
         let dirSize = directorySize(dir)
-        if let available = availableCapacity(),
-           available < Int64(Double(dirSize) * 2.1) + 200 * 1024 * 1024 {
-            let need = Double(dirSize) * 2.1 / 1_073_741_824
-            let left = Double(available) / 1_073_741_824
-            throw ConversionError(message: String(format: "空间不足：转 MP4 约需 %.1f GB，当前仅剩 %.1f GB。原分片已保留。", need, left))
+        let estimatedFinal = Int64(Double(dirSize) * 0.75)
+        let required = dirSize + estimatedFinal + 300 * 1024 * 1024
+        if let available = availableCapacity() {
+            DiagnosticsLog.write(String(format: "[转MP4] 空间预检 分片=%.2fGB 库内记录=%.2fGB 预估成品=%.2fGB 可用=%.2fGB 需求=%.2fGB",
+                                        Double(dirSize) / 1_073_741_824,
+                                        Double(item.fileSize) / 1_073_741_824,
+                                        Double(estimatedFinal) / 1_073_741_824,
+                                        Double(available) / 1_073_741_824,
+                                        Double(required) / 1_073_741_824))
+            if available < required {
+                throw ConversionError(message: String(format: "空间不足：分片 %.1f GB + 预估成品 %.1f GB（余量 0.3 GB），共需约 %.1f GB，当前仅剩 %.1f GB。原分片已保留。",
+                                                     Double(dirSize) / 1_073_741_824,
+                                                     Double(estimatedFinal) / 1_073_741_824,
+                                                     Double(required) / 1_073_741_824,
+                                                     Double(available) / 1_073_741_824))
+            }
         }
 
         let outputName = UUID().uuidString + ".mp4"
@@ -213,6 +226,28 @@ enum MediaConverter {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         return try? decoder.decode(SegmentJobState.self, from: data)
+    }
+
+    /// 清理下载中断/历史转换遗留的临时文件，避免虚增分片目录大小
+    private static func cleanStaleTemps(in dir: URL) {
+        let fm = FileManager.default
+        guard let items = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { return }
+        var removed = 0
+        var freed: Int64 = 0
+        for url in items {
+            let name = url.lastPathComponent.lowercased()
+            let isTemp = name.hasSuffix(".part") || name.hasSuffix(".tmp")
+                || name.hasSuffix(".download") || name.hasSuffix(".vonly.mp4")
+            guard isTemp else { continue }
+            let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            if (try? fm.removeItem(at: url)) != nil {
+                removed += 1
+                freed += Int64(size)
+            }
+        }
+        if removed > 0 {
+            DiagnosticsLog.write("[转MP4] 清理残留临时文件 \(removed) 个，释放 \(freed / (1024 * 1024))MB")
+        }
     }
 
     private static func directorySize(_ url: URL) -> Int64 {

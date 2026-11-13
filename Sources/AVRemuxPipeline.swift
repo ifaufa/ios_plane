@@ -421,6 +421,10 @@ enum AVRemuxPipeline {
             guard fm.fileExists(atPath: fileURL.path) else {
                 throw RemuxError(message: "缺少分片 \(index + 1)")
             }
+            // 每 100 个分片检查一次剩余空间，空间告急时安全中止（分片保留）
+            if index % 100 == 0, let free = Self.availableBytes(), free < 500 * 1024 * 1024 {
+                throw RemuxError(message: "空间不足，已在第 \(index) 个分片处安全中止（原分片已保留）")
+            }
             let handle = try FileHandle(forReadingFrom: fileURL)
             while let chunk = try handle.read(upToCount: 1 << 20), !chunk.isEmpty {
                 demuxer.consume(chunk)
@@ -473,6 +477,12 @@ enum AVRemuxPipeline {
         }
                 DiagnosticsLog.write("[转MP4] 关键帧数=\(lastKeyframeIndices.count)/\(videoFrames) 用于补写 stss")
         DiagnosticsLog.write("[转MP4] 封装完成 视频帧=\(videoFrames) 音频帧=\(audioFrameIndex) GOP=\(gopCount) POC缺失=\(pocMissing) 帧间隔=\(frameStep)")
+    }
+
+    private static func availableBytes() -> Int64? {
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let values = try? docs.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        return values?.volumeAvailableCapacityForImportantUsage
     }
 
     static func remux(state: SegmentJobState,
