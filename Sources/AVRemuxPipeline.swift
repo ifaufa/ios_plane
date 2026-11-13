@@ -61,6 +61,12 @@ enum AVRemuxPipeline {
             return items.isEmpty ? nil : items.removeFirst()
         }
 
+        var depth: Int {
+            condition.lock()
+            defer { condition.unlock() }
+            return items.count
+        }
+
         var isFinished: Bool {
             condition.lock()
             defer { condition.unlock() }
