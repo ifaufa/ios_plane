@@ -21,6 +21,13 @@ final class TSDemuxer {
     var onError: ((String) -> Void)?
 
     private var buffer = Data()
+
+    /// 诊断用：内部缓冲大小（用于定位内存/性能问题）
+    func debugBufferSizes() -> String {
+        let pesMB = Double(videoPES.count + audioPES.count) / (1024 * 1024)
+        let bufMB = Double(buffer.count) / (1024 * 1024)
+        return String(format: "pes=%.1fMB buf=%.1fMB", pesMB, bufMB)
+    }
     private var pmtPID: Int?
     private var videoPID: Int?
     private var audioPID: Int?

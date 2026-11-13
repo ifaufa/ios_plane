@@ -116,7 +116,7 @@ enum AVRemuxPipeline {
         keyframeLock.lock()
         lastKeyframeIndices = []
         keyframeLock.unlock()
-        let videoQueue = ItemQueue<VideoItem>(capacity: 128)
+        let videoQueue = ItemQueue<VideoItem>(capacity: 32)
         let audioQueue = ItemQueue<Data>(capacity: 2000)
         let pumpQueue = DispatchQueue(label: "remux.pump", qos: .userInitiated)
         let doneGroup = DispatchGroup()
@@ -478,7 +478,7 @@ enum AVRemuxPipeline {
 
             let ready = videoInput?.isReadyForMoreMediaData ?? false
             let status = writer?.status.rawValue ?? -1
-            DiagnosticsLog.write("[转MP4] 心跳 段=\(processedSegments) 帧=\(frames) 队列=\(videoQueue.depth) ready=\(ready) status=\(status) 停滞=\(stallTicks)")
+            DiagnosticsLog.write("[转MP4] 心跳 段=\(processedSegments) 帧=\(frames) 队列=\(videoQueue.depth) ready=\(ready) status=\(status) 停滞=\(stallTicks) \(demuxer.debugBufferSizes()) 内存=\(os_proc_available_memory() / (1024 * 1024))MB")
 
             // 30 秒无进展：打一次现场，但不中止（可能只是写得慢）
             if stallTicks == 6 {
@@ -508,13 +508,16 @@ enum AVRemuxPipeline {
             guard fm.fileExists(atPath: fileURL.path) else {
                 throw RemuxError(message: "缺少分片 \(index + 1)")
             }
-            // 每 100 个分片检查一次剩余空间，空间告急时安全中止（分片保留）
+            // 每 100 个分片检查一次剩余空间与内存，告急时安全中止（分片保留）
             if index % 100 == 0, let free = Self.availableBytes(), free < 500 * 1024 * 1024 {
                 throw RemuxError(message: "空间不足，已在第 \(index) 个分片处安全中止（原分片已保留）")
             }
+            if index % 100 == 0, os_proc_available_memory() < 200 * 1024 * 1024 {
+                throw RemuxError(message: "内存不足，已在第 \(index) 个分片处安全中止（原分片已保留）。请关闭其它 App 后重试")
+            }
             let handle = try FileHandle(forReadingFrom: fileURL)
             while let chunk = try handle.read(upToCount: 1 << 20), !chunk.isEmpty {
-                demuxer.consume(chunk)
+                autoreleasepool { demuxer.consume(chunk) }
                 if currentFailure() != nil { break }
             }
             try? handle.close()
