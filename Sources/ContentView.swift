@@ -573,6 +573,7 @@ struct EngineSettingsView: View {
         }()
     @State private var dropKeyChanged = UserDefaults.standard.bool(forKey: AdFilter.dropKeyChangedKey)
     @State private var adFingerprint = UserDefaults.standard.bool(forKey: AdFilter.fingerprintKey)
+    @State private var writeStss = (UserDefaults.standard.object(forKey: "mp4WriteStss") as? Bool) ?? true
 
     var body: some View {
         NavigationStack {
@@ -588,6 +589,11 @@ struct EngineSettingsView: View {
                         Text("广告段处理")
                     } footer: {
                         Text("默认按分辨率判定插入片段；开启「指纹」后改为比对 SPS/PPS 编码参数，可识别分辨率相同但编码器不同的广告段；S2 会一并剔除断点处更换密钥的片段。剔除结果会在下载完成时提示。")
+                    }
+                    Section {
+                        Toggle("转换时写入同步样本表(stss)", isOn: $writeStss)
+                    } footer: {
+                        Text("开启后新转换的 MP4 会写入 stss，续播/拖动/缩略图定位更可靠。若转换后出现异常可关闭该项。")
                     }
                     Section {
                         Picker("同时下载任务数", selection: $maxTasks) {
@@ -634,6 +640,7 @@ struct EngineSettingsView: View {
                         UserDefaults.standard.set(maxTasks, forKey: DownloadManager.maxConcurrentKey)
                         UserDefaults.standard.set(dropKeyChanged, forKey: AdFilter.dropKeyChangedKey)
                         UserDefaults.standard.set(adFingerprint, forKey: AdFilter.fingerprintKey)
+                        UserDefaults.standard.set(writeStss, forKey: "mp4WriteStss")
                         dismiss()
                     }
                 }

@@ -13,6 +13,9 @@ enum AVRemuxPipeline {
 
     /// 最近一次解析到的音频参数（供容器修补使用）
     static var collectedAudioFrames: [Data] = []
+    /// 关键帧样本序号（0-based），用于补写 stss
+    static var lastKeyframeIndices: [Int32] = []
+    private static let keyframeLock = NSLock()
     static var lastAudioASC: Data?
     static var lastAudioSampleRate: Int = 0
     static var lastAudioChannels: Int = 0
@@ -87,6 +90,9 @@ enum AVRemuxPipeline {
         var audioRate = 44100
 
         var collected: [Data] = []
+        keyframeLock.lock()
+        lastKeyframeIndices = []
+        keyframeLock.unlock()
         let videoQueue = ItemQueue<VideoItem>(capacity: 300)
         let audioQueue = ItemQueue<Data>(capacity: 2000)
         let pumpQueue = DispatchQueue(label: "remux.pump", qos: .userInitiated)
@@ -285,12 +291,18 @@ enum AVRemuxPipeline {
                         vInput.markAsFinished()
                         return
                     }
+                    let sampleIndex = videoFrames
                     if !vInput.append(buffer) {
                         let error = newWriter.error as NSError?
                         setFailure("追加视频样本失败：\(error?.code ?? 0) \(error?.localizedDescription ?? "")")
                         if !videoPumpFinished { videoPumpFinished = true; doneGroup.leave() }
                         vInput.markAsFinished()
                         return
+                    }
+                    if item.isKey {
+                        keyframeLock.lock()
+                        lastKeyframeIndices.append(Int32(sampleIndex))
+                        keyframeLock.unlock()
                     }
                     lock.lock()
                     videoFrames += 1
@@ -432,6 +444,7 @@ enum AVRemuxPipeline {
             AVRemuxPipeline.collectedAudioFrames = collected
             DiagnosticsLog.write("[转MP4] 已收集音频帧 \(collected.count) 个（用于自建音轨）")
         }
+                DiagnosticsLog.write("[转MP4] 关键帧数=\(lastKeyframeIndices.count)/\(videoFrames) 用于补写 stss")
         DiagnosticsLog.write("[转MP4] 封装完成 视频帧=\(videoFrames) 音频帧=\(audioFrameIndex) GOP=\(gopCount) POC缺失=\(pocMissing) 帧间隔=\(frameStep)")
     }
 

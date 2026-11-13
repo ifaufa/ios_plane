@@ -84,7 +84,9 @@ enum MediaConverter {
                                                            sampleRate: rate,
                                                            channels: channels,
                                                            asc: asc,
-                                                           destination: outputURL)
+                                                           destination: outputURL,
+                                                           keyframeIndices: AVRemuxPipeline.lastKeyframeIndices)
+                DiagnosticsLog.write("[转MP4] stss 校验 \(MP4Inspector.describe(outputURL).contains("stss(") ? "通过" : "未写入")")
                 try? fm2.removeItem(at: videoOnlyURL)
                 DiagnosticsLog.write("[转MP4] \(buildLog)")
                 let audioCount = ((try? await AVURLAsset(url: outputURL).loadTracks(withMediaType: .audio)) ?? []).count
