@@ -455,3 +455,24 @@ enum MP4PartMerger {
         (0..<8).map { UInt8((value >> (56 - UInt64($0) * 8)) & 0xFF) }
     }
 }
+
+private extension Data {
+    func u32(at offset: Int) -> UInt32 {
+        guard offset >= 0, offset + 4 <= count else { return 0 }
+        var value: UInt32 = 0
+        for index in 0..<4 { value = (value << 8) | UInt32(self[startIndex + offset + index]) }
+        return value
+    }
+
+    func u64(at offset: Int) -> UInt64 {
+        guard offset >= 0, offset + 8 <= count else { return 0 }
+        var value: UInt64 = 0
+        for index in 0..<8 { value = (value << 8) | UInt64(self[startIndex + offset + index]) }
+        return value
+    }
+
+    func ascii(at offset: Int, length: Int) -> String {
+        guard offset >= 0, offset + length <= count else { return "????" }
+        return String(decoding: self[(startIndex + offset)..<(startIndex + offset + length)], as: UTF8.self)
+    }
+}
