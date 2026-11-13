@@ -116,7 +116,7 @@ enum AVRemuxPipeline {
         keyframeLock.lock()
         lastKeyframeIndices = []
         keyframeLock.unlock()
-        let videoQueue = ItemQueue<VideoItem>(capacity: 64)
+        let videoQueue = ItemQueue<VideoItem>(capacity: 128)
         let audioQueue = ItemQueue<Data>(capacity: 2000)
         let pumpQueue = DispatchQueue(label: "remux.pump", qos: .userInitiated)
         let doneGroup = DispatchGroup()
@@ -167,6 +167,11 @@ enum AVRemuxPipeline {
                 pocMissing += count
                 for idx in 0..<count { ptsByIndex[idx] = displayCursor + Int64(idx) }
             }
+            // 关键：必须在入队前创建 writer。队列容量有限，
+            // 若先 push 再等"累计 N 帧才建 writer"，队列填满后 push 永久阻塞（表现为卡在 0%）
+            if writer == nil, currentFailure() == nil {
+                do { try makeWriterIfNeeded(force: true) } catch { setFailure(error.localizedDescription) }
+            }
             for index in 0..<count {
                 let item = VideoItem(data: gop[index].data,
                                      pts: ptsByIndex[index] * frameStep,
@@ -180,7 +185,7 @@ enum AVRemuxPipeline {
             if currentFailure() != nil { videoQueue.finish() }
             if writer == nil {
                 pushedBeforeWriter += count
-                if pushedBeforeWriter >= 200 {
+                if pushedBeforeWriter >= 32 {
                     do { try makeWriterIfNeeded(force: true) } catch { setFailure(error.localizedDescription) }
                 }
             }
@@ -463,7 +468,8 @@ enum AVRemuxPipeline {
             let dts = lastVideoDTS
             lock.unlock()
 
-            if frames == lastFrameSnapshot, writer?.status == .writing {
+            // 只要帧数不增长就计入停滞（包含 writer 尚未创建的情况）
+            if frames == lastFrameSnapshot {
                 stallTicks += 1
             } else {
                 stallTicks = 0
