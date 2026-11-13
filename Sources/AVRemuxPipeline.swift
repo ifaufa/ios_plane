@@ -287,15 +287,29 @@ enum AVRemuxPipeline {
             var audioPumpFinished = false
             doneGroup.enter()
             vInput.requestMediaDataWhenReady(on: pumpQueue) {
+                var idleSince: Date?
                 while vInput.isReadyForMoreMediaData {
-                    guard let item = videoQueue.pop(waitSeconds: 0.5) else {
-                        if videoQueue.isFinished, !videoPumpFinished {
-                            videoPumpFinished = true
-                            vInput.markAsFinished()
-                            doneGroup.leave()
+                    guard let item = videoQueue.pop(waitSeconds: 0.2) else {
+                        if videoQueue.isFinished {
+                            if !videoPumpFinished {
+                                videoPumpFinished = true
+                                vInput.markAsFinished()
+                                doneGroup.leave()
+                            }
+                            return
                         }
-                        return
+                        // 关键修复：队列暂时为空但尚未收到结束信号时必须继续等待。
+                        // 旧实现直接 return，而 requestMediaDataWhenReady 不会再回调 → 永久死锁（进度停在 96%）
+                        if idleSince == nil { idleSince = Date() }
+                        if let idleSince, Date().timeIntervalSince(idleSince) > 60 {
+                            setFailure("视频泵等待数据超时（队列已空但未收到结束信号）")
+                            if !videoPumpFinished { videoPumpFinished = true; doneGroup.leave() }
+                            vInput.markAsFinished()
+                            return
+                        }
+                        continue
                     }
+                    idleSince = nil
                     guard let buffer = makeSampleBuffer(data: item.data,
                                                         format: videoDesc,
                                                         pts: item.pts,
@@ -331,15 +345,27 @@ enum AVRemuxPipeline {
             if let aInput, let aDesc {
                 doneGroup.enter()
                 aInput.requestMediaDataWhenReady(on: pumpQueue) {
+                    var idleSince: Date?
                     while aInput.isReadyForMoreMediaData {
-                        guard let data = audioQueue.pop(waitSeconds: 0.5) else {
-                            if audioQueue.isFinished, !audioPumpFinished {
-                                audioPumpFinished = true
-                                aInput.markAsFinished()
-                                doneGroup.leave()
+                        guard let data = audioQueue.pop(waitSeconds: 0.2) else {
+                            if audioQueue.isFinished {
+                                if !audioPumpFinished {
+                                    audioPumpFinished = true
+                                    aInput.markAsFinished()
+                                    doneGroup.leave()
+                                }
+                                return
                             }
-                            return
+                            if idleSince == nil { idleSince = Date() }
+                            if let idleSince, Date().timeIntervalSince(idleSince) > 60 {
+                                setFailure("音频泵等待数据超时")
+                                if !audioPumpFinished { audioPumpFinished = true; doneGroup.leave() }
+                                aInput.markAsFinished()
+                                return
+                            }
+                            continue
                         }
+                        idleSince = nil
                         let index = audioFrameIndex
                         audioFrameIndex += 1
                         guard let buffer = makeSampleBuffer(data: data,
@@ -363,7 +389,6 @@ enum AVRemuxPipeline {
                 }
             }
         }
-
         demuxer.onInfo = { _, _ in }
 
         demuxer.onVideoFrame = { data, pts, dts, isKey, isRef, poc in
@@ -412,8 +437,34 @@ enum AVRemuxPipeline {
             }
         }
 
+        var processedSegments = 0
         let excludedIndices = Set(state.excluded ?? [])
         let total = max(1, state.segmentURLs.count - excludedIndices.count)
+        // 心跳 + 停滞看门狗：卡住时能给出可诊断信息并自动中止
+        let heartbeatQueue = DispatchQueue(label: "remux.heartbeat")
+        var lastFrameSnapshot = -1
+        var stallTicks = 0
+        let heartbeat = DispatchSource.makeTimerSource(queue: heartbeatQueue)
+        heartbeat.schedule(deadline: .now() + 5, repeating: 5)
+        heartbeat.setEventHandler {
+            lock.lock()
+            let frames = videoFrames
+            lock.unlock()
+            if frames == lastFrameSnapshot, writer?.status == .writing {
+                stallTicks += 1
+            } else {
+                stallTicks = 0
+            }
+            lastFrameSnapshot = frames
+            DiagnosticsLog.write("[转MP4] 心跳 段=\(processedSegments) 帧=\(frames) 队列=\(videoQueue.depth) ready=\(videoInput?.isReadyForMoreMediaData ?? false) status=\(writer?.status.rawValue ?? -1) 停滞=\(stallTicks)")
+            if stallTicks >= 12 {
+                DiagnosticsLog.write("[转MP4] 检测到写入停滞约 60 秒，强制中止")
+                writer?.cancelWriting()
+            }
+        }
+        heartbeat.resume()
+        defer { heartbeat.cancel() }
+
         for index in state.durations.indices {
             if currentFailure() != nil { break }
             guard !excludedIndices.contains(index) else { continue }
@@ -434,6 +485,7 @@ enum AVRemuxPipeline {
             if index == 0, writer == nil, currentFailure() == nil {
                 do { try makeWriterIfNeeded(force: true) } catch { setFailure(error.localizedDescription) }
             }
+            processedSegments = index + 1
             progress?(Double(index + 1) / Double(total))
         }
         demuxer.finish()
@@ -442,10 +494,21 @@ enum AVRemuxPipeline {
         audioQueue.finish()
 
         if let writer {
-            _ = doneGroup.wait(timeout: .now() + 600)
+            let waited = doneGroup.wait(timeout: .now() + 120)
+            if waited == .timedOut {
+                DiagnosticsLog.write("[转MP4] 收尾等待超时 段=\(processedSegments)/\(total) 帧=\(videoFrames) 队列=\(videoQueue.depth) ready=\(videoInput?.isReadyForMoreMediaData ?? false) status=\(writer.status.rawValue)")
+                writer.cancelWriting()
+                throw RemuxError(message: "收尾超时（写入停滞），已安全中止，原分片已保留")
+            }
             let semaphore = DispatchSemaphore(value: 0)
             writer.finishWriting { semaphore.signal() }
-            _ = semaphore.wait(timeout: .now() + 300)
+            let finished = semaphore.wait(timeout: .now() + 120)
+            if finished == .timedOut {
+                DiagnosticsLog.write("[转MP4] finishWriting 超时 帧=\(videoFrames) 队列=\(videoQueue.depth) status=\(writer.status.rawValue)")
+                writer.cancelWriting()
+                try? fm.removeItem(at: destination)
+                throw RemuxError(message: "收尾超时（写入停滞），已安全中止，原分片已保留")
+            }
             if let failure = currentFailure() {
                 writer.cancelWriting()
                 try? fm.removeItem(at: destination)
