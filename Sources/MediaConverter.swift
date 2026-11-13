@@ -21,6 +21,13 @@ enum MediaConverter {
 
         cleanStaleTemps(in: dir)
 
+        // 编码预检：10-bit H.264 无法在 App 内解码/封装，提前明确失败
+        let verdict = CodecProbe.probeLocal(dir: dir)
+        DiagnosticsLog.write("[转MP4] 编码预检 \(verdict.detail)")
+        if !verdict.supported {
+            throw ConversionError(message: "该视频为 \(verdict.detail)，iOS 不支持解码，无法在 App 内转为 MP4。建议用外部播放器或电脑处理。")
+        }
+
         let dirSize = directorySize(dir)
         let estimatedFinal = Int64(Double(dirSize) * 0.75)
         let required = dirSize + estimatedFinal + 300 * 1024 * 1024
@@ -149,12 +156,17 @@ enum MediaConverter {
         }
 
         // 3) 最后兜底：合并后用系统导出（可能重编码）
+        //    大文件（>1.5G）跳过：历史上该路径在导出 3G+ 文件时会内存暴涨被系统杀掉
         if !produced {
-            let report = try LocalHLS.merge(state: state, dir: dir, container: state.container)
-            let mergedURL = report.url
-            defer { try? fm.removeItem(at: mergedURL) }
-            try await LocalHLS.exportMP4(from: mergedURL, to: outputURL)
-            produced = true
+            if dirSize > 1_500_000_000 {
+                DiagnosticsLog.write("[转MP4] 跳过系统导出兜底（源 \(dirSize / (1024 * 1024))MB 过大，避免内存崩溃）")
+            } else {
+                let report = try LocalHLS.merge(state: state, dir: dir, container: state.container)
+                let mergedURL = report.url
+                defer { try? fm.removeItem(at: mergedURL) }
+                try await LocalHLS.exportMP4(from: mergedURL, to: outputURL)
+                produced = true
+            }
         }
 
         DiagnosticsLog.write("[转MP4] 结构自检 \(MP4Inspector.describe(outputURL))")
@@ -238,6 +250,7 @@ enum MediaConverter {
             let name = url.lastPathComponent.lowercased()
             let isTemp = name.hasSuffix(".part") || name.hasSuffix(".tmp")
                 || name.hasSuffix(".download") || name.hasSuffix(".vonly.mp4")
+                || name == "merged.ts" || name == "merged.mp4"
             guard isTemp else { continue }
             let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
             if (try? fm.removeItem(at: url)) != nil {

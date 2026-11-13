@@ -9,6 +9,9 @@ struct AddDownloadView: View {
     @State private var rows: [Candidate] = []
     @State private var isChecking = false
     @State private var hint: String?
+    @State private var pendingUnsupported: [(url: URL, title: String, detail: String)] = []
+    @State private var showUnsupported = false
+    @State private var isProbing = false
 
     var body: some View {
         NavigationStack {
@@ -34,6 +37,16 @@ struct AddDownloadView: View {
                 Button("好", role: .cancel) {}
             } message: {
                 Text(hint ?? "")
+            }
+            .alert("检测到不支持的编码", isPresented: $showUnsupported) {
+                Button("取消", role: .cancel) { pendingUnsupported = [] }
+                Button("仍然下载") {
+                    for item in pendingUnsupported { downloads.start(url: item.url, title: item.title) }
+                    pendingUnsupported = []
+                    dismiss()
+                }
+            } message: {
+                Text(unsupportedMessage)
             }
             .onAppear(perform: fillFromClipboard)
         }
@@ -147,18 +160,55 @@ struct AddDownloadView: View {
     }
 
     private func submit() {
+        var items: [(url: URL, title: String, codecs: String?)] = []
         for row in rows where row.selected && row.isSelectable {
             var target = row.url
             var title = row.title
+            var codecs: String?
             if let info = row.info, info.isMaster,
                let best = info.variants.max(by: { ($0.bandwidth ?? 0) < ($1.bandwidth ?? 0) }),
                let variantURL = URL(string: best.url) {
                 target = variantURL
+                codecs = best.codecs
                 if let resolution = best.resolution { title += " \(resolution)" }
+            } else if let info = row.info {
+                codecs = info.variants.first?.codecs
             }
-            downloads.start(url: target, title: title)
+            items.append((target, title, codecs))
         }
-        dismiss()
+        guard !items.isEmpty else { return }
+
+        isProbing = true
+        Task {
+            var unsupported: [(url: URL, title: String, detail: String)] = []
+            var startable: [(URL, String)] = []
+            for item in items {
+                let verdict = await CodecProbe.probe(playlistURL: item.url, codecsHint: item.codecs)
+                DiagnosticsLog.write("[编码预检] \(item.title) \(verdict.detail) 支持=\(verdict.supported)")
+                if verdict.supported {
+                    startable.append((item.url, item.title))
+                } else {
+                    unsupported.append((item.url, item.title, verdict.detail))
+                }
+            }
+            await MainActor.run {
+                isProbing = false
+                for (url, title) in startable { downloads.start(url: url, title: title) }
+                if unsupported.isEmpty {
+                    dismiss()
+                } else {
+                    pendingUnsupported = unsupported
+                    showUnsupported = true
+                }
+            }
+        }
+    }
+
+    private var unsupportedMessage: String {
+        let lines = pendingUnsupported.prefix(4).map { "· \($0.title)：\($0.detail)" }
+        let more = pendingUnsupported.count > 4 ? "\n… 另有 \(pendingUnsupported.count - 4) 个" : ""
+        return (["以下视频为 10-bit H.264，iOS 无法在 App 内播放与转换 MP4："] + lines + [more, "", "建议取消下载，或在外部播放器/电脑上使用。"])
+            .joined(separator: "\n")
     }
 
     // MARK: - 无状态工具

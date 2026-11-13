@@ -293,6 +293,7 @@ struct ContentView: View {
                 }
             }
             .task {
+                library.cleanStaleMergeFiles()
                 await ThumbnailService.pregenerate(items: library.items) { library.localURL(for: $0) }
             }
             .onChange(of: playback.errorNotice) { notice in

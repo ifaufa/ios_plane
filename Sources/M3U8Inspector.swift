@@ -5,6 +5,7 @@ struct M3U8Variant: Hashable, Identifiable {
     var url: String
     var bandwidth: Int?
     var resolution: String?
+    var codecs: String?
 }
 
 struct M3U8Info: Equatable {
@@ -66,7 +67,8 @@ enum M3U8Inspector {
                     pending = M3U8Variant(
                         url: "",
                         bandwidth: Int(attrs["BANDWIDTH"] ?? ""),
-                        resolution: attrs["RESOLUTION"]
+                        resolution: attrs["RESOLUTION"],
+                        codecs: attrs["CODECS"]
                     )
                 } else if !line.isEmpty, !line.hasPrefix("#"), var variant = pending {
                     variant.url = URL(string: line, relativeTo: baseURL)?.absoluteString ?? line

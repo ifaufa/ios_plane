@@ -229,6 +229,30 @@ final class VideoLibrary: ObservableObject {
         return total
     }
 
+    /// 清理历史转换失败遗留的 merged.* 中间文件（可释放大量空间）
+    func cleanStaleMergeFiles() {
+        let fm = FileManager.default
+        guard let dirs = try? fm.contentsOfDirectory(at: Self.assetsDir, includingPropertiesForKeys: [.isDirectoryKey]) else { return }
+        var removed = 0
+        var freed: Int64 = 0
+        for dir in dirs {
+            let isDir = (try? dir.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+            guard isDir else { continue }
+            for name in ["merged.ts", "merged.mp4"] {
+                let url = dir.appendingPathComponent(name)
+                guard fm.fileExists(atPath: url.path) else { continue }
+                let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                if (try? fm.removeItem(at: url)) != nil {
+                    removed += 1
+                    freed += Int64(size)
+                }
+            }
+        }
+        if removed > 0 {
+            DiagnosticsLog.write("[清理] 删除遗留中间文件 \(removed) 个，释放 \(freed / (1024 * 1024))MB")
+        }
+    }
+
     private func migrateLegacyAssets() {
         let fm = FileManager.default
         guard let files = try? fm.contentsOfDirectory(at: Self.legacyAssetsDir, includingPropertiesForKeys: nil),
