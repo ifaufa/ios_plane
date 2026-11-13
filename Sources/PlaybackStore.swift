@@ -36,6 +36,8 @@ final class PlaybackStore: ObservableObject {
     private var recoveryAttempts = 0
     private var loadStartedAt: Date?
     private var loadReported = false
+    private var didMuteProbe = false
+    private var intendedStart: Double = 0
     private var scrubbing = false
     private var expectsPlayingBeforeScrub = false
     private var interruptionObserver: NSObjectProtocol?
@@ -88,12 +90,25 @@ final class PlaybackStore: ObservableObject {
         pauseRecoveries = 0
 
         configureAudioSession()
-        loadItem(startAt: video.lastPosition ?? 0)
+
+        let resumePosition = video.lastPosition ?? 0
+        var seekable = true
+        if !isHLS {
+            seekable = Self.hasSyncSampleTable(url) ?? false
+        }
+        let startAt = seekable ? resumePosition : 0
+        intendedStart = startAt
+        didMuteProbe = false
+        if !seekable, resumePosition > 3 {
+            DiagnosticsLog.write("[播放] 该文件缺少同步样本表(stss)，忽略续播进度 \(Int(resumePosition))s，改为从头播放")
+        }
+
+        loadItem(startAt: startAt)
         play()
         attachObserver()
         startHealthTimer()
         Task { await reportAssetInfo() }
-        DiagnosticsLog.write("[播放] 打开 \(video.title) 源=\(url.lastPathComponent)")
+        DiagnosticsLog.write("[播放] 打开 \(video.title) 源=\(url.lastPathComponent) 续播=\(Int(startAt))s 可精确seek=\(seekable)")
     }
 
     private func loadItem(startAt seconds: Double) {
@@ -118,7 +133,7 @@ final class PlaybackStore: ObservableObject {
         player.replaceCurrentItem(with: item)
         if seconds > 3 {
             player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600),
-                        toleranceBefore: .zero, toleranceAfter: .zero)
+                        toleranceBefore: .zero, toleranceAfter: .positiveInfinity)
         }
     }
 
@@ -344,8 +359,33 @@ final class PlaybackStore: ObservableObject {
                 if Date().timeIntervalSince(lastRecoveryTime) > 2, pauseRecoveries < 6 {
                     lastRecoveryTime = Date()
                     pauseRecoveries += 1
-                    DiagnosticsLog.write("[播放] 检测到意外暂停，自动恢复（第 \(pauseRecoveries) 次）")
+                    let current = player.currentTime().seconds
+                    let reason = player.reasonForWaitingToPlay?.rawValue ?? "-"
+                    let keepUp = player.currentItem?.isPlaybackLikelyToKeepUp ?? false
+                    DiagnosticsLog.write("[播放] 检测到意外暂停（第 \(pauseRecoveries) 次）位置=\(Int(current.isFinite ? current : -1))s 期望=\(Int(intendedStart))s 原因=\(reason) 可播=\(keepUp)")
+
+                    // 位置明显没到位：退回从头播放
+                    if abs(current - intendedStart) > max(3, intendedStart * 0.1), current < intendedStart - 1 {
+                        DiagnosticsLog.write("[播放] seek 未到位，回退从头播放")
+                        intendedStart = 0
+                        loadItem(startAt: 0)
+                        play()
+                        return
+                    }
+
                     ensurePlaying()
+
+                    // 第 2 次仍失败：静音探针，判断是否为音频轨问题
+                    if pauseRecoveries >= 2, !didMuteProbe {
+                        didMuteProbe = true
+                        player.isMuted = true
+                        player.play()
+                        let probeRate = player.rate
+                        DiagnosticsLog.write("[播放] 静音探针 rate=\(String(format: "%.1f", probeRate))（>0 说明音频轨解码异常）")
+                        if probeRate == 0 {
+                            player.isMuted = false
+                        }
+                    }
                 }
             }
         } else {
@@ -356,6 +396,36 @@ final class PlaybackStore: ObservableObject {
                 pauseRecoveries = 0
             }
         }
+    }
+
+    /// 探测 MP4 是否含同步样本表（stss）；缺失时精确 seek 不可靠
+    private static func hasSyncSampleTable(_ url: URL) -> Bool? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        guard let size = try? handle.seekToEnd() else { return nil }
+
+        var offset: UInt64 = 0
+        while offset + 8 <= size {
+            try? handle.seek(toOffset: offset)
+            guard let header = try? handle.read(upToCount: 16), header.count >= 8 else { break }
+            var boxSize = UInt64(header.u32(at: 0))
+            let type = header.ascii(at: 4, length: 4)
+            var headerLength: UInt64 = 8
+            if boxSize == 1, header.count >= 16 {
+                boxSize = header.u64(at: 8)
+                headerLength = 16
+            } else if boxSize == 0 {
+                boxSize = size - offset
+            }
+            guard boxSize >= headerLength else { break }
+            if type == "moov" {
+                try? handle.seek(toOffset: offset)
+                guard let data = try? handle.read(upToCount: Int(min(boxSize, 16 << 20))) else { return nil }
+                return data.range(of: Data("stss".utf8)) != nil
+            }
+            offset += boxSize
+        }
+        return nil
     }
 
     private func reportAssetInfo() async {
@@ -384,5 +454,26 @@ final class PlaybackStore: ObservableObject {
         DiagnosticsLog.write("[播放] 自愈第 \(recoveryAttempts) 次，位置=\(Int(position))s 失败=\(failed)")
         loadItem(startAt: position)
         play()
+    }
+}
+
+private extension Data {
+    func u32(at offset: Int) -> UInt32 {
+        guard offset >= 0, offset + 4 <= count else { return 0 }
+        var value: UInt32 = 0
+        for index in 0..<4 { value = (value << 8) | UInt32(self[startIndex + offset + index]) }
+        return value
+    }
+
+    func u64(at offset: Int) -> UInt64 {
+        guard offset >= 0, offset + 8 <= count else { return 0 }
+        var value: UInt64 = 0
+        for index in 0..<8 { value = (value << 8) | UInt64(self[startIndex + offset + index]) }
+        return value
+    }
+
+    func ascii(at offset: Int, length: Int) -> String {
+        guard offset >= 0, offset + length <= count else { return "????" }
+        return String(decoding: self[(startIndex + offset)..<(startIndex + offset + length)], as: UTF8.self)
     }
 }
