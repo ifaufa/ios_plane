@@ -103,7 +103,7 @@ enum MediaConverter {
                     if videoCount != 1 { reasons.append("产物视频轨=\(videoCount)") }
                     if audioCount < 1 { reasons.append("产物无音频轨") }
                     if !wroteStss { reasons.append("stss 未写入") }
-                    throw RemuxError(message: "转换失败：\(reasons.joined(separator: "，"))。可在设置中关闭“转换时写入同步样本表(stss)”后重试，或反馈该日志")
+                    throw PlaylistError.network("转换失败：\(reasons.joined(separator: "，"))。可在设置中关闭“转换时写入同步样本表(stss)”后重试，或反馈该日志")
                 }
                 produced = true
             } catch {
