@@ -405,6 +405,12 @@ struct DownloadRow: View {
         VStack(alignment: .leading, spacing: 6) {
             Text(task.title).font(.headline).lineLimit(1)
 
+            if let codec = task.codecStatus {
+                Text(codec)
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(Self.codecColor(codec))
+            }
+
             switch task.status {
             case .queued:
                 Text("排队等待中（已有 \(downloads.maxConcurrent) 个任务在下载）")
@@ -448,6 +454,12 @@ struct DownloadRow: View {
             .buttonStyle(.borderless)
         }
         .padding(.vertical, 4)
+    }
+
+    static func codecColor(_ status: String) -> Color {
+        if status.hasPrefix("不支持") { return .red }
+        if status.hasPrefix("支持") { return .green }
+        return .orange
     }
 
     static func speedText(_ bytesPerSecond: Double) -> String {

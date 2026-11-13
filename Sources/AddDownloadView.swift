@@ -41,7 +41,7 @@ struct AddDownloadView: View {
             .alert("检测到不支持的编码", isPresented: $showUnsupported) {
                 Button("取消", role: .cancel) { pendingUnsupported = [] }
                 Button("仍然下载") {
-                    for item in pendingUnsupported { downloads.start(url: item.url, title: item.title) }
+                    for item in pendingUnsupported { downloads.start(url: item.url, title: item.title, codecStatus: "不支持 \(item.detail)") }
                     pendingUnsupported = []
                     dismiss()
                 }
@@ -181,19 +181,20 @@ struct AddDownloadView: View {
         isProbing = true
         Task {
             var unsupported: [(url: URL, title: String, detail: String)] = []
-            var startable: [(URL, String)] = []
+            var startable: [(URL, String, String)] = []
             for item in items {
                 let verdict = await CodecProbe.probe(playlistURL: item.url, codecsHint: item.codecs)
                 DiagnosticsLog.write("[编码预检] \(item.title) \(verdict.detail) 支持=\(verdict.supported)")
+                let status = Self.codecStatusText(verdict)
                 if verdict.supported {
-                    startable.append((item.url, item.title))
+                    startable.append((item.url, item.title, status))
                 } else {
                     unsupported.append((item.url, item.title, verdict.detail))
                 }
             }
             await MainActor.run {
                 isProbing = false
-                for (url, title) in startable { downloads.start(url: url, title: title) }
+                for (url, title, status) in startable { downloads.start(url: url, title: title, codecStatus: status) }
                 if unsupported.isEmpty {
                     dismiss()
                 } else {
@@ -202,6 +203,14 @@ struct AddDownloadView: View {
                 }
             }
         }
+    }
+
+    static func codecStatusText(_ verdict: CodecProbe.Verdict) -> String {
+        if !verdict.supported { return "不支持 \(verdict.detail)" }
+        if verdict.detail.hasPrefix("H.264") || verdict.detail.hasPrefix("HEVC") {
+            return "支持 \(verdict.detail)"
+        }
+        return "未知编码（\(verdict.detail)）"
     }
 
     private var unsupportedMessage: String {

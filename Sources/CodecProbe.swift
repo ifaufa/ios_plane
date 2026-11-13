@@ -45,6 +45,14 @@ enum CodecProbe {
             return .unknown("播放列表里没有分片")
         }
         if playlist.isEncrypted {
+            if let key = playlist.key, key.method.uppercased() == "AES-128",
+               let verdict = await probeEncrypted(playlist: playlist,
+                                                  segmentURL: first.url,
+                                                  keyURI: key.uri,
+                                                  iv: key.iv,
+                                                  mediaSequence: playlist.mediaSequence) {
+                return verdict
+            }
             return .unknown("加密源无法预判编码")
         }
 
@@ -70,6 +78,64 @@ enum CodecProbe {
             return verdict(for: profile)
         }
         return .unknown("无法识别编码（已下载片段不足以解析）")
+    }
+
+    // MARK: - 加密源探测（AES-128）
+
+    /// 拉 KEY → 解密首段 → 解析 SPS。IV 缺失时按 HLS 规范用媒体序列号推导
+    private static func probeEncrypted(playlist: ParsedMediaPlaylist,
+                                       segmentURL: URL,
+                                       keyURI: URL,
+                                       iv: Data?,
+                                       mediaSequence: Int) async -> Verdict? {
+        var keyRequest = URLRequest(url: keyURI)
+        keyRequest.timeoutInterval = 8
+        for (name, value) in RequestSettings.headers {
+            keyRequest.setValue(value, forHTTPHeaderField: name)
+        }
+        guard let (keyData, keyResponse) = try? await URLSession.shared.data(for: keyRequest),
+              let keyHTTP = keyResponse as? HTTPURLResponse,
+              (200..<300).contains(keyHTTP.statusCode),
+              keyData.count == 16 else {
+            DiagnosticsLog.write("[编码预检] KEY 获取失败 \(keyURI.lastPathComponent)")
+            return nil
+        }
+
+        var segmentRequest = URLRequest(url: segmentURL)
+        segmentRequest.timeoutInterval = 10
+        segmentRequest.setValue("bytes=0-1048575", forHTTPHeaderField: "Range")
+        for (name, value) in RequestSettings.headers {
+            segmentRequest.setValue(value, forHTTPHeaderField: name)
+        }
+        guard let (cipher, response) = try? await URLSession.shared.data(for: segmentRequest),
+              let http = response as? HTTPURLResponse,
+              (200..<300).contains(http.statusCode) || http.statusCode == 206 else {
+            DiagnosticsLog.write("[编码预检] 加密首段拉取失败")
+            return nil
+        }
+
+        let ivData = iv ?? derivedIV(mediaSequence: mediaSequence)
+        // CBC 要求整块对齐
+        let aligned = cipher.count - (cipher.count % 16)
+        guard aligned > 0,
+              let plain = MediaCrypto.decrypt(data: cipher.prefix(aligned), key: keyData, iv: ivData),
+              let profile = videoProfile(fromTS: plain) else {
+            DiagnosticsLog.write("[编码预检] 解密后仍无法解析 SPS（可能为 SAMPLE-AES）")
+            return nil
+        }
+        return verdict(for: profile)
+    }
+
+    /// IV 缺失时：媒体序列号作为 128 位大端整数
+    private static func derivedIV(mediaSequence: Int) -> Data {
+        var bytes = Data(repeating: 0, count: 16)
+        var sequence = UInt64(max(0, mediaSequence)).bigEndian
+        withUnsafeBytes(of: &sequence) { buffer in
+            for index in 0..<8 {
+                bytes[8 + index] = buffer[index]
+            }
+        }
+        return bytes
     }
 
     // MARK: - 本地探测（转换前）

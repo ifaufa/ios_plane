@@ -14,6 +14,8 @@ struct DownloadTaskInfo: Identifiable, Equatable {
     var restartedFromZero: Bool = false
     /// 实时下载速度（字节/秒）
     var speed: Double = 0
+    /// 编码预检结果（支持 / 不支持 / 未知）
+    var codecStatus: String? = nil
 
     enum Status: Equatable {
         case queued
@@ -114,15 +116,17 @@ final class DownloadManager: NSObject, ObservableObject {
 
     // MARK: - 用户操作
 
-    func start(url: URL, title: String) {
+    func start(url: URL, title: String, codecStatus: String? = nil) {
         let id = url.absoluteString
         guard !tasks.contains(where: { $0.id == id }) else { return }
 
         if activeCount < maxConcurrent {
             begin(url: url, title: title)
+            update(id) { $0.codecStatus = codecStatus }
         } else {
             pending.append((url, title))
-            tasks.append(DownloadTaskInfo(id: id, url: url, title: title, progress: 0, status: .queued))
+            tasks.append(DownloadTaskInfo(id: id, url: url, title: title, progress: 0,
+                                          status: .queued, codecStatus: codecStatus))
         }
     }
 

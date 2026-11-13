@@ -570,7 +570,15 @@ struct WebSnifferBrowser: View {
             .sheet(isPresented: $showCandidates) {
                 CandidateSheet(model: model) { items in
                     for item in items {
-                        downloads.start(url: item.url, title: item.title)
+                        Task {
+                        let verdict = await CodecProbe.probe(playlistURL: item.url, codecsHint: nil)
+                        DiagnosticsLog.write("[编码预检] \(item.title) \(verdict.detail) 支持=\(verdict.supported)")
+                        await MainActor.run {
+                            downloads.start(url: item.url,
+                                            title: item.title,
+                                            codecStatus: AddDownloadView.codecStatusText(verdict))
+                        }
+                    }
                     }
                     model.clearSelection()
                     showCandidates = false
