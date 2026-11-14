@@ -66,11 +66,11 @@ enum BackupService {
 
         let manifest = BackupManifest(version: 1,
                                       createdAt: Date(),
+                                      kind: kind,
                                       library: items,
                                       entries: entries,
                                       bookmarks: bookmarks,
-                                      bookmarkFolders: bookmarkFolders,
-                                      kind: kind)
+                                      bookmarkFolders: bookmarkFolders)
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         let manifestData = try encoder.encode(manifest)
