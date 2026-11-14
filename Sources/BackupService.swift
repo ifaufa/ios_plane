@@ -12,6 +12,8 @@ struct BackupManifest: Codable {
     }
     var version: Int
     var createdAt: Date
+    /// "video" / "bookmarks" / nil(=旧版合并备份)
+    var kind: String?
     var library: [VideoItem]
     var entries: [Entry]
     /// 收藏夹（旧备份没有该字段）
@@ -38,16 +40,22 @@ enum BackupService {
         var library: [VideoItem]
         var bookmarks: [Bookmark]
         var bookmarkFolders: [BookmarkFolder]
+        /// "video" / "bookmarks" / "all"
+        var kind: String
     }
 
     /// 打包 Documents/Assets 下的全部文件 + 台账 + 收藏夹
     /// 直接写最终归档（不再生成中间 payload），峰值占用从 3 份降到 2 份
-    static func makeArchive(items: [VideoItem], bookmarks: [Bookmark], bookmarkFolders: [BookmarkFolder] = []) throws -> (url: URL, files: Int) {
+    static func makeArchive(items: [VideoItem],
+                            bookmarks: [Bookmark],
+                            bookmarkFolders: [BookmarkFolder] = [],
+                            kind: String = "all",
+                            includeFiles: Bool = true) throws -> (url: URL, files: Int) {
         let fm = FileManager.default
         cleanupStaleTemps()
 
-        // 先扫描一遍，拿到路径与大小，才能把偏移量写进清单
-        let sources = try collectFiles()
+        // 先扫描一遍，拿到路径与大小，才能把偏移量写进清单（纯收藏备份不扫描）
+        let sources = includeFiles ? try collectFiles() : []
         var entries: [BackupManifest.Entry] = []
         var offset: UInt64 = 0
         for source in sources {
@@ -61,7 +69,8 @@ enum BackupService {
                                       library: items,
                                       entries: entries,
                                       bookmarks: bookmarks,
-                                      bookmarkFolders: bookmarkFolders)
+                                      bookmarkFolders: bookmarkFolders,
+                                      kind: kind)
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         let manifestData = try encoder.encode(manifest)
@@ -77,7 +86,13 @@ enum BackupService {
 
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd-HHmm"
-        let archiveURL = tmpDir.appendingPathComponent("PlaneM3U8-\(formatter.string(from: Date())).plbk")
+        let prefix: String
+        switch kind {
+        case "video": prefix = "PlaneM3U8-Video"
+        case "bookmarks": prefix = "PlaneM3U8-Bookmarks"
+        default: prefix = "PlaneM3U8"
+        }
+        let archiveURL = tmpDir.appendingPathComponent("\(prefix)-\(formatter.string(from: Date())).plbk")
         guard fm.createFile(atPath: archiveURL.path, contents: nil) else {
             throw ArchiveError(message: "无法创建备份文件")
         }
@@ -200,7 +215,8 @@ enum BackupService {
                              skipped: skipped,
                              library: manifest.library,
                              bookmarks: manifest.bookmarks ?? [],
-                             bookmarkFolders: manifest.bookmarkFolders ?? [])
+                             bookmarkFolders: manifest.bookmarkFolders ?? [],
+                             kind: manifest.kind ?? "all")
     }
 
     /// 兼容历史备份中的绝对路径（/private/var/... 或 /var/... 前缀差异）
@@ -301,15 +317,61 @@ final class BackupManager: ObservableObject {
         exportURL = nil
     }
 
-    func backup(items: [VideoItem], bookmarks: [Bookmark], bookmarkFolders: [BookmarkFolder] = []) {
+    func backupAll(items: [VideoItem], bookmarks: [Bookmark], bookmarkFolders: [BookmarkFolder] = []) {
+        runBackup(items: items, bookmarks: bookmarks, folders: bookmarkFolders, kind: "all")
+    }
+
+    func backupVideo(items: [VideoItem]) {
+        runBackup(items: items, bookmarks: [], folders: [], kind: "video")
+    }
+
+    func backupBookmarks(bookmarks: [Bookmark], bookmarkFolders: [BookmarkFolder]) {
+        runBackup(items: [], bookmarks: bookmarks, folders: bookmarkFolders, kind: "bookmarks")
+    }
+
+    /// 收藏导出为纯 JSON（便于电脑查看/编辑）
+    func exportBookmarksJSON(bookmarks: [Bookmark], bookmarkFolders: [BookmarkFolder]) {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent("PlaneBookmarks-\(UUID().uuidString)", isDirectory: true)
+        do {
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyyMMdd-HHmm"
+            let url = dir.appendingPathComponent("PlaneM3U8-Bookmarks-\(formatter.string(from: Date())).json")
+
+            struct Payload: Codable {
+                var exportedAt: Date
+                var folders: [BookmarkFolder]
+                var items: [Bookmark]
+            }
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+            let data = try encoder.encode(Payload(exportedAt: Date(), folders: bookmarkFolders, items: bookmarks))
+            try data.write(to: url, options: [.atomic])
+
+            exportDirectory = dir
+            exportURL = url
+            DiagnosticsLog.write("[备份] 收藏 JSON 导出 条目=\(bookmarks.count) 分组=\(bookmarkFolders.count)")
+        } catch {
+            try? fm.removeItem(at: dir)
+            alert = AlertInfo(title: "导出失败", message: error.localizedDescription)
+        }
+    }
+
+    private func runBackup(items: [VideoItem], bookmarks: [Bookmark], folders: [BookmarkFolder], kind: String) {
         isWorking = true
-        progressText = "正在打包备份…"
+        progressText = kind == "bookmarks" ? "正在打包收藏…" : "正在打包备份…"
         Task {
             do {
                 let result = try await Task.detached(priority: .userInitiated) {
-                    try BackupService.makeArchive(items: items, bookmarks: bookmarks, bookmarkFolders: bookmarkFolders)
+                    try BackupService.makeArchive(items: items,
+                                                  bookmarks: bookmarks,
+                                                  bookmarkFolders: folders,
+                                                  kind: kind,
+                                                  includeFiles: kind != "bookmarks")
                 }.value
-                if result.files == 0, !items.isEmpty {
+                if result.files == 0, !items.isEmpty, kind != "bookmarks" {
                     alert = AlertInfo(title: "备份未包含视频",
                                       message: "未在 Documents/Assets 中找到任何视频文件，本次备份只含台账，请确认视频仍在列表中没有显示「文件已丢失」。")
                 } else {
@@ -323,7 +385,7 @@ final class BackupManager: ObservableObject {
         }
     }
 
-    func restore(from pickedURL: URL, library: VideoLibrary) {
+    func restore(from pickedURL: URL, library: VideoLibrary, expecting: String? = nil) {
         isWorking = true
         progressText = "正在恢复备份…"
         Task {
@@ -333,10 +395,21 @@ final class BackupManager: ObservableObject {
                 let result = try await Task.detached(priority: .userInitiated) {
                     try BackupService.restore(from: pickedURL)
                 }.value
+                // 类型校验：选错入口时明确提示，避免误操作
+                if let expecting, result.kind != expecting, result.kind != "all" {
+                    let actual = result.kind == "video" ? "视频备份" : "收藏备份"
+                    let target = result.kind == "video" ? "恢复视频" : "恢复收藏"
+                    alert = AlertInfo(title: "备份类型不匹配",
+                                      message: "所选文件是\(actual)，请改用「\(target)」入口恢复。")
+                    isWorking = false
+                    return
+                }
+
                 library.merge(result.library)
                 let addedBookmarks = BookmarkStore.shared.merge(result.bookmarks, folders: result.bookmarkFolders)
 
-                var message = "共 \(result.total) 个文件条目，成功恢复 \(result.restored) 个，合并 \(result.library.count) 条记录、\(addedBookmarks) 条收藏。"
+                let kindText = result.kind == "video" ? "视频" : (result.kind == "bookmarks" ? "收藏" : "全部")
+                var message = "（\(kindText)备份）共 \(result.total) 个文件条目，成功恢复 \(result.restored) 个，合并 \(result.library.count) 条记录、\(addedBookmarks) 条收藏。"
                 if !result.skipped.isEmpty {
                     let preview = result.skipped.prefix(3).joined(separator: "；")
                     message += "\n\n跳过 \(result.skipped.count) 个：\(preview)"

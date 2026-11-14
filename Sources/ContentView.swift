@@ -14,6 +14,7 @@ struct ContentView: View {
     @State private var showBrowser = false
     @State private var showHeaders = false
     @State private var showImporter = false
+    @State private var restoreExpectation: String?
     @State private var selectionMode = false
     @State private var selected: Set<UUID> = []
     @State private var convertingID: UUID?
@@ -172,11 +173,53 @@ struct ContentView: View {
                             Label("诊断日志…", systemImage: "doc.text.magnifyingglass")
                         }
                         Divider()
-                        Button { backup.backup(items: library.items, bookmarks: BookmarkStore.shared.items, bookmarkFolders: BookmarkStore.shared.folders) } label: {
-                            Label("备份到文件…", systemImage: "square.and.arrow.up")
-                        }
-                        Button { showImporter = true } label: {
-                            Label("从备份恢复…", systemImage: "square.and.arrow.down")
+                        Menu {
+                            Button {
+                                backup.backupVideo(items: library.items)
+                            } label: {
+                                Label("备份视频到文件…", systemImage: "square.and.arrow.up")
+                            }
+                            Button {
+                                restoreExpectation = "video"
+                                showImporter = true
+                            } label: {
+                                Label("从文件恢复视频…", systemImage: "square.and.arrow.down")
+                            }
+                            Divider()
+                            Button {
+                                backup.backupBookmarks(bookmarks: BookmarkStore.shared.items,
+                                                       bookmarkFolders: BookmarkStore.shared.folders)
+                            } label: {
+                                Label("备份收藏到文件…", systemImage: "bookmark")
+                            }
+                            Button {
+                                restoreExpectation = "bookmarks"
+                                showImporter = true
+                            } label: {
+                                Label("从文件恢复收藏…", systemImage: "bookmark.fill")
+                            }
+                            Button {
+                                backup.exportBookmarksJSON(bookmarks: BookmarkStore.shared.items,
+                                                           bookmarkFolders: BookmarkStore.shared.folders)
+                            } label: {
+                                Label("导出收藏为 JSON…", systemImage: "curlybraces")
+                            }
+                            Divider()
+                            Button {
+                                backup.backupAll(items: library.items,
+                                                 bookmarks: BookmarkStore.shared.items,
+                                                 bookmarkFolders: BookmarkStore.shared.folders)
+                            } label: {
+                                Label("备份全部（视频+收藏）…", systemImage: "externaldrive.badge.timemachine")
+                            }
+                            Button {
+                                restoreExpectation = nil
+                                showImporter = true
+                            } label: {
+                                Label("从任意备份恢复…", systemImage: "arrow.down.doc")
+                            }
+                        } label: {
+                            Label("备份与恢复", systemImage: "archivebox")
                         }
                         Divider()
                         Button { library.reload() } label: {
@@ -193,7 +236,7 @@ struct ContentView: View {
             .fileImporter(isPresented: $showImporter, allowedContentTypes: [.data]) { result in
                 switch result {
                 case .success(let url):
-                    backup.restore(from: url, library: library)
+                    backup.restore(from: url, library: library, expecting: restoreExpectation)
                 case .failure(let error):
                     backup.alert = .init(title: "选择文件失败", message: error.localizedDescription)
                 }
