@@ -22,6 +22,9 @@ targets:
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
         UIFileSharingEnabled: true
+        NSLocalNetworkUsageDescription: 用于把本地分片视频通过 AirPlay 投屏到电视
+        NSBonjourServices:
+          - _http._tcp
         LSSupportsOpeningDocumentsInPlace: true
     settings:
       base:

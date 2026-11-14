@@ -8,6 +8,8 @@ final class LocalHTTPServer {
     private var listener: NWListener?
     private var root: URL?
     private(set) var port: UInt16?
+    /// 一次性访问令牌（AirPlay 时电视需带此参数，防止同网段他人访问）
+    private(set) var token: String = ""
     private let queue = DispatchQueue(label: "local.http.server")
 
     /// 允许多实例：每个 root 独立端口，互不干扰（播放 / 校验 / 转换各用各的）
@@ -24,7 +26,8 @@ final class LocalHTTPServer {
 
         let parameters = NWParameters.tcp
         parameters.allowLocalEndpointReuse = true
-        parameters.requiredLocalEndpoint = NWEndpoint.hostPort(host: .ipv4(.loopback), port: .any)
+        // 不再限定 127.0.0.1：改为监听所有接口，便于 AirPlay 时电视访问局域网地址。
+        // 通过一次性 token 限制访问，token 不匹配直接 403。
 
         let listener = try NWListener(using: parameters)
         let ready = DispatchSemaphore(value: 0)
@@ -52,6 +55,7 @@ final class LocalHTTPServer {
             throw NSError(domain: "LocalHTTPServer", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "本地服务启动失败"])
         }
+        self.token = String(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(12))
         self.listener = listener
         self.root = newRoot
         self.port = assignedPort
@@ -94,6 +98,47 @@ final class LocalHTTPServer {
         }
     }
 
+    /// 判断连接是否来自本机回环
+    private func isLoopback(_ connection: NWConnection) -> Bool {
+        if case let .hostPort(host, _) = connection.endpoint {
+            switch host {
+            case .ipv4(let address): return address == .loopback
+            case .ipv6(let address): return address == .loopback
+            default: return false
+            }
+        }
+        return false
+    }
+
+    /// 手机在局域网中的 IPv4 地址（无 Wi-Fi 时返回 nil）
+    static func lanIPv4Address() -> String? {
+        var pointer: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&pointer) == 0, let first = pointer else { return nil }
+        defer { freeifaddrs(pointer) }
+        var result: String?
+        var cursor = first
+        while true {
+            let flags = Int32(cursor.pointee.ifa_flags)
+            if let addr = cursor.pointee.ifa_addr, addr.pointee.sa_family == UInt8(AF_INET),
+               (flags & IFF_UP) != 0, (flags & IFF_LOOPBACK) == 0 {
+                let name = String(cString: cursor.pointee.ifa_name)
+                if name.hasPrefix("en") {
+                    var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                    if getnameinfo(addr, socklen_t(addr.pointee.sa_len),
+                                   &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0 {
+                        let value = String(cString: host)
+                        if !value.isEmpty, !value.hasPrefix("169.254") {
+                            result = value
+                            break
+                        }
+                    }
+                }
+            }
+            guard let next = cursor.pointee.ifa_next else { break }
+            cursor = next
+        }
+        return result
+    }
     private func respond(to connection: NWConnection, header: String, root: URL) {
         let lines = header.split(separator: "\r\n", omittingEmptySubsequences: false)
         let requestLine = lines.first.map(String.init) ?? ""
@@ -104,6 +149,15 @@ final class LocalHTTPServer {
         }
         let method = String(parts[0]).uppercased()
         var path = String(parts[1])
+
+        // 访问控制：本机回环直接放行；局域网访问必须带正确 token（AirPlay 时电视使用局域网地址）
+        let rawTarget = path
+        if !isLoopback(connection), !token.isEmpty, !rawTarget.contains("t=\(token)") {
+            DiagnosticsLog.write("[本地服务] 403 缺少令牌 \(rawTarget)")
+            send(status: "403 Forbidden", headers: [:], body: Data(), to: connection)
+            return
+        }
+
         if let query = path.firstIndex(of: "?") { path = String(path[..<query]) }
         path = path.removingPercentEncoding ?? path
         let name = (path as NSString).lastPathComponent

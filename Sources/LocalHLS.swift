@@ -57,11 +57,14 @@ enum LocalHLS {
     /// 独立播放会话：持有自己的本地服务实例，互不影响
     final class Session {
         let url: URL
+        /// 局域网地址（存在时优先使用，以便 AirPlay 投屏；电视可访问）
+        let lanURL: URL?
         private let server: LocalHTTPServer
         private var stopped = false
 
-        init(url: URL, server: LocalHTTPServer) {
+        init(url: URL, lanURL: URL?, server: LocalHTTPServer) {
             self.url = url
+            self.lanURL = lanURL
             self.server = server
         }
 
@@ -77,11 +80,17 @@ enum LocalHLS {
         let dir = playlistURL.deletingLastPathComponent()
         let server = LocalHTTPServer()
         let port = try server.start(root: dir)
-        guard let url = URL(string: "http://127.0.0.1:\(port)/index.m3u8") else {
+        let token = server.token
+        guard let url = URL(string: "http://127.0.0.1:\(port)/index.m3u8?t=\(token)") else {
             server.stop()
             throw PlaylistError.network("本地播放地址构造失败")
         }
-        return Session(url: url, server: server)
+        var lanURL: URL?
+        if let ip = LocalHTTPServer.lanIPv4Address() {
+            lanURL = URL(string: "http://\(ip):\(port)/index.m3u8?t=\(token)")
+        }
+        DiagnosticsLog.write("[本地服务] 播放会话 端口=\(port) 局域网=\(lanURL?.absoluteString ?? "无")")
+        return Session(url: url, lanURL: lanURL, server: server)
     }
 
     /// 兼容旧调用（使用共享实例，仅建议在没有并发播放/校验时使用）

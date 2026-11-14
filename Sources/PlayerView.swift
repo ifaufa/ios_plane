@@ -101,6 +101,18 @@ struct PlayerView: View {
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.white.opacity(0.85))
 
+                if store.isAirPlaying {
+                    Label("投屏中", systemImage: "airplayvideo")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.9))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(.white.opacity(0.18), in: Capsule())
+                }
+
+                AirPlayRouteButton()
+                    .frame(width: 30, height: 30)
+
                 Spacer()
             }
 
@@ -200,4 +212,17 @@ struct PlayerView: View {
         let s = total % 60
         return h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%02d:%02d", m, s)
     }
+}
+
+/// 系统 AirPlay 路由选择按钮（Apple TV / 支持 AirPlay 2 的电视）
+struct AirPlayRouteButton: UIViewRepresentable {
+    func makeUIView(context: Context) -> AVRoutePickerView {
+        let view = AVRoutePickerView()
+        view.tintColor = .white
+        view.activeTintColor = .systemBlue
+        view.prioritizesVideoDevices = true
+        return view
+    }
+
+    func updateUIView(_ uiView: AVRoutePickerView, context: Context) {}
 }

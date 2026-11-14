@@ -15,6 +15,8 @@ final class PlaybackStore: ObservableObject {
     @Published var isFullscreen = false
     @Published var isPlaying = false
     @Published var expectsPlaying = false
+    /// 是否正在 AirPlay 投屏
+    @Published var isAirPlaying = false
     @Published var errorNotice: String?
 
     let player = AVPlayer()
@@ -45,8 +47,19 @@ final class PlaybackStore: ObservableObject {
 
     var isActive: Bool { videoID != nil }
 
+    private var externalObserver: NSKeyValueObservation?
+
     init() {
         configureAudioSession()
+        player.allowsExternalPlayback = true
+        player.usesExternalPlaybackWhileExternalScreenIsActive = true
+        externalObserver = player.observe(\.isExternalPlaybackActive, options: [.new]) { [weak self] _, change in
+            let active = change.newValue ?? false
+            Task { @MainActor in
+                self?.isAirPlaying = active
+                DiagnosticsLog.write("[播放] AirPlay 状态 \(active ? "已连接" : "已断开")")
+            }
+        }
         interruptionObserver = NotificationCenter.default.addObserver(
             forName: AVAudioSession.interruptionNotification,
             object: nil,
@@ -120,7 +133,9 @@ final class PlaybackStore: ObservableObject {
         if isHLS {
             if let opened = try? LocalHLS.open(playlistURL: sourceURL) {
                 session = opened
-                item = AVPlayerItem(url: opened.url)
+                // 优先用局域网地址：本机同样可访问，且 AirPlay 时电视能拉到流
+                let preferred = opened.lanURL ?? opened.url
+                item = AVPlayerItem(url: preferred)
             } else {
                 item = AVPlayerItem(url: sourceURL)
             }
