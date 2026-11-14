@@ -294,6 +294,7 @@ struct ContentView: View {
             }
             .task {
                 library.cleanStaleMergeFiles()
+                CompletionFeedback.requestAuthorizationIfNeeded()
                 await ThumbnailService.pregenerate(items: library.items) { library.localURL(for: $0) }
             }
             .onChange(of: playback.errorNotice) { notice in
@@ -587,6 +588,8 @@ struct EngineSettingsView: View {
     @State private var dropKeyChanged = UserDefaults.standard.bool(forKey: AdFilter.dropKeyChangedKey)
     @State private var adFingerprint = UserDefaults.standard.bool(forKey: AdFilter.fingerprintKey)
     @State private var writeStss = (UserDefaults.standard.object(forKey: "mp4WriteStss") as? Bool) ?? true
+    @State private var completionSound = (UserDefaults.standard.object(forKey: CompletionFeedback.soundKey) as? Bool) ?? true
+    @State private var completionNotice = (UserDefaults.standard.object(forKey: CompletionFeedback.noticeKey) as? Bool) ?? true
 
     var body: some View {
         NavigationStack {
@@ -602,6 +605,17 @@ struct EngineSettingsView: View {
                         Text("广告段处理")
                     } footer: {
                         Text("默认按分辨率判定插入片段；开启「指纹」后改为比对 SPS/PPS 编码参数，可识别分辨率相同但编码器不同的广告段；S2 会一并剔除断点处更换密钥的片段。剔除结果会在下载完成时提示。")
+                    }
+                    Section {
+                        Toggle("下载完成提示音", isOn: $completionSound)
+                        Toggle("下载完成通知（后台可见）", isOn: $completionNotice)
+                        if completionNotice, CompletionFeedback.authorizationDenied {
+                            Text("系统通知权限未开启，请到 设置 → 通知 → PlaneM3U8 中允许")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        }
+                    } footer: {
+                        Text("提示音为低音量；通知在 App 后台时显示，前台仅 Toast 与提示音。")
                     }
                     Section {
                         Toggle("转换时写入同步样本表(stss)", isOn: $writeStss)
@@ -654,6 +668,9 @@ struct EngineSettingsView: View {
                         UserDefaults.standard.set(dropKeyChanged, forKey: AdFilter.dropKeyChangedKey)
                         UserDefaults.standard.set(adFingerprint, forKey: AdFilter.fingerprintKey)
                         UserDefaults.standard.set(writeStss, forKey: "mp4WriteStss")
+                        UserDefaults.standard.set(completionSound, forKey: CompletionFeedback.soundKey)
+                        UserDefaults.standard.set(completionNotice, forKey: CompletionFeedback.noticeKey)
+                        if completionNotice { CompletionFeedback.requestAuthorizationIfNeeded() }
                         dismiss()
                     }
                 }

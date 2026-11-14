@@ -248,6 +248,7 @@ final class DownloadManager: NSObject, ObservableObject {
                 )
                 library?.add(item)
                 SegmentRunner.shared.release(id)
+                reportSuccess(title: title, size: item.fileSize)
                 finishTask(id: id)
                 return
             } catch {
@@ -436,6 +437,23 @@ final class DownloadManager: NSObject, ObservableObject {
         return d.seconds
     }
 
+    private func reportSuccess(title: String, size: Int64) {
+        CompletionFeedback.playCompletionSound()
+        let sizeText = size > 0 ? Self.sizeText(size) : nil
+        CompletionFeedback.notifyCompleted(title: title, sizeText: sizeText)
+    }
+
+    private func reportFailure(title: String, reason: String) {
+        CompletionFeedback.notifyFailed(title: title, reason: reason)
+    }
+
+    static func sizeText(_ bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useMB, .useGB]
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: bytes)
+    }
+
     private func finishTask(id: String) {
         tasks.removeAll { $0.id == id }
         pendingTitles.removeValue(forKey: id)
@@ -485,6 +503,7 @@ extension DownloadManager: AVAssetDownloadDelegate {
                     lastPosition: nil
                 )
                 self.library?.add(item)
+                self.reportSuccess(title: title, size: size)
                 self.finishTask(id: id)
             } catch {
                 self.update(id) { $0.status = .failed(error.localizedDescription) }
@@ -505,6 +524,7 @@ extension DownloadManager: AVAssetDownloadDelegate {
             } else {
                 self.update(id) { $0.status = .failed(error.localizedDescription); $0.stalled = false }
                 self.progressMarks.removeValue(forKey: id)
+                self.reportFailure(title: self.pendingTitles[id] ?? id, reason: error.localizedDescription)
                 self.startNextIfNeeded()
             }
         }
