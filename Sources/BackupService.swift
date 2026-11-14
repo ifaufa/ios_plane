@@ -16,6 +16,8 @@ struct BackupManifest: Codable {
     var entries: [Entry]
     /// 收藏夹（旧备份没有该字段）
     var bookmarks: [Bookmark]?
+    /// 收藏分组（更旧的备份没有该字段）
+    var bookmarkFolders: [BookmarkFolder]?
 }
 
 // MARK: - 归档读写
@@ -35,11 +37,12 @@ enum BackupService {
         var skipped: [String]
         var library: [VideoItem]
         var bookmarks: [Bookmark]
+        var bookmarkFolders: [BookmarkFolder]
     }
 
     /// 打包 Documents/Assets 下的全部文件 + 台账 + 收藏夹
     /// 直接写最终归档（不再生成中间 payload），峰值占用从 3 份降到 2 份
-    static func makeArchive(items: [VideoItem], bookmarks: [Bookmark]) throws -> (url: URL, files: Int) {
+    static func makeArchive(items: [VideoItem], bookmarks: [Bookmark], bookmarkFolders: [BookmarkFolder] = []) throws -> (url: URL, files: Int) {
         let fm = FileManager.default
         cleanupStaleTemps()
 
@@ -57,7 +60,8 @@ enum BackupService {
                                       createdAt: Date(),
                                       library: items,
                                       entries: entries,
-                                      bookmarks: bookmarks)
+                                      bookmarks: bookmarks,
+                                      bookmarkFolders: bookmarkFolders)
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         let manifestData = try encoder.encode(manifest)
@@ -195,7 +199,8 @@ enum BackupService {
                              total: manifest.entries.count,
                              skipped: skipped,
                              library: manifest.library,
-                             bookmarks: manifest.bookmarks ?? [])
+                             bookmarks: manifest.bookmarks ?? [],
+                             bookmarkFolders: manifest.bookmarkFolders ?? [])
     }
 
     /// 兼容历史备份中的绝对路径（/private/var/... 或 /var/... 前缀差异）
@@ -296,13 +301,13 @@ final class BackupManager: ObservableObject {
         exportURL = nil
     }
 
-    func backup(items: [VideoItem], bookmarks: [Bookmark]) {
+    func backup(items: [VideoItem], bookmarks: [Bookmark], bookmarkFolders: [BookmarkFolder] = []) {
         isWorking = true
         progressText = "正在打包备份…"
         Task {
             do {
                 let result = try await Task.detached(priority: .userInitiated) {
-                    try BackupService.makeArchive(items: items, bookmarks: bookmarks)
+                    try BackupService.makeArchive(items: items, bookmarks: bookmarks, bookmarkFolders: bookmarkFolders)
                 }.value
                 if result.files == 0, !items.isEmpty {
                     alert = AlertInfo(title: "备份未包含视频",
@@ -329,7 +334,7 @@ final class BackupManager: ObservableObject {
                     try BackupService.restore(from: pickedURL)
                 }.value
                 library.merge(result.library)
-                let addedBookmarks = BookmarkStore.shared.merge(result.bookmarks)
+                let addedBookmarks = BookmarkStore.shared.merge(result.bookmarks, folders: result.bookmarkFolders)
 
                 var message = "共 \(result.total) 个文件条目，成功恢复 \(result.restored) 个，合并 \(result.library.count) 条记录、\(addedBookmarks) 条收藏。"
                 if !result.skipped.isEmpty {

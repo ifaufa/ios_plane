@@ -172,7 +172,7 @@ struct ContentView: View {
                             Label("诊断日志…", systemImage: "doc.text.magnifyingglass")
                         }
                         Divider()
-                        Button { backup.backup(items: library.items, bookmarks: BookmarkStore.shared.items) } label: {
+                        Button { backup.backup(items: library.items, bookmarks: BookmarkStore.shared.items, bookmarkFolders: BookmarkStore.shared.folders) } label: {
                             Label("备份到文件…", systemImage: "square.and.arrow.up")
                         }
                         Button { showImporter = true } label: {
