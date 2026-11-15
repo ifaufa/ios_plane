@@ -145,6 +145,7 @@ enum AVRemuxPipeline {
         let lock = NSLock()
         var failure: String?
         var videoFrames = 0
+        var writerObservation: NSKeyValueObservation?
         var lastVideoPTS: Int64 = 0
         var lastVideoDTS: Int64 = 0
         var audioFrameIndex: Int64 = 0
@@ -321,6 +322,18 @@ enum AVRemuxPipeline {
             writer = newWriter
             videoInput = vInput
             audioInput = aInput
+
+            // P1：writer 状态一变失败就立刻记录真实原因（-11800 往往只是"失败状态下再 append"的返回值）
+            writerObservation = newWriter.observe(\.status, options: [.new]) { observed, _ in
+                guard observed.status == .failed else { return }
+                let error = observed.error as NSError?
+                lock.lock()
+                let frames = videoFrames
+                let lastPTS = lastVideoPTS
+                let lastDTS = lastVideoDTS
+                lock.unlock()
+                DiagnosticsLog.write("[转MP4] writer 失败 @已写=\(frames) 域=\(error?.domain ?? "-") 码=\(error?.code ?? 0) 描述=\(error?.localizedDescription ?? "-") info=\(error?.userInfo ?? [:]) 最后样本 pts=\(lastPTS) dts=\(lastDTS)")
+            }
             DiagnosticsLog.write("[转MP4] writer 创建完成 视频输入=1 音频输入=\(aInput == nil ? 0 : 1)")
 
             // 视频泵
@@ -335,6 +348,9 @@ enum AVRemuxPipeline {
             var pumpExpectKeyframe = false
             var pumpLoggedIssue = false
             var pumpLastDTS: Int64 = -1
+            var pumpLastPTS: Int64 = -1
+            var pumpParamStrippedLogged = false
+            var pumpOffsetClampedLogged = false
             vInput.requestMediaDataWhenReady(on: pumpQueue) {
                 var idleSince: Date?
                 while vInput.isReadyForMoreMediaData {
@@ -371,18 +387,33 @@ enum AVRemuxPipeline {
                         }
                         pumpExpectKeyframe = false
                     }
-                    guard isValidAVCC(item.data) else {
+                    // P2：剥离带内 SPS/PPS（MP4 只认 avcC）
+                    let sampleData = stripParameterSets(item.data,
+                                                       expectedSPS: videoSPS,
+                                                       expectedPPS: videoPPS,
+                                                       logged: &pumpParamStrippedLogged)
+                    guard isValidAVCC(sampleData) else {
                         pumpSkippedInvalid += 1
                         if !pumpLoggedIssue {
                             pumpLoggedIssue = true
-                            DiagnosticsLog.write("[转MP4] 跳过非法样本 len=\(item.data.count) key=\(item.isKey) dts=\(item.dts)")
+                            DiagnosticsLog.write("[转MP4] 跳过非法样本 len=\(sampleData.count) key=\(item.isKey) dts=\(item.dts)")
                         }
                         continue
                     }
 
-                    guard let buffer = makeSampleBuffer(data: item.data,
+                    // P3：异常大的显示偏移（dts - pts 远超 1 帧）会破坏 writer 时序，钳制为 0
+                    var samplePTS = item.pts
+                    if item.dts > 0, item.dts - samplePTS > frameStep * 8 {
+                        samplePTS = item.dts
+                        if !pumpOffsetClampedLogged {
+                            pumpOffsetClampedLogged = true
+                            DiagnosticsLog.write("[转MP4] 显示偏移异常已钳制 dts=\(item.dts) pts=\(item.pts) 帧间隔=\(frameStep)")
+                        }
+                    }
+
+                    guard let buffer = makeSampleBuffer(data: sampleData,
                                                         format: videoDesc,
-                                                        pts: item.pts,
+                                                        pts: samplePTS,
                                                         dts: item.dts,
                                                         duration: frameStep,
                                                         timescale: 90000,
@@ -394,7 +425,7 @@ enum AVRemuxPipeline {
                     }
                     let sampleIndex = videoFrames
                     if pumpAppended == 0 {
-                        DiagnosticsLog.write("[转MP4] 起始样本 长度=\(item.data.count)B 关键帧=\(item.isKey) dts=\(item.dts) 上一样本DTS=\(pumpLastDTS) 跳过非法=\(pumpSkippedInvalid) 对齐跳过=\(pumpSkippedToKeyframe)")
+                        DiagnosticsLog.write("[转MP4] 起始样本 长度=\(sampleData.count)B 关键帧=\(item.isKey) dts=\(item.dts) 上一样本DTS=\(pumpLastDTS) 跳过非法=\(pumpSkippedInvalid) 对齐跳过=\(pumpSkippedToKeyframe)")
                     }
                     if !vInput.append(buffer) {
                         let error = newWriter.error as NSError?
@@ -415,8 +446,8 @@ enum AVRemuxPipeline {
                     pumpLastDTS = item.dts
                     keyframeLock.lock()
                     if item.isKey { lastKeyframeIndices.append(Int32(sampleIndex)) }
-                    lastVideoSizes.append(Int32(item.data.count))
-                    lastCtts.append(Int32(item.pts - item.dts))
+                    lastVideoSizes.append(Int32(sampleData.count))
+                    lastCtts.append(Int32(samplePTS - item.dts))
                     if lastVideoWidth == 0 {
                         lastVideoWidth = videoWidth
                         lastVideoHeight = videoHeight
@@ -710,6 +741,48 @@ enum AVRemuxPipeline {
     }
 
     // MARK: - 样本构造
+
+    /// P2：剥离样本内嵌的 SPS/PPS（MP4 只认 avcC 里的参数集，带内重复会触发 -11800）
+    private static func stripParameterSets(_ data: Data,
+                                           expectedSPS: Data,
+                                           expectedPPS: Data,
+                                           logged: inout Bool) -> Data {
+        let bytes = [UInt8](data)
+        guard bytes.count > 5 else { return data }
+        var output = [UInt8]()
+        output.reserveCapacity(bytes.count)
+        var offset = 0
+        var removed = false
+        var mismatch = false
+        while offset + 4 <= bytes.count {
+            let length = (Int(bytes[offset]) << 24) | (Int(bytes[offset + 1]) << 16)
+                | (Int(bytes[offset + 2]) << 8) | Int(bytes[offset + 3])
+            let headerEnd = offset + 4
+            guard length > 0, headerEnd + length <= bytes.count else {
+                return data   // 结构异常交给后续校验处理
+            }
+            let nalType = bytes[headerEnd] & 0x1F
+            let payload = Data(bytes[headerEnd..<(headerEnd + length)])
+            if nalType == 7 {
+                removed = true
+                if !expectedSPS.isEmpty, payload != expectedSPS { mismatch = true }
+            } else if nalType == 8 {
+                removed = true
+                if !expectedPPS.isEmpty, payload != expectedPPS { mismatch = true }
+            } else {
+                var lengthBE = UInt32(length).bigEndian
+                withUnsafeBytes(of: &lengthBE) { output.append(contentsOf: $0) }
+                output.append(contentsOf: bytes[headerEnd..<(headerEnd + length)])
+            }
+            offset = headerEnd + length
+        }
+        guard removed, !output.isEmpty else { return data }
+        if !logged {
+            logged = true
+            DiagnosticsLog.write("[转MP4] 样本内嵌参数集已剥离（与 avcC 一致=\(!mismatch)）")
+        }
+        return Data(output)
+    }
 
     /// 校验 AVCC 样本结构：4 字节长度前缀 + NAL，长度必须严格首尾闭合
     private static func isValidAVCC(_ data: Data) -> Bool {

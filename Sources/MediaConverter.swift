@@ -31,14 +31,17 @@ enum MediaConverter {
         let dirSize = directorySize(dir)
         let estimatedFinal = Int64(Double(dirSize) * 0.75)
         let audioSpool = Int64(Double(dirSize) * 0.12)
+        // 分段转换会在磁盘上同时存在「各段 part 文件」与「合并后的成品」，需一并计入
+        let segmentedParts = dirSize > 1_200_000_000 ? Int64(Double(dirSize) * 0.85) : 0
         let safetyMargin: Int64 = 1024 * 1024 * 1024
-        let required = dirSize + estimatedFinal + audioSpool + safetyMargin
+        let required = dirSize + estimatedFinal + audioSpool + segmentedParts + safetyMargin
         if let available = availableCapacity() {
-            DiagnosticsLog.write(String(format: "[转MP4] 空间预检 分片=%.2fGB 库内记录=%.2fGB 预估成品=%.2fGB 音频临时=%.2fGB 余量=1.00GB 可用=%.2fGB 需求=%.2fGB",
+            DiagnosticsLog.write(String(format: "[转MP4] 空间预检 分片=%.2fGB 库内记录=%.2fGB 预估成品=%.2fGB 音频临时=%.2fGB 分段中间=%.2fGB 余量=1.00GB 可用=%.2fGB 需求=%.2fGB",
                                         Double(dirSize) / 1_073_741_824,
                                         Double(item.fileSize) / 1_073_741_824,
                                         Double(estimatedFinal) / 1_073_741_824,
                                         Double(audioSpool) / 1_073_741_824,
+                                        Double(segmentedParts) / 1_073_741_824,
                                         Double(available) / 1_073_741_824,
                                         Double(required) / 1_073_741_824))
             if available < required {
