@@ -196,8 +196,10 @@ enum MediaConverter {
         DiagnosticsLog.write("[转MP4] 轨道信息 \(trackInfo)")
 
         guard verify.playable, verify.duration > 1 else {
-            // 保留产物，便于导出到电脑上比对（不删除，也不入库）
-            DiagnosticsLog.write("[转MP4] 校验未通过，产物已保留：\(outputURL.lastPathComponent)")
+            // 产物无效（无轨道/不可播）：直接删除，避免占用空间并误导用户
+            let size = (try? outputURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            try? fm.removeItem(at: outputURL)
+            DiagnosticsLog.write("[转MP4] 校验未通过，已删除无效产物 \(outputURL.lastPathComponent)（\(size / 1024)KB）")
             let bigFileHint = dirSize > 2_000_000_000
                 ? "。源较大，若多次失败建议关闭其它 App 后重试，或用「导出分片」在电脑上转换"
                 : ""

@@ -329,11 +329,20 @@ enum AVRemuxPipeline {
             doneGroup.enter()
             vInput.requestMediaDataWhenReady(on: pumpQueue) {
                 var idleSince: Date?
+                var appendedCount = 0
+                var skippedInvalid = 0
+                var skippedToKeyframe = 0
+                var retries = 0
+                var expectKeyframe = false
+                var loggedIssue = false
                 while vInput.isReadyForMoreMediaData {
                     guard let item = videoQueue.pop(waitSeconds: 0.2) else {
                         if videoQueue.isFinished {
                             if !videoPumpFinished {
                                 videoPumpFinished = true
+                                if skippedInvalid > 0 || skippedToKeyframe > 0 {
+                                    DiagnosticsLog.write("[转MP4] 写入汇总 已写=\(appendedCount) 跳过非法=\(skippedInvalid) 对齐跳过=\(skippedToKeyframe) 重试=\(retries)")
+                                }
                                 vInput.markAsFinished()
                                 doneGroup.leave()
                             }
@@ -351,6 +360,24 @@ enum AVRemuxPipeline {
                         continue
                     }
                     idleSince = nil
+
+                    // A：起始必须对齐到关键帧，并跳过非法样本（零长/长度前缀不符）
+                    if appendedCount == 0 || expectKeyframe {
+                        guard item.isKey else {
+                            skippedToKeyframe += 1
+                            continue
+                        }
+                        expectKeyframe = false
+                    }
+                    guard isValidAVCC(item.data) else {
+                        skippedInvalid += 1
+                        if !loggedIssue {
+                            loggedIssue = true
+                            DiagnosticsLog.write("[转MP4] 跳过非法样本 len=\(item.data.count) key=\(item.isKey) dts=\(item.dts)")
+                        }
+                        continue
+                    }
+
                     guard let buffer = makeSampleBuffer(data: item.data,
                                                         format: videoDesc,
                                                         pts: item.pts,
@@ -364,13 +391,25 @@ enum AVRemuxPipeline {
                         return
                     }
                     let sampleIndex = videoFrames
+                    if appendedCount == 0 {
+                        DiagnosticsLog.write("[转MP4] 起始样本 长度=\(item.data.count)B 关键帧=\(item.isKey) dts=\(item.dts) 跳过非法=\(skippedInvalid) 对齐跳过=\(skippedToKeyframe)")
+                    }
                     if !vInput.append(buffer) {
                         let error = newWriter.error as NSError?
+                        // B：还没写成功过 → 判定为起始样本异常，跳到下一个关键帧重试（最多 3 次）
+                        if appendedCount == 0, retries < 3 {
+                            retries += 1
+                            expectKeyframe = true
+                            DiagnosticsLog.write("[转MP4] 首样本被拒（\(error?.code ?? 0) \(error?.localizedDescription ?? "")），跳到下一个关键帧重试 第\(retries)次")
+                            continue
+                        }
+                        DiagnosticsLog.write("[转MP4] 样本写入失败 已写=\(appendedCount) 跳过非法=\(skippedInvalid) 对齐跳过=\(skippedToKeyframe) 重试=\(retries) 错误=\(error?.code ?? 0) \(error?.localizedDescription ?? "")")
                         setFailure("追加视频样本失败：\(error?.code ?? 0) \(error?.localizedDescription ?? "")")
                         if !videoPumpFinished { videoPumpFinished = true; doneGroup.leave() }
                         vInput.markAsFinished()
                         return
                     }
+                    appendedCount += 1
                     keyframeLock.lock()
                     if item.isKey { lastKeyframeIndices.append(Int32(sampleIndex)) }
                     lastVideoSizes.append(Int32(item.data.count))
@@ -653,6 +692,23 @@ enum AVRemuxPipeline {
     }
 
     // MARK: - 样本构造
+
+    /// 校验 AVCC 样本结构：4 字节长度前缀 + NAL，长度必须严格首尾闭合
+    private static func isValidAVCC(_ data: Data) -> Bool {
+        guard data.count >= 5 else { return false }
+        let bytes = [UInt8](data)
+        var offset = 0
+        var units = 0
+        while offset + 4 <= bytes.count {
+            let length = (Int(bytes[offset]) << 24) | (Int(bytes[offset + 1]) << 16)
+                | (Int(bytes[offset + 2]) << 8) | Int(bytes[offset + 3])
+            offset += 4
+            guard length > 0, offset + length <= bytes.count else { return false }
+            offset += length
+            units += 1
+        }
+        return units > 0 && offset == bytes.count
+    }
 
     private static func makeSampleBuffer(data: Data,
                                          format: CMFormatDescription,
