@@ -721,6 +721,11 @@ enum AVRemuxPipeline {
                 try? fm.removeItem(at: destination)
                 throw RemuxError(message: writer.error?.localizedDescription ?? "写出失败")
             }
+        } else if directMuxer != nil {
+            // 直写模式：writer 为 nil 属正常，收尾在下方由 DirectMuxer 完成
+            if let failure = currentFailure() {
+                throw RemuxError(message: "转封装失败：\(failure)")
+            }
         } else if let failure = currentFailure() {
             throw RemuxError(message: "转封装失败：\(failure)")
         } else {
@@ -741,7 +746,8 @@ enum AVRemuxPipeline {
             let totalMB = spoolSizes.reduce(0, +) / (1024 * 1024)
             DiagnosticsLog.write("[转MP4] 音频帧已落盘 \(spoolSizes.count) 个 共 \(totalMB)MB（内存零驻留）")
         }
-                DiagnosticsLog.write("[转MP4] 关键帧数=\(lastKeyframeIndices.count)/\(videoFrames) 用于补写 stss")
+        let keyframeCount = directMuxer?.keyframeCount ?? lastKeyframeIndices.count
+        DiagnosticsLog.write("[转MP4] 关键帧数=\(keyframeCount)/\(videoFrames) 用于补写 stss")
         DiagnosticsLog.write("[转MP4] 封装完成 视频帧=\(videoFrames) 音频帧=\(audioFrameIndex) GOP=\(gopCount) POC缺失=\(pocMissing) 帧间隔=\(frameStep)")
 
         // 自研封装：直接收尾（追加音频 + 写 moov），不经过 AVAssetWriter
@@ -750,6 +756,7 @@ enum AVRemuxPipeline {
             guard let info = demuxer.videoInfo() else {
                 throw RemuxError(message: "自研封装失败：缺少视频参数")
             }
+            DiagnosticsLog.write("[转MP4] 自研封装：开始写 moov（追加音频 \(spoolSizes.count) 帧）")
             let log = try muxer.finish(width: info.width,
                                        height: info.height,
                                        sps: info.sps,

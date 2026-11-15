@@ -57,6 +57,7 @@ final class DirectMuxer {
     }
 
     var videoSampleCount: Int { videoSizes.count }
+    var keyframeCount: Int { videoKeyframes.count }
 
     func appendVideo(data: Data, isKey: Bool, pts: Int64, dts: Int64) throws {
         if videoChunkSamples == 0 {
@@ -157,6 +158,7 @@ final class DirectMuxer {
         moov.append("moov".data(using: .ascii)!)
         moov.append(moovBody)
         try handle.write(contentsOf: moov)
+        DiagnosticsLog.write("[转MP4] moov 已写入 \(moov.count)B 视频样本=\(videoSizes.count) 关键帧=\(videoKeyframes.count) 音频帧=\(audioSizes.count)")
 
         let totalMdat = 16 + (writeOffset - mdatContentStart)
         var sizeBytes = Data()
