@@ -230,6 +230,52 @@ final class VideoLibrary: ObservableObject {
     }
 
     /// 清理历史转换失败遗留的 merged.* 中间文件（可释放大量空间）
+    /// 清理转换中断产生的半成品 MP4（无 moov → 无法播放）
+    func cleanIncompleteMP4s() {
+        let fm = FileManager.default
+        guard let items = try? fm.contentsOfDirectory(at: Self.assetsDir, includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey]) else { return }
+        var removed = 0
+        var freed: Int64 = 0
+        for url in items where url.pathExtension.lowercased() == "mp4" {
+            let isDir = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+            guard !isDir else { continue }
+            guard !Self.hasMoovBox(url) else { continue }
+            let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            if (try? fm.removeItem(at: url)) != nil {
+                removed += 1
+                freed += Int64(size)
+            }
+        }
+        if removed > 0 {
+            DiagnosticsLog.write("[清理] 删除未完成的 MP4 \(removed) 个，释放 \(freed / (1024 * 1024))MB")
+        }
+    }
+
+    /// 顶层 box 扫描：是否存在 moov
+    private static func hasMoovBox(_ url: URL) -> Bool {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return true }
+        defer { try? handle.close() }
+        guard let size = try? handle.seekToEnd() else { return true }
+        var offset: UInt64 = 0
+        while offset + 8 <= size {
+            try? handle.seek(toOffset: offset)
+            guard let header = try? handle.read(upToCount: 16), header.count >= 8 else { break }
+            var boxSize = UInt64(header.u32BE(at: 0))
+            let type = header.asciiText(at: 4, length: 4)
+            var headerLength: UInt64 = 8
+            if boxSize == 1, header.count >= 16 {
+                boxSize = header.u64BE(at: 8)
+                headerLength = 16
+            } else if boxSize == 0 {
+                boxSize = size - offset
+            }
+            guard boxSize >= headerLength else { break }
+            if type == "moov" { return true }
+            offset += boxSize
+        }
+        return false
+    }
+
     func cleanStaleMergeFiles() {
         let fm = FileManager.default
         guard let dirs = try? fm.contentsOfDirectory(at: Self.assetsDir, includingPropertiesForKeys: [.isDirectoryKey]) else { return }
@@ -263,5 +309,26 @@ final class VideoLibrary: ObservableObject {
                 try? fm.moveItem(at: file, to: dest)
             }
         }
+    }
+}
+
+private extension Data {
+    func u32BE(at offset: Int) -> UInt32 {
+        guard offset >= 0, offset + 4 <= count else { return 0 }
+        var value: UInt32 = 0
+        for index in 0..<4 { value = (value << 8) | UInt32(self[startIndex + offset + index]) }
+        return value
+    }
+
+    func u64BE(at offset: Int) -> UInt64 {
+        guard offset >= 0, offset + 8 <= count else { return 0 }
+        var value: UInt64 = 0
+        for index in 0..<8 { value = (value << 8) | UInt64(self[startIndex + offset + index]) }
+        return value
+    }
+
+    func asciiText(at offset: Int, length: Int) -> String {
+        guard offset >= 0, offset + length <= count else { return "????" }
+        return String(decoding: self[(startIndex + offset)..<(startIndex + offset + length)], as: UTF8.self)
     }
 }

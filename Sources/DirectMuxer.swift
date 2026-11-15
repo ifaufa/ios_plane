@@ -22,6 +22,13 @@ final class DirectMuxer {
     private var videoChunkSamples = 0
 
     private let samplesPerChunk = 32
+    private var bytesSinceSync: UInt64 = 0
+
+    /// 主动刷盘并释放脏页（收尾前调用）
+    func flushSync() {
+        _ = fsync(handle.fileDescriptor)
+        bytesSinceSync = 0
+    }
 
     init(destination: URL) throws {
         self.destination = destination
@@ -32,6 +39,8 @@ final class DirectMuxer {
             throw MuxError(message: "无法创建输出文件")
         }
         self.handle = handle
+        // P1：关闭页缓存（否则写入 2.4GB 会把可用内存压到几十 MB，收尾阶段被系统杀掉）
+        _ = fcntl(handle.fileDescriptor, F_NOCACHE, 1)
 
         var ftypBody = Data()
         ftypBody.append("isom".data(using: .ascii)!)
@@ -65,6 +74,11 @@ final class DirectMuxer {
         }
         try handle.write(contentsOf: data)
         writeOffset += UInt64(data.count)
+        bytesSinceSync += UInt64(data.count)
+        if bytesSinceSync >= 256 * 1024 * 1024 {
+            _ = fsync(handle.fileDescriptor)
+            bytesSinceSync = 0
+        }
 
         videoSizes.append(Int32(data.count))
         videoCtts.append(Int32(pts - dts))
@@ -90,20 +104,32 @@ final class DirectMuxer {
         if let audioSpoolURL, !audioSizes.isEmpty {
             let spool = try FileHandle(forReadingFrom: audioSpoolURL)
             defer { try? spool.close() }
+            var buffer = Data()
+            buffer.reserveCapacity(4 << 20)
             var index = 0
             while index < audioSizes.count {
-                audioOffsets.append(writeOffset)
+                audioOffsets.append(writeOffset + UInt64(buffer.count))
                 let end = min(index + samplesPerChunk, audioSizes.count)
                 for frameIndex in index..<end {
                     let size = audioSizes[frameIndex]
                     guard let chunk = try? spool.read(upToCount: size), chunk.count == size else {
                         throw MuxError(message: "音频临时文件读取不完整（帧 \(frameIndex)）")
                     }
-                    try handle.write(contentsOf: chunk)
-                    writeOffset += UInt64(size)
+                    buffer.append(chunk)
+                    if buffer.count >= 4 << 20 {
+                        try handle.write(contentsOf: buffer)
+                        writeOffset += UInt64(buffer.count)
+                        buffer.removeAll(keepingCapacity: true)
+                    }
                 }
                 index = end
             }
+            if !buffer.isEmpty {
+                try handle.write(contentsOf: buffer)
+                writeOffset += UInt64(buffer.count)
+                buffer.removeAll(keepingCapacity: false)
+            }
+            flushSync()
         }
 
         var ctts = videoCtts

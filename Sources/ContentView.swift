@@ -337,6 +337,7 @@ struct ContentView: View {
             }
             .task {
                 library.cleanStaleMergeFiles()
+                library.cleanIncompleteMP4s()
                 CompletionFeedback.requestAuthorizationIfNeeded()
                 await ThumbnailService.pregenerate(items: library.items) { library.localURL(for: $0) }
             }
