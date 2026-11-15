@@ -222,7 +222,7 @@ enum AVRemuxPipeline {
             displayCursor += Int64(count)
             gop.removeAll()
             if currentFailure() != nil { videoQueue.finish() }
-            if writer == nil {
+            if writer == nil, directMuxer == nil {
                 pushedBeforeWriter += count
                 if pushedBeforeWriter >= 32 {
                     do { try makeWriterIfNeeded(force: true) } catch { setFailure(error.localizedDescription) }
@@ -547,7 +547,7 @@ enum AVRemuxPipeline {
             gop.append(GopFrame(data: data, isKey: isKey, poc: poc))
             if gop.count > 600 { flushGop() }
 
-            if writer == nil {
+            if writer == nil, directMuxer == nil {
                 do { try makeWriterIfNeeded(force: false) } catch { setFailure(error.localizedDescription) }
             }
         }
@@ -570,7 +570,7 @@ enum AVRemuxPipeline {
                 return
             }
             audioQueue.push(data)
-            if writer == nil {
+            if writer == nil, directMuxer == nil {
                 do { try makeWriterIfNeeded(force: false) } catch { setFailure(error.localizedDescription) }
             }
         }
