@@ -1,8 +1,10 @@
 import Foundation
 
 /// 自研 MP4 封装器：不经 AVAssetWriter，直接按 ISO 结构写文件
-/// 布局：ftyp | mdat(视频样本 + 音频样本) | moov
-/// 优点：绕开 AVAssetWriter 的内部样本校验（-11800 / -16364），无大文件内存积压
+/// 布局：ftyp | mdat(视频样本与音频样本交错写入) | moov
+/// 设计要点：
+/// 1) 音频不再等收尾时才一次性追写（那是 307MB 的突发写，会把内存/IO 压爆），改为**边转边写**
+/// 2) 收尾只剩"构造 moov"，各阶段有日志与 fsync（便于定位被系统中断的环节）
 final class DirectMuxer {
     struct MuxError: LocalizedError {
         let message: String
@@ -15,20 +17,21 @@ final class DirectMuxer {
     private var mdatContentStart: UInt64 = 0
     private var writeOffset: UInt64 = 0
 
+    // 视频样本表
     private var videoSizes: [Int32] = []
     private var videoCtts: [Int32] = []
     private var videoKeyframes: [Int32] = []
     private var videoChunkOffsets: [UInt64] = []
     private var videoChunkSamples = 0
 
+    // 音频样本表（边写边记录）
+    private var audioSizes: [Int32] = []
+    private var audioChunkOffsets: [UInt64] = []
+    private var audioChunkSamples = 0
+    private var audioWriteBuffer = Data()
+
     private let samplesPerChunk = 32
     private var bytesSinceSync: UInt64 = 0
-
-    /// 主动刷盘并释放脏页（收尾前调用）
-    func flushSync() {
-        _ = fsync(handle.fileDescriptor)
-        bytesSinceSync = 0
-    }
 
     init(destination: URL) throws {
         self.destination = destination
@@ -39,7 +42,6 @@ final class DirectMuxer {
             throw MuxError(message: "无法创建输出文件")
         }
         self.handle = handle
-        // P1：关闭页缓存（否则写入 2.4GB 会把可用内存压到几十 MB，收尾阶段被系统杀掉）
         _ = fcntl(handle.fileDescriptor, F_NOCACHE, 1)
 
         var ftypBody = Data()
@@ -49,6 +51,7 @@ final class DirectMuxer {
         ftypBody.append("iso2".data(using: .ascii)!)
         ftypBody.append("avc1".data(using: .ascii)!)
         ftypBody.append("mp41".data(using: .ascii)!)
+
         var ftyp = Data()
         ftyp.append(contentsOf: be32(UInt32(ftypBody.count + 8)))
         ftyp.append("ftyp".data(using: .ascii)!)
@@ -63,22 +66,31 @@ final class DirectMuxer {
 
         mdatContentStart = UInt64(ftyp.count + 16)
         writeOffset = mdatContentStart
+
+        // 预留容量，避免 25 万级 append 反复扩容拷贝
+        videoSizes.reserveCapacity(400_000)
+        videoCtts.reserveCapacity(400_000)
+        videoChunkOffsets.reserveCapacity(16_384)
+        audioSizes.reserveCapacity(600_000)
+        audioChunkOffsets.reserveCapacity(32_768)
+        audioWriteBuffer.reserveCapacity(1 << 20)
     }
 
     var videoSampleCount: Int { videoSizes.count }
     var keyframeCount: Int { videoKeyframes.count }
 
+    func flushSync() {
+        _ = fsync(handle.fileDescriptor)
+        bytesSinceSync = 0
+    }
+
+    // MARK: - 写入样本
+
     func appendVideo(data: Data, isKey: Bool, pts: Int64, dts: Int64) throws {
-        if videoChunkSamples == 0 {
-            videoChunkOffsets.append(writeOffset)
-        }
+        if videoChunkSamples == 0 { videoChunkOffsets.append(writeOffset) }
         try handle.write(contentsOf: data)
         writeOffset += UInt64(data.count)
         bytesSinceSync += UInt64(data.count)
-        if bytesSinceSync >= 256 * 1024 * 1024 {
-            _ = fsync(handle.fileDescriptor)
-            bytesSinceSync = 0
-        }
 
         videoSizes.append(Int32(data.count))
         videoCtts.append(Int32(pts - dts))
@@ -86,7 +98,46 @@ final class DirectMuxer {
 
         videoChunkSamples += 1
         if videoChunkSamples >= samplesPerChunk { videoChunkSamples = 0 }
+
+        if bytesSinceSync >= 256 * 1024 * 1024 {
+            _ = fsync(handle.fileDescriptor)
+            bytesSinceSync = 0
+        }
     }
+
+    /// 音频边转边写：内部聚成 1MB 再落盘，避免碎片小写
+    func appendAudio(_ frame: Data) {
+        if audioChunkSamples == 0 {
+            audioChunkOffsets.append(writeOffset + UInt64(audioWriteBuffer.count))
+        }
+        audioWriteBuffer.append(frame)
+        audioSizes.append(Int32(frame.count))
+
+        audioChunkSamples += 1
+        if audioChunkSamples >= samplesPerChunk { audioChunkSamples = 0 }
+
+        if audioWriteBuffer.count >= 1 << 20 {
+            flushAudioBuffer()
+        }
+    }
+
+    private func flushAudioBuffer() {
+        guard !audioWriteBuffer.isEmpty else { return }
+        do {
+            try handle.write(contentsOf: audioWriteBuffer)
+            writeOffset += UInt64(audioWriteBuffer.count)
+            bytesSinceSync += UInt64(audioWriteBuffer.count)
+            audioWriteBuffer.removeAll(keepingCapacity: true)
+            if bytesSinceSync >= 128 * 1024 * 1024 {
+                _ = fsync(handle.fileDescriptor)
+                bytesSinceSync = 0
+            }
+        } catch {
+            DiagnosticsLog.write("[转MP4] 音频写入失败：\(error.localizedDescription)")
+        }
+    }
+
+    func audioFrameCount() -> Int { audioSizes.count }
 
     // MARK: - 收尾
 
@@ -97,46 +148,18 @@ final class DirectMuxer {
                 frameStep: Int64,
                 sampleRate: Int,
                 channels: Int,
-                asc: Data,
-                audioSpoolURL: URL?,
-                audioSizes: [Int]) throws -> String {
-        var audioOffsets: [UInt64] = []
-        if let audioSpoolURL, !audioSizes.isEmpty {
-            let spool = try FileHandle(forReadingFrom: audioSpoolURL)
-            defer { try? spool.close() }
-            var buffer = Data()
-            buffer.reserveCapacity(4 << 20)
-            var index = 0
-            while index < audioSizes.count {
-                audioOffsets.append(writeOffset + UInt64(buffer.count))
-                let end = min(index + samplesPerChunk, audioSizes.count)
-                for frameIndex in index..<end {
-                    let size = audioSizes[frameIndex]
-                    guard let chunk = try? spool.read(upToCount: size), chunk.count == size else {
-                        throw MuxError(message: "音频临时文件读取不完整（帧 \(frameIndex)）")
-                    }
-                    buffer.append(chunk)
-                    if buffer.count >= 4 << 20 {
-                        try handle.write(contentsOf: buffer)
-                        writeOffset += UInt64(buffer.count)
-                        buffer.removeAll(keepingCapacity: true)
-                    }
-                }
-                index = end
-            }
-            if !buffer.isEmpty {
-                try handle.write(contentsOf: buffer)
-                writeOffset += UInt64(buffer.count)
-                buffer.removeAll(keepingCapacity: false)
-            }
-            flushSync()
-        }
+                asc: Data) throws -> String {
+        // 阶段 1：把残留音频写入 mdat
+        DiagnosticsLog.write("[转MP4] 收尾①写入剩余音频 缓冲=\(audioWriteBuffer.count)B 音频帧=\(audioSizes.count) 内存=\(os_proc_available_memory() / (1024 * 1024))MB")
+        flushAudioBuffer()
+        flushSync()
 
-        var ctts = videoCtts
+        // 阶段 2：规范化 ctts（负偏移 → 平移 + elst 补偿）
+        DiagnosticsLog.write("[转MP4] 收尾②构造样本表 内存=\(os_proc_available_memory() / (1024 * 1024))MB")
         var editShift: Int64 = 0
-        if let minOffset = ctts.min(), minOffset < 0 {
+        if let minOffset = videoCtts.min(), minOffset < 0 {
             editShift = Int64(-minOffset)
-            for index in ctts.indices { ctts[index] += Int32(editShift) }
+            for index in videoCtts.indices { videoCtts[index] += Int32(editShift) }
         }
 
         let totalTicks = Int64(videoSizes.count) * frameStep
@@ -146,7 +169,7 @@ final class DirectMuxer {
 
         let videoTrak = MP4PartMerger.makeVideoTrak(sampleCount: videoSizes.count,
                                                     sizes: videoSizes,
-                                                    ctts: ctts,
+                                                    ctts: videoCtts,
                                                     keyframes: videoKeyframes,
                                                     frameStep: frameStep,
                                                     chunkOffsets: videoChunkOffsets,
@@ -162,8 +185,8 @@ final class DirectMuxer {
         if !audioSizes.isEmpty {
             let audioSeconds = Double(audioSizes.count) * 1024.0 / Double(max(1, sampleRate))
             audioTrak = AudioTrackBuilder.makeAudioTrak(frameCount: audioSizes.count,
-                                                        sizes: audioSizes,
-                                                        offsets: audioOffsets.map { UInt32(min($0, UInt64(UInt32.max))) },
+                                                        sizes: audioSizes.map { Int($0) },
+                                                        offsets: audioChunkOffsets.map { UInt32(min($0, UInt64(UInt32.max))) },
                                                         samplesPerChunk: samplesPerChunk,
                                                         sampleRate: sampleRate,
                                                         channels: channels,
@@ -173,6 +196,7 @@ final class DirectMuxer {
                                                         trackID: 2)
         }
 
+        // 阶段 3：组装并写入 moov
         var moovBody = Data()
         moovBody.append(MP4PartMerger.makeMVHD(timescale: movieTimescale,
                                                duration: movieDuration,
@@ -183,8 +207,10 @@ final class DirectMuxer {
         moov.append(contentsOf: be32(UInt32(moovBody.count + 8)))
         moov.append("moov".data(using: .ascii)!)
         moov.append(moovBody)
+
+        DiagnosticsLog.write("[转MP4] 收尾③写 moov \(moov.count)B 内存=\(os_proc_available_memory() / (1024 * 1024))MB")
         try handle.write(contentsOf: moov)
-        DiagnosticsLog.write("[转MP4] moov 已写入 \(moov.count)B 视频样本=\(videoSizes.count) 关键帧=\(videoKeyframes.count) 音频帧=\(audioSizes.count)")
+        flushSync()
 
         let totalMdat = 16 + (writeOffset - mdatContentStart)
         var sizeBytes = Data()
@@ -194,7 +220,7 @@ final class DirectMuxer {
         try handle.close()
 
         let finalSize = writeOffset + UInt64(moov.count)
-        return "自研封装完成 视频样本=\(videoSizes.count) 关键帧=\(videoKeyframes.count) 音频帧=\(audioSizes.count) 总大小=\(finalSize)B"
+        return "自研封装完成 视频样本=\(videoSizes.count) 关键帧=\(videoKeyframes.count) 音频帧=\(audioSizes.count) moov=\(moov.count)B 总大小=\(finalSize)B"
     }
 
     private func be32(_ value: UInt32) -> [UInt8] {

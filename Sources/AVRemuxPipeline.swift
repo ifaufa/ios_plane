@@ -106,7 +106,7 @@ enum AVRemuxPipeline {
         if fm.fileExists(atPath: destination.path) {
             try fm.removeItem(at: destination)
         }
-        let spooling = collectAudio || useDirect
+        let spooling = collectAudio && !useDirect
         var directMuxer: DirectMuxer?
         if useDirect {
             directMuxer = try DirectMuxer(destination: destination)
@@ -566,6 +566,11 @@ enum AVRemuxPipeline {
                 AVRemuxPipeline.lastAudioChannels = info.channels
             }
             if videoOnly {
+                // 自研封装：音频边转边写入 mdat（避免收尾时 300MB 突发写）
+                if let muxer = directMuxer {
+                    muxer.appendAudio(data)
+                    return
+                }
                 if spooling {
                     spoolLock.lock()
                     try? spoolHandle?.write(contentsOf: data)
@@ -773,18 +778,29 @@ enum AVRemuxPipeline {
                 try? FileManager.default.removeItem(at: destination)
                 throw RemuxError(message: "内存不足（\(Int(availableMemory / (1024 * 1024)))MB），收尾已中止并清理半成品；原分片已保留")
             }
-            DiagnosticsLog.write("[转MP4] 自研封装：开始写 moov（追加音频 \(spoolSizes.count) 帧）")
-            let log = try muxer.finish(width: info.width,
-                                       height: info.height,
-                                       sps: info.sps,
-                                       pps: info.pps,
-                                       frameStep: frameStep,
-                                       sampleRate: max(8000, AVRemuxPipeline.lastAudioSampleRate),
-                                       channels: max(1, AVRemuxPipeline.lastAudioChannels),
-                                       asc: AVRemuxPipeline.lastAudioASC ?? Data(),
-                                       audioSpoolURL: spoolURL,
-                                       audioSizes: spoolSizes)
-            DiagnosticsLog.write("[转MP4] \(log)")
+            DiagnosticsLog.write("[转MP4] 自研封装：开始收尾（音频已边转边写入）")
+            var finishError: Error?
+            for attempt in 1...2 {
+                do {
+                    let log = try muxer.finish(width: info.width,
+                                               height: info.height,
+                                               sps: info.sps,
+                                               pps: info.pps,
+                                               frameStep: frameStep,
+                                               sampleRate: max(8000, AVRemuxPipeline.lastAudioSampleRate),
+                                               channels: max(1, AVRemuxPipeline.lastAudioChannels),
+                                               asc: AVRemuxPipeline.lastAudioASC ?? Data())
+                    DiagnosticsLog.write("[转MP4] \(log)")
+                    finishError = nil
+                    break
+                } catch {
+                    finishError = error
+                    DiagnosticsLog.write("[转MP4] 收尾失败（第 \(attempt) 次）：\(error.localizedDescription) 内存=\(os_proc_available_memory() / (1024 * 1024))MB")
+                    muxer.flushSync()
+                    Thread.sleep(forTimeInterval: 1.0)
+                }
+            }
+            if let finishError { throw finishError }
             return
         }
     }
