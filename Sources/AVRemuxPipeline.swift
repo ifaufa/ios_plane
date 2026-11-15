@@ -327,21 +327,23 @@ enum AVRemuxPipeline {
             var videoPumpFinished = false
             var audioPumpFinished = false
             doneGroup.enter()
+            // 计数器必须跨回调保持（requestMediaDataWhenReady 可能多次回调，放进闭包内会被反复重置）
+            var pumpAppended = 0
+            var pumpSkippedInvalid = 0
+            var pumpSkippedToKeyframe = 0
+            var pumpRetries = 0
+            var pumpExpectKeyframe = false
+            var pumpLoggedIssue = false
+            var pumpLastDTS: Int64 = -1
             vInput.requestMediaDataWhenReady(on: pumpQueue) {
                 var idleSince: Date?
-                var appendedCount = 0
-                var skippedInvalid = 0
-                var skippedToKeyframe = 0
-                var retries = 0
-                var expectKeyframe = false
-                var loggedIssue = false
                 while vInput.isReadyForMoreMediaData {
                     guard let item = videoQueue.pop(waitSeconds: 0.2) else {
                         if videoQueue.isFinished {
                             if !videoPumpFinished {
                                 videoPumpFinished = true
-                                if skippedInvalid > 0 || skippedToKeyframe > 0 {
-                                    DiagnosticsLog.write("[转MP4] 写入汇总 已写=\(appendedCount) 跳过非法=\(skippedInvalid) 对齐跳过=\(skippedToKeyframe) 重试=\(retries)")
+                                if pumpSkippedInvalid > 0 || pumpSkippedToKeyframe > 0 {
+                                    DiagnosticsLog.write("[转MP4] 写入汇总 已写=\(pumpAppended) 跳过非法=\(pumpSkippedInvalid) 对齐跳过=\(pumpSkippedToKeyframe) 重试=\(pumpRetries)")
                                 }
                                 vInput.markAsFinished()
                                 doneGroup.leave()
@@ -362,17 +364,17 @@ enum AVRemuxPipeline {
                     idleSince = nil
 
                     // A：起始必须对齐到关键帧，并跳过非法样本（零长/长度前缀不符）
-                    if appendedCount == 0 || expectKeyframe {
+                    if pumpAppended == 0 || pumpExpectKeyframe {
                         guard item.isKey else {
-                            skippedToKeyframe += 1
+                            pumpSkippedToKeyframe += 1
                             continue
                         }
-                        expectKeyframe = false
+                        pumpExpectKeyframe = false
                     }
                     guard isValidAVCC(item.data) else {
-                        skippedInvalid += 1
-                        if !loggedIssue {
-                            loggedIssue = true
+                        pumpSkippedInvalid += 1
+                        if !pumpLoggedIssue {
+                            pumpLoggedIssue = true
                             DiagnosticsLog.write("[转MP4] 跳过非法样本 len=\(item.data.count) key=\(item.isKey) dts=\(item.dts)")
                         }
                         continue
@@ -391,25 +393,26 @@ enum AVRemuxPipeline {
                         return
                     }
                     let sampleIndex = videoFrames
-                    if appendedCount == 0 {
-                        DiagnosticsLog.write("[转MP4] 起始样本 长度=\(item.data.count)B 关键帧=\(item.isKey) dts=\(item.dts) 跳过非法=\(skippedInvalid) 对齐跳过=\(skippedToKeyframe)")
+                    if pumpAppended == 0 {
+                        DiagnosticsLog.write("[转MP4] 起始样本 长度=\(item.data.count)B 关键帧=\(item.isKey) dts=\(item.dts) 上一样本DTS=\(pumpLastDTS) 跳过非法=\(pumpSkippedInvalid) 对齐跳过=\(pumpSkippedToKeyframe)")
                     }
                     if !vInput.append(buffer) {
                         let error = newWriter.error as NSError?
                         // B：还没写成功过 → 判定为起始样本异常，跳到下一个关键帧重试（最多 3 次）
-                        if appendedCount == 0, retries < 3 {
-                            retries += 1
-                            expectKeyframe = true
-                            DiagnosticsLog.write("[转MP4] 首样本被拒（\(error?.code ?? 0) \(error?.localizedDescription ?? "")），跳到下一个关键帧重试 第\(retries)次")
+                        if pumpAppended == 0, pumpRetries < 3 {
+                            pumpRetries += 1
+                            pumpExpectKeyframe = true
+                            DiagnosticsLog.write("[转MP4] 首样本被拒（\(error?.code ?? 0) \(error?.localizedDescription ?? "")），跳到下一个关键帧重试 第\(pumpRetries)次")
                             continue
                         }
-                        DiagnosticsLog.write("[转MP4] 样本写入失败 已写=\(appendedCount) 跳过非法=\(skippedInvalid) 对齐跳过=\(skippedToKeyframe) 重试=\(retries) 错误=\(error?.code ?? 0) \(error?.localizedDescription ?? "")")
+                        DiagnosticsLog.write("[转MP4] 样本写入失败 已写=\(pumpAppended) 失败样本 len=\(item.data.count)B key=\(item.isKey) dts=\(item.dts) prevDTS=\(pumpLastDTS) pts=\(item.pts) status=\(newWriter.status.rawValue) 错误=\(error?.code ?? 0) \(error?.localizedDescription ?? "")")
                         setFailure("追加视频样本失败：\(error?.code ?? 0) \(error?.localizedDescription ?? "")")
                         if !videoPumpFinished { videoPumpFinished = true; doneGroup.leave() }
                         vInput.markAsFinished()
                         return
                     }
-                    appendedCount += 1
+                    pumpAppended += 1
+                    pumpLastDTS = item.dts
                     keyframeLock.lock()
                     if item.isKey { lastKeyframeIndices.append(Int32(sampleIndex)) }
                     lastVideoSizes.append(Int32(item.data.count))
@@ -526,6 +529,7 @@ enum AVRemuxPipeline {
         }
 
         var processedSegments = 0
+        var paramChangeLogged = false
         let excludedIndices = Set(state.excluded ?? [])
         let total = max(1, state.segmentURLs.count - excludedIndices.count)
         // 心跳 + 停滞看门狗：卡住时能给出可诊断信息并自动中止
@@ -609,6 +613,20 @@ enum AVRemuxPipeline {
                 if currentFailure() != nil { break }
             }
             try? handle.close()
+
+            // P2：参数集变化检测（不同码率变体常在片段边界更换 SPS/PPS，会导致写入被拒）
+            if let info = demuxer.videoInfo(), AVRemuxPipeline.lastVideoWidth > 0 {
+                let baseSPS = AVRemuxPipeline.lastVideoSPS
+                let basePPS = AVRemuxPipeline.lastVideoPPS
+                if !baseSPS.isEmpty, (info.sps != baseSPS || info.pps != basePPS) {
+                    let changed = "[转MP4] 参数集变化 @段#\(index) 分辨率 \(AVRemuxPipeline.lastVideoWidth)x\(AVRemuxPipeline.lastVideoHeight) → \(info.width)x\(info.height) SPS=\(info.sps.count)B PPS=\(info.pps.count)B"
+                    if !paramChangeLogged {
+                        paramChangeLogged = true
+                        DiagnosticsLog.write(changed)
+                    }
+                }
+            }
+
             if index == 0, writer == nil, currentFailure() == nil {
                 do { try makeWriterIfNeeded(force: true) } catch { setFailure(error.localizedDescription) }
             }
