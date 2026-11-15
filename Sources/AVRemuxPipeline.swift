@@ -110,7 +110,7 @@ enum AVRemuxPipeline {
         var directMuxer: DirectMuxer?
         if useDirect {
             directMuxer = try DirectMuxer(destination: destination)
-            DiagnosticsLog.write("[转MP4] 使用自研封装（不经 AVAssetWriter）")
+            DiagnosticsLog.write("[转MP4] 使用自研封装（不经 AVAssetWriter），目标=\(destination.lastPathComponent)")
         }
 
         let demuxer = TSDemuxer()
@@ -674,7 +674,7 @@ enum AVRemuxPipeline {
                 }
             }
 
-            if index == 0, writer == nil, currentFailure() == nil {
+            if index == 0, writer == nil, directMuxer == nil, currentFailure() == nil {
                 do { try makeWriterIfNeeded(force: true) } catch { setFailure(error.localizedDescription) }
             }
             processedSegments = index + 1

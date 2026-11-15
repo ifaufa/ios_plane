@@ -31,8 +31,9 @@ enum MediaConverter {
         let dirSize = directorySize(dir)
         let estimatedFinal = Int64(Double(dirSize) * 0.75)
         let audioSpool = Int64(Double(dirSize) * 0.12)
-        // 分段转换会在磁盘上同时存在「各段 part 文件」与「合并后的成品」，需一并计入
-        let segmentedParts = dirSize > 1_200_000_000 ? Int64(Double(dirSize) * 0.85) : 0
+        // 分段转换会在磁盘上同时存在「各段 part 文件」与「合并后的成品」，仅非直写模式才需要计入
+        let directEnabledEarly = (UserDefaults.standard.object(forKey: "mp4UseDirectMuxer") as? Bool) ?? true
+        let segmentedParts = (!directEnabledEarly && dirSize > 1_200_000_000) ? Int64(Double(dirSize) * 0.85) : 0
         let safetyMargin: Int64 = 1024 * 1024 * 1024
         let required = dirSize + estimatedFinal + audioSpool + segmentedParts + safetyMargin
         if let available = availableCapacity() {
@@ -73,19 +74,20 @@ enum MediaConverter {
                 let asset = AVURLAsset(url: outputURL)
                 let videoCount = ((try? await asset.loadTracks(withMediaType: .video)) ?? []).count
                 let audioCount = ((try? await asset.loadTracks(withMediaType: .audio)) ?? []).count
+                let duration = ((try? await asset.load(.duration))?.seconds) ?? 0
                 let hasStss = MP4Inspector.describe(outputURL).contains("stss(")
-                DiagnosticsLog.write(String(format: "[转MP4] 自研封装校验 耗时 %.1fs 视频轨=%d 音频轨=%d stss=%@",
+                DiagnosticsLog.write(String(format: "[转MP4] 自研封装校验 耗时 %.1fs 视频轨=%d 音频轨=%d stss=%@ 时长=%.1fs",
                                             Date().timeIntervalSince(start), videoCount, audioCount,
-                                            hasStss ? "已写入" : "未写入"))
-                if videoCount == 1, audioCount >= 1, hasStss {
-                    produced = true
-                } else {
+                                            hasStss ? "已写入" : "未写入", duration))
+                guard videoCount == 1, audioCount >= 1, hasStss, duration > 1 else {
                     try? fm.removeItem(at: outputURL)
-                    DiagnosticsLog.write("[转MP4] 自研封装校验未通过，已删除产物")
+                    throw PlaylistError.network("转换失败：自研封装产物校验未通过（视频轨=\(videoCount) 音频轨=\(audioCount) stss=\(hasStss ? "有" : "无") 时长=\(String(format: "%.1f", duration))s）")
                 }
+                produced = true
             } catch {
                 try? fm.removeItem(at: outputURL)
-                DiagnosticsLog.write("[转MP4] 自研封装失败：\(error.localizedDescription)")
+                DiagnosticsLog.write("[转MP4] 自研封装失败（不回落到系统封装）：\(error.localizedDescription)")
+                throw error
             }
         }
 
