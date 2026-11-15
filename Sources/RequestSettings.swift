@@ -73,6 +73,16 @@ enum RequestSettings {
         }
     }
 
+    /// 清零所有规则的命中计数
+    static func resetHitCounts() {
+        cacheLock.lock()
+        pendingHits.removeAll()
+        cacheLock.unlock()
+        var list = profiles
+        for index in list.indices { list[index].hitCount = 0 }
+        profiles = list
+    }
+
     /// 把内存中的命中次数合并到规则并持久化
     static func flushHitCounts() {
         cacheLock.lock()

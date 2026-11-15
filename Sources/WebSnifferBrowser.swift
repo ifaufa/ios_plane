@@ -48,12 +48,40 @@ struct Candidate: Identifiable, Equatable {
     var state: State = .checking
     var info: M3U8Info?
     var selected = false
+    /// 编辑中的地址（提交后才写回 url）
+    var urlDraft: String
+    /// 标题是否被用户手动改过（改过则地址变更时不覆盖标题）
+    var titleEditedByUser = false
 
     init(id: String, url: URL, title: String? = nil, sources: Set<Source>) {
         self.id = id
         self.url = url
         self.title = title ?? LinkParser.defaultTitle(for: url)
         self.sources = sources
+        self.urlDraft = url.absoluteString
+    }
+
+    /// 校验编辑中的地址
+    var draftError: String? {
+        let trimmed = urlDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "地址不能为空" }
+        guard let parsed = URL(string: trimmed),
+              let scheme = parsed.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              (parsed.host ?? "").isEmpty == false else {
+            return "请输入完整的 http/https 地址"
+        }
+        return nil
+    }
+
+    var draftURL: URL? {
+        guard draftError == nil else { return nil }
+        return URL(string: urlDraft.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    /// 地址是否与当前生效地址不同
+    var hasDraftChange: Bool {
+        urlDraft.trimmingCharacters(in: .whitespacesAndNewlines) != url.absoluteString
     }
 
     var subtitle: String {
@@ -203,6 +231,42 @@ final class BrowserModel: NSObject, ObservableObject {
     }
 
     @discardableResult
+    /// 应用编辑后的地址：去重 → 重置状态 → 重新检测
+    func commitCandidateURL(id: String) {
+        guard let index = candidates.firstIndex(where: { $0.id == id }),
+              let newURL = candidates[index].draftURL else { return }
+
+        if let dupIndex = candidates.firstIndex(where: { $0.id != id && $0.url.absoluteString == newURL.absoluteString }) {
+            candidates[dupIndex].selected = candidates[dupIndex].selected || candidates[index].selected
+            candidates.remove(at: index)
+            DiagnosticsLog.write("[候选] 地址修改后与已有项重复，已合并")
+            return
+        }
+
+        candidates[index].url = newURL
+        candidates[index].urlDraft = newURL.absoluteString
+        candidates[index].sources.insert(.manual)
+        if !candidates[index].titleEditedByUser {
+            candidates[index].title = LinkParser.defaultTitle(for: newURL)
+        }
+        candidates[index].state = .checking
+        candidates[index].info = nil
+        DiagnosticsLog.write("[候选] 地址已修改 → 重新检测 \(newURL.absoluteString)")
+
+        Task { @MainActor in
+            let result = await M3U8Inspector.inspect(newURL)
+            guard let target = self.candidates.firstIndex(where: { $0.url == newURL }) else { return }
+            switch result {
+            case .available(let info):
+                self.candidates[target].state = .available
+                self.candidates[target].info = info
+            case .invalid(let message):
+                self.candidates[target].state = .invalid(message)
+            case .unreachable(let message):
+                self.candidates[target].state = .unreachable(message)
+            }
+        }
+    }
     func addCandidates(_ entries: [LinkParser.Entry], source: Candidate.Source, inspect: Bool) -> AddSummary {
         var summary = AddSummary()
         var changed = false
@@ -754,6 +818,9 @@ struct WebSnifferBrowser: View {
 struct CandidateRow: View {
     @Binding var candidate: Candidate
     let onToggle: () -> Void
+    var onCommitURL: () -> Void = {}
+
+    @FocusState private var urlFocused: Bool
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -766,11 +833,13 @@ struct CandidateRow: View {
             .disabled(!candidate.isSelectable)
 
             VStack(alignment: .leading, spacing: 3) {
-                TextField("标题", text: $candidate.title)
-                    .font(.subheadline.weight(.medium))
-                    .textFieldStyle(.plain)
-                    .submitLabel(.done)
-                    .disabled(!candidate.isSelectable)
+                TextField("标题", text: Binding(
+                    get: { candidate.title },
+                    set: { candidate.title = $0; candidate.titleEditedByUser = true }
+                ))
+                .font(.subheadline.weight(.medium))
+                .textFieldStyle(.plain)
+                .submitLabel(.done)
 
                 Text(candidate.subtitle)
                     .font(.caption)
@@ -780,12 +849,41 @@ struct CandidateRow: View {
                     .font(.caption2)
                     .foregroundStyle(Color.secondary)
 
-                Text(candidate.url.absoluteString)
+                TextField("下载地址", text: $candidate.urlDraft, axis: .vertical)
                     .font(.caption2)
-                    .foregroundStyle(Color.secondary)
-                    .lineLimit(1)
+                    .textFieldStyle(.plain)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .keyboardType(.URL)
+                    .lineLimit(1...3)
+                    .focused($urlFocused)
+                    .onSubmit { commit() }
+
+                if let error = candidate.draftError {
+                    Text(error)
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+                } else if candidate.hasDraftChange {
+                    Button("应用新地址并重新检测") { commit() }
+                        .font(.caption2.weight(.semibold))
+                } else if !candidate.url.absoluteString.lowercased().contains(".m3u8") {
+                    Text("注意：该地址不是 m3u8 播放列表，可能无法下载")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                }
             }
         }
+        .onChange(of: urlFocused) { focused in
+            if !focused, candidate.hasDraftChange, candidate.draftError == nil {
+                commit()
+            }
+        }
+    }
+
+    private func commit() {
+        guard candidate.draftError == nil, candidate.hasDraftChange else { return }
+        urlFocused = false
+        onCommitURL()
     }
 }
 
@@ -803,9 +901,9 @@ private struct CandidateSheet: View {
                         .foregroundStyle(.secondary)
                 }
                 ForEach(model.candidates.indices, id: \.self) { index in
-                    CandidateRow(candidate: $model.candidates[index]) {
-                        model.toggle(model.candidates[index].id)
-                    }
+                    CandidateRow(candidate: $model.candidates[index],
+                                 onToggle: { model.toggle(model.candidates[index].id) },
+                                 onCommitURL: { model.commitCandidateURL(id: model.candidates[index].id) })
                 }
             }
             .navigationTitle("候选（\(model.selectedCount)/\(model.candidates.count)）")
@@ -909,6 +1007,10 @@ struct HeadersSettingsView: View {
                 }
 
                 Section {
+                    Button("重置命中计数") {
+                        RequestSettings.resetHitCounts()
+                        profiles = RequestSettings.profiles
+                    }
                     Button("恢复默认（清空所有规则）", role: .destructive) {
                         profiles = []
                     }

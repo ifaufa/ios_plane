@@ -78,9 +78,9 @@ struct AddDownloadView: View {
     private var resultSection: some View {
         Section("检测结果（\(selectedCount)/\(rows.count) 已选）") {
             ForEach(rows.indices, id: \.self) { index in
-                CandidateRow(candidate: $rows[index]) {
-                    toggle(rows[index].id)
-                }
+                CandidateRow(candidate: $rows[index],
+                             onToggle: { toggle(rows[index].id) },
+                             onCommitURL: { commitURL(index: index) })
             }
             Button("全选可用", action: selectAll)
                 .font(.footnote)
@@ -104,6 +104,45 @@ struct AddDownloadView: View {
 
     private var selectedCount: Int {
         rows.filter { $0.selected && $0.isSelectable }.count
+    }
+
+    /// 应用编辑后的地址：去重 → 重置状态 → 重新检测
+    private func commitURL(index: Int) {
+        guard rows.indices.contains(index),
+              let newURL = rows[index].draftURL else { return }
+
+        if let dupIndex = rows.firstIndex(where: { $0.id != rows[index].id && $0.url.absoluteString == newURL.absoluteString }) {
+            rows[dupIndex].selected = rows[dupIndex].selected || rows[index].selected
+            rows.remove(at: index)
+            DiagnosticsLog.write("[候选] 地址修改后与已有项重复，已合并")
+            return
+        }
+
+        rows[index].url = newURL
+        rows[index].urlDraft = newURL.absoluteString
+        rows[index].sources.insert(.manual)
+        if !rows[index].titleEditedByUser {
+            rows[index].title = LinkParser.defaultTitle(for: newURL)
+        }
+        rows[index].state = .checking
+        rows[index].info = nil
+        DiagnosticsLog.write("[候选] 地址已修改 → 重新检测 \(newURL.absoluteString)")
+
+        Task {
+            let result = await M3U8Inspector.inspect(newURL)
+            await MainActor.run {
+                guard let target = rows.firstIndex(where: { $0.url == newURL }) else { return }
+                switch result {
+                case .available(let info):
+                    rows[target].state = .available
+                    rows[target].info = info
+                case .invalid(let message):
+                    rows[target].state = .invalid(message)
+                case .unreachable(let message):
+                    rows[target].state = .unreachable(message)
+                }
+            }
+        }
     }
 
     private func toggle(_ id: String) {
