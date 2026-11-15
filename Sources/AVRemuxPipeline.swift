@@ -211,6 +211,11 @@ enum AVRemuxPipeline {
                 if let muxer = directMuxer {
                     do {
                         try muxer.appendVideo(data: item.data, isKey: item.isKey, pts: item.pts, dts: item.dts)
+                        lock.lock()
+                        videoFrames += 1
+                        lastVideoPTS = item.pts
+                        lastVideoDTS = item.dts
+                        lock.unlock()
                     } catch {
                         setFailure("自研封装写入失败：\(error.localizedDescription)")
                         return
@@ -582,6 +587,7 @@ enum AVRemuxPipeline {
         // 心跳 + 停滞看门狗：卡住时能给出可诊断信息并自动中止
         let heartbeatQueue = DispatchQueue(label: "remux.heartbeat")
         var lastFrameSnapshot = -1
+        var lastSegmentSnapshot = -1
         var stallTicks = 0
         let heartbeat = DispatchSource.makeTimerSource(queue: heartbeatQueue)
         heartbeat.schedule(deadline: .now() + 5, repeating: 5)
@@ -593,16 +599,21 @@ enum AVRemuxPipeline {
             lock.unlock()
 
             // 只要帧数不增长就计入停滞（包含 writer 尚未创建的情况）
-            if frames == lastFrameSnapshot {
+            if frames == lastFrameSnapshot, processedSegments == lastSegmentSnapshot {
                 stallTicks += 1
             } else {
                 stallTicks = 0
             }
+            lastSegmentSnapshot = processedSegments
             lastFrameSnapshot = frames
 
             let ready = videoInput?.isReadyForMoreMediaData ?? false
             let status = writer?.status.rawValue ?? -1
-            DiagnosticsLog.write("[转MP4] 心跳 段=\(processedSegments) 帧=\(frames) 队列=\(videoQueue.depth) ready=\(ready) status=\(status) 停滞=\(stallTicks) \(demuxer.debugBufferSizes()) 内存=\(os_proc_available_memory() / (1024 * 1024))MB")
+            if directMuxer != nil {
+                DiagnosticsLog.write("[转MP4] 心跳 段=\(processedSegments) 帧=\(frames) (直写) 停滞=\(stallTicks) \(demuxer.debugBufferSizes()) 内存=\(os_proc_available_memory() / (1024 * 1024))MB")
+            } else {
+                DiagnosticsLog.write("[转MP4] 心跳 段=\(processedSegments) 帧=\(frames) 队列=\(videoQueue.depth) ready=\(ready) status=\(status) 停滞=\(stallTicks) \(demuxer.debugBufferSizes()) 内存=\(os_proc_available_memory() / (1024 * 1024))MB")
+            }
 
             // 30 秒无进展：打一次现场，但不中止（可能只是写得慢）
             if stallTicks == 6 {
@@ -639,11 +650,11 @@ enum AVRemuxPipeline {
             }
             if index % 50 == 0 {
                 let available = os_proc_available_memory()
-                if available < 300 * 1024 * 1024 {
+                if Double(available) < (directMuxer != nil ? 150.0 : 300.0) * 1024 * 1024 {
                     // 内存吃紧：暂停喂数据，等系统回收（最多 90 秒），而不是直接放弃已完成的工作
                     let startWait = Date()
-                    while os_proc_available_memory() < 500 * 1024 * 1024,
-                          Date().timeIntervalSince(startWait) < 90 {
+                    while Double(os_proc_available_memory()) < (directMuxer != nil ? 250.0 : 500.0) * 1024 * 1024,
+                          Date().timeIntervalSince(startWait) < (directMuxer != nil ? 15.0 : 90.0) {
                         Thread.sleep(forTimeInterval: 0.5)
                     }
                     let after = os_proc_available_memory()

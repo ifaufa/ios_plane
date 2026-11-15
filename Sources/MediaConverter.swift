@@ -85,9 +85,20 @@ enum MediaConverter {
                 }
                 produced = true
             } catch {
-                try? fm.removeItem(at: outputURL)
-                DiagnosticsLog.write("[转MP4] 自研封装失败（不回落到系统封装）：\(error.localizedDescription)")
-                throw error
+                // 产物可能已完整写入（例如仅收尾判定抛错）：先校验，能用就按成功处理
+                let rescuedAsset = AVURLAsset(url: outputURL)
+                let rescuedVideo = ((try? await rescuedAsset.loadTracks(withMediaType: .video)) ?? []).count
+                let rescuedAudio = ((try? await rescuedAsset.loadTracks(withMediaType: .audio)) ?? []).count
+                let rescuedStss = MP4Inspector.describe(outputURL).contains("stss(")
+                let rescuedSize = (try? outputURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                DiagnosticsLog.write("[转MP4] 自研封装抛错：\(error.localizedDescription)｜产物 大小=\(rescuedSize)B 视频轨=\(rescuedVideo) 音频轨=\(rescuedAudio) stss=\(rescuedStss ? "有" : "无")")
+                if rescuedVideo == 1, rescuedAudio >= 1, rescuedStss, rescuedSize > 1_000_000 {
+                    DiagnosticsLog.write("[转MP4] 产物结构完整，按成功处理")
+                    produced = true
+                } else {
+                    try? fm.removeItem(at: outputURL)
+                    throw error
+                }
             }
         }
 
