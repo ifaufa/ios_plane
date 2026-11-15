@@ -631,6 +631,7 @@ struct EngineSettingsView: View {
     @State private var dropKeyChanged = UserDefaults.standard.bool(forKey: AdFilter.dropKeyChangedKey)
     @State private var adFingerprint = UserDefaults.standard.bool(forKey: AdFilter.fingerprintKey)
     @State private var writeStss = (UserDefaults.standard.object(forKey: "mp4WriteStss") as? Bool) ?? true
+    @State private var useDirectMuxer = (UserDefaults.standard.object(forKey: "mp4UseDirectMuxer") as? Bool) ?? true
     @State private var completionSound = (UserDefaults.standard.object(forKey: CompletionFeedback.soundKey) as? Bool) ?? true
     @State private var completionNotice = (UserDefaults.standard.object(forKey: CompletionFeedback.noticeKey) as? Bool) ?? true
 
@@ -661,9 +662,10 @@ struct EngineSettingsView: View {
                         Text("提示音为低音量；通知在 App 后台时显示，前台仅 Toast 与提示音。")
                     }
                     Section {
+                        Toggle("使用自研封装（推荐）", isOn: $useDirectMuxer)
                         Toggle("转换时写入同步样本表(stss)", isOn: $writeStss)
                     } footer: {
-                        Text("开启后新转换的 MP4 会写入 stss，续播/拖动/缩略图定位更可靠。若转换后出现异常可关闭该项。")
+                        Text("自研封装不经过系统 AVAssetWriter，可规避部分源写入被拒的问题；若遇到异常可关闭，改用系统封装。stss 开关影响续播/拖动/缩略图定位。")
                     }
                     Section {
                         Picker("同时下载任务数", selection: $maxTasks) {
@@ -711,6 +713,7 @@ struct EngineSettingsView: View {
                         UserDefaults.standard.set(dropKeyChanged, forKey: AdFilter.dropKeyChangedKey)
                         UserDefaults.standard.set(adFingerprint, forKey: AdFilter.fingerprintKey)
                         UserDefaults.standard.set(writeStss, forKey: "mp4WriteStss")
+                        UserDefaults.standard.set(useDirectMuxer, forKey: "mp4UseDirectMuxer")
                         UserDefaults.standard.set(completionSound, forKey: CompletionFeedback.soundKey)
                         UserDefaults.standard.set(completionNotice, forKey: CompletionFeedback.noticeKey)
                         if completionNotice { CompletionFeedback.requestAuthorizationIfNeeded() }

@@ -203,7 +203,7 @@ enum MP4PartMerger {
 
     // MARK: - box 构建
 
-    private static func makeVideoTrak(sampleCount: Int,
+    static func makeVideoTrak(sampleCount: Int,
                                       sizes: [Int32],
                                       ctts: [Int32],
                                       keyframes: [Int32],
@@ -407,7 +407,7 @@ enum MP4PartMerger {
         return trak
     }
 
-    private static func makeMVHD(timescale: UInt32, duration: UInt32, nextTrackID: UInt32) -> Data {
+    static func makeMVHD(timescale: UInt32, duration: UInt32, nextTrackID: UInt32) -> Data {
         var body = Data()
         body.append(contentsOf: [0x00, 0x00, 0x00, 0x00])
         body.append(contentsOf: [0, 0, 0, 0, 0, 0, 0, 0])

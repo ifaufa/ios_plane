@@ -100,10 +100,17 @@ enum AVRemuxPipeline {
                             audioFormatFlags: UInt32,
                             collectAudio: Bool,
                             segmentRange: Range<Int>?,
-                            resetAudioSpool: Bool) throws {
+                            resetAudioSpool: Bool,
+                            useDirect: Bool = false) throws {
         let fm = FileManager.default
         if fm.fileExists(atPath: destination.path) {
             try fm.removeItem(at: destination)
+        }
+        let spooling = collectAudio || useDirect
+        var directMuxer: DirectMuxer?
+        if useDirect {
+            directMuxer = try DirectMuxer(destination: destination)
+            DiagnosticsLog.write("[转MP4] 使用自研封装（不经 AVAssetWriter）")
         }
 
         let demuxer = TSDemuxer()
@@ -116,7 +123,7 @@ enum AVRemuxPipeline {
         var spoolURL: URL?
         var spoolHandle: FileHandle?
         var spoolSizes: [Int] = []
-        if collectAudio {
+        if spooling {
             if resetAudioSpool {
                 if let previous = AVRemuxPipeline.lastAudioSpoolURL { try? FileManager.default.removeItem(at: previous) }
                 let url = FileManager.default.temporaryDirectory
@@ -192,7 +199,7 @@ enum AVRemuxPipeline {
             }
             // 关键：必须在入队前创建 writer。队列容量有限，
             // 若先 push 再等"累计 N 帧才建 writer"，队列填满后 push 永久阻塞（表现为卡在 0%）
-            if writer == nil, currentFailure() == nil {
+            if writer == nil, directMuxer == nil, currentFailure() == nil {
                 do { try makeWriterIfNeeded(force: true) } catch { setFailure(error.localizedDescription) }
             }
             for index in 0..<count {
@@ -201,7 +208,16 @@ enum AVRemuxPipeline {
                                      dts: decodeCursor * frameStep,
                                      isKey: gop[index].isKey)
                 decodeCursor += 1
-                videoQueue.push(item)
+                if let muxer = directMuxer {
+                    do {
+                        try muxer.appendVideo(data: item.data, isKey: item.isKey, pts: item.pts, dts: item.dts)
+                    } catch {
+                        setFailure("自研封装写入失败：\(error.localizedDescription)")
+                        return
+                    }
+                } else {
+                    videoQueue.push(item)
+                }
             }
             displayCursor += Int64(count)
             gop.removeAll()
@@ -545,7 +561,7 @@ enum AVRemuxPipeline {
                 AVRemuxPipeline.lastAudioChannels = info.channels
             }
             if videoOnly {
-                if collectAudio {
+                if spooling {
                     spoolLock.lock()
                     try? spoolHandle?.write(contentsOf: data)
                     spoolSizes.append(data.count)
@@ -705,7 +721,7 @@ enum AVRemuxPipeline {
             AVRemuxPipeline.lastAudioSampleRate = info.sampleRate
             AVRemuxPipeline.lastAudioChannels = info.channels
         }
-        if collectAudio {
+        if spooling {
             try? spoolHandle?.close()
             spoolHandle = nil
             AVRemuxPipeline.collectedAudioFrames = []
@@ -716,12 +732,45 @@ enum AVRemuxPipeline {
         }
                 DiagnosticsLog.write("[转MP4] 关键帧数=\(lastKeyframeIndices.count)/\(videoFrames) 用于补写 stss")
         DiagnosticsLog.write("[转MP4] 封装完成 视频帧=\(videoFrames) 音频帧=\(audioFrameIndex) GOP=\(gopCount) POC缺失=\(pocMissing) 帧间隔=\(frameStep)")
+
+        // 自研封装：直接收尾（追加音频 + 写 moov），不经过 AVAssetWriter
+        if let muxer = directMuxer {
+            guard currentFailure() == nil else { return }
+            guard let info = demuxer.videoInfo() else {
+                throw RemuxError(message: "自研封装失败：缺少视频参数")
+            }
+            let log = try muxer.finish(width: info.width,
+                                       height: info.height,
+                                       sps: info.sps,
+                                       pps: info.pps,
+                                       frameStep: frameStep,
+                                       sampleRate: max(8000, AVRemuxPipeline.lastAudioSampleRate),
+                                       channels: max(1, AVRemuxPipeline.lastAudioChannels),
+                                       asc: AVRemuxPipeline.lastAudioASC ?? Data(),
+                                       audioSpoolURL: spoolURL,
+                                       audioSizes: spoolSizes)
+            DiagnosticsLog.write("[转MP4] \(log)")
+            return
+        }
     }
 
     private static func availableBytes() -> Int64? {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let values = try? docs.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
         return values?.volumeAvailableCapacityForImportantUsage
+    }
+
+    /// 自研封装直写：一次产出最终 MP4（视频 + 音频），不经 AVAssetWriter
+    static func remuxDirect(state: SegmentJobState,
+                            dir: URL,
+                            destination: URL,
+                            onProgress: ((Double) -> Void)? = nil) async throws {
+        try await Task.detached(priority: .userInitiated) {
+            try run(state: state, dir: dir, destination: destination,
+                    progress: onProgress, videoOnly: true, audioFormatFlags: 2,
+                    collectAudio: true, segmentRange: nil, resetAudioSpool: true,
+                    useDirect: true)
+        }.value
     }
 
     static func remux(state: SegmentJobState,

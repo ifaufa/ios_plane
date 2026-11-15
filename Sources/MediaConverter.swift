@@ -64,6 +64,31 @@ enum MediaConverter {
         ThumbnailService.isPaused = true
         defer { ThumbnailService.isPaused = false }
 
+        // 0) 自研封装直写（默认）：一次产出最终 MP4，绕开 AVAssetWriter 的样本校验
+        let useDirectMuxer = (UserDefaults.standard.object(forKey: "mp4UseDirectMuxer") as? Bool) ?? true
+        if useDirectMuxer {
+            do {
+                let start = Date()
+                try await AVRemuxPipeline.remuxDirect(state: state, dir: dir, destination: outputURL, onProgress: onProgress)
+                let asset = AVURLAsset(url: outputURL)
+                let videoCount = ((try? await asset.loadTracks(withMediaType: .video)) ?? []).count
+                let audioCount = ((try? await asset.loadTracks(withMediaType: .audio)) ?? []).count
+                let hasStss = MP4Inspector.describe(outputURL).contains("stss(")
+                DiagnosticsLog.write(String(format: "[转MP4] 自研封装校验 耗时 %.1fs 视频轨=%d 音频轨=%d stss=%@",
+                                            Date().timeIntervalSince(start), videoCount, audioCount,
+                                            hasStss ? "已写入" : "未写入"))
+                if videoCount == 1, audioCount >= 1, hasStss {
+                    produced = true
+                } else {
+                    try? fm.removeItem(at: outputURL)
+                    DiagnosticsLog.write("[转MP4] 自研封装校验未通过，已删除产物")
+                }
+            } catch {
+                try? fm.removeItem(at: outputURL)
+                DiagnosticsLog.write("[转MP4] 自研封装失败：\(error.localizedDescription)")
+            }
+        }
+
         // 1) 自研解复用 + AVAssetWriter（视频轨已验证正确）
         //    S1：通过格式描述扩展提供完整 esds；S2：视频-only + 自建音频轨合并；S3：保留画面版本
         let fm2 = FileManager.default
