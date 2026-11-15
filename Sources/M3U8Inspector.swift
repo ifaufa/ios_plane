@@ -29,7 +29,7 @@ enum M3U8Inspector {
         var request = URLRequest(url: url)
         request.timeoutInterval = 8
         request.setValue("bytes=0-262143", forHTTPHeaderField: "Range")
-        for (key, value) in RequestSettings.headers {
+        for (key, value) in RequestSettings.headers(for: url) {
             request.setValue(value, forHTTPHeaderField: key)
         }
         do {

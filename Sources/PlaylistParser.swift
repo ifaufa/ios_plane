@@ -71,7 +71,7 @@ enum PlaylistParser {
     static func fetch(_ url: URL) async throws -> String {
         var request = URLRequest(url: url)
         request.timeoutInterval = 15
-        for (key, value) in RequestSettings.headers {
+        for (key, value) in RequestSettings.headers(for: url) {
             request.setValue(value, forHTTPHeaderField: key)
         }
         do {

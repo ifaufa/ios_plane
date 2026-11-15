@@ -124,7 +124,8 @@ final class BrowserModel: NSObject, ObservableObject {
         webView.navigationDelegate = self
         webView.uiDelegate = self
         webView.allowsBackForwardNavigationGestures = true
-        webView.customUserAgent = RequestSettings.userAgent.isEmpty ? nil : RequestSettings.userAgent
+        let defaultUA = RequestSettings.defaultProfile?.userAgent ?? ""
+        webView.customUserAgent = defaultUA.isEmpty ? nil : defaultUA
 
         observations.append(webView.observe(\.estimatedProgress, options: [.new]) { [weak self] view, _ in
             DispatchQueue.main.async { self?.progress = view.estimatedProgress }
@@ -184,11 +185,9 @@ final class BrowserModel: NSObject, ObservableObject {
 
     func load(_ url: URL) {
         var request = URLRequest(url: url)
-        if !RequestSettings.userAgent.isEmpty {
-            request.setValue(RequestSettings.userAgent, forHTTPHeaderField: "User-Agent")
-        }
-        if !RequestSettings.referer.isEmpty {
-            request.setValue(RequestSettings.referer, forHTTPHeaderField: "Referer")
+        // 按域名匹配对应规则（精确 > 后缀通配 > 全局默认）
+        for (key, value) in RequestSettings.headers(for: url) {
+            request.setValue(value, forHTTPHeaderField: key)
         }
         webView.load(request)
     }
@@ -843,26 +842,65 @@ private struct CandidateSheet: View {
 
 struct HeadersSettingsView: View {
     @Environment(\.dismiss) private var dismiss
-    @State private var referer = RequestSettings.referer
-    @State private var userAgent = RequestSettings.userAgent
+    @State private var profiles: [RequestProfile] = RequestSettings.profiles
+    @State private var editing: RequestProfile?
 
     var body: some View {
         NavigationStack {
-            Form {
-                Section("Referer（防盗链站点常用）") {
-                    TextField("https://example.com/", text: $referer)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                }
-                Section("User-Agent（留空用系统默认）") {
-                    TextField("Mozilla/5.0 …", text: $userAgent)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                }
+            List {
                 Section {
-                    Text("这些请求头会同时用于网页加载、预检和下载。填错会导致正常的源也无法访问，不确定就留空。")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                    ForEach(profiles.indices, id: \.self) { index in
+                        Button {
+                            editing = profiles[index]
+                        } label: {
+                            VStack(alignment: .leading, spacing: 3) {
+                                HStack {
+                                    Text(profiles[index].name.isEmpty ? "未命名" : profiles[index].name)
+                                        .font(.subheadline.weight(.medium))
+                                        .foregroundStyle(Color.primary)
+                                    Spacer()
+                                    Toggle("", isOn: Binding(
+                                        get: { profiles[index].enabled },
+                                        set: { profiles[index].enabled = $0 }
+                                    ))
+                                    .labelsHidden()
+                                }
+                                Text(profiles[index].displayName)
+                                    .font(.caption2)
+                                    .foregroundStyle(Color.secondary)
+                                if !profiles[index].userAgent.isEmpty {
+                                    Text("UA: \(profiles[index].userAgent.prefix(48))…")
+                                        .font(.caption2)
+                                        .foregroundStyle(Color.secondary)
+                                        .lineLimit(1)
+                                }
+                            }
+                        }
+                        .swipeActions {
+                            Button("删除", role: .destructive) {
+                                profiles.remove(at: index)
+                            }
+                        }
+                    }
+                } header: {
+                    Text("规则")
+                } footer: {
+                    Text("匹配规则：精确域名 play.abc.com；后缀 .abc.com 匹配该域名及所有子域；域名留空表示对所有网址生效。优先级：精确 > 后缀 > 默认。")
+                }
+
+                Section {
+                    Button {
+                        editing = RequestProfile(id: UUID(), name: "", hostPattern: "",
+                                                  referer: "", userAgent: "", enabled: true)
+                    } label: {
+                        Label("新增规则…", systemImage: "plus.circle")
+                    }
+                }
+
+                Section {
+                    Button("恢复默认（清空所有规则）", role: .destructive) {
+                        profiles = []
+                    }
                 }
             }
             .navigationTitle("请求头")
@@ -873,8 +911,101 @@ struct HeadersSettingsView: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("保存") {
-                        RequestSettings.referer = referer.trimmingCharacters(in: .whitespacesAndNewlines)
-                        RequestSettings.userAgent = userAgent.trimmingCharacters(in: .whitespacesAndNewlines)
+                        RequestSettings.profiles = profiles
+                        dismiss()
+                    }
+                }
+            }
+            .sheet(item: $editing) { profile in
+                HeaderRuleEditor(profile: profile) { updated in
+                    if let index = profiles.firstIndex(where: { $0.id == updated.id }) {
+                        profiles[index] = updated
+                    } else {
+                        profiles.append(updated)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 单条规则编辑（含 UA 预设）
+private struct HeaderRuleEditor: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var draft: RequestProfile
+    @State private var presetSelection: String = "自定义"
+    let onSave: (RequestProfile) -> Void
+
+    init(profile: RequestProfile, onSave: @escaping (RequestProfile) -> Void) {
+        _draft = State(initialValue: profile)
+        self.onSave = onSave
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("名称") {
+                    TextField("如 HHUUS", text: $draft.name)
+                }
+                Section {
+                    TextField("play.abc.com 或 .abc.com", text: $draft.hostPattern)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                } header: {
+                    Text("域名匹配")
+                } footer: {
+                    Text("留空 = 对所有网址生效；以 . 开头 = 该域名及所有子域")
+                }
+                Section("Referer") {
+                    TextField("https://example.com/", text: $draft.referer)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                }
+                Section {
+                    Picker("预设", selection: $presetSelection) {
+                        Text("自定义").tag("自定义")
+                        ForEach(RequestSettings.userAgentPresets, id: \.title) { preset in
+                            Text(preset.title).tag(preset.title)
+                        }
+                    }
+                    .onChange(of: presetSelection) { selection in
+                        if let preset = RequestSettings.userAgentPresets.first(where: { $0.title == selection }) {
+                            draft.userAgent = preset.value
+                        }
+                    }
+                    TextField("Mozilla/5.0 …", text: $draft.userAgent, axis: .vertical)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .lineLimit(3...6)
+                    if !draft.userAgent.isEmpty {
+                        Button("清空（使用系统默认）", role: .destructive) {
+                            draft.userAgent = ""
+                            presetSelection = "自定义"
+                        }
+                        .font(.footnote)
+                    }
+                } header: {
+                    Text("User-Agent")
+                } footer: {
+                    Text("选预设会自动填入，仍可手动修改；留空则使用系统默认 UA。")
+                }
+                Section {
+                    Toggle("启用该规则", isOn: $draft.enabled)
+                }
+            }
+            .navigationTitle("规则")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("完成") {
+                        draft.name = draft.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                        draft.hostPattern = draft.hostPattern.trimmingCharacters(in: .whitespacesAndNewlines)
+                        draft.referer = draft.referer.trimmingCharacters(in: .whitespacesAndNewlines)
+                        draft.userAgent = draft.userAgent.trimmingCharacters(in: .whitespacesAndNewlines)
+                        onSave(draft)
                         dismiss()
                     }
                 }

@@ -192,7 +192,7 @@ struct BookmarksSheet: View {
         case folder(UUID)
     }
 
-    @State private var scope: Scope = .all
+    @State private var scope: Scope = .unfiled
     @State private var renameTarget: Bookmark?
     @State private var renameText = ""
     @State private var folderRenameTarget: BookmarkFolder?

@@ -299,7 +299,7 @@ final class SegmentRunner: NSObject, ObservableObject {
     private func startSegment(jobId: String, index: Int, urlString: String) {
         guard let url = URL(string: urlString) else { return }
         var request = URLRequest(url: url)
-        for (key, value) in RequestSettings.headers {
+        for (key, value) in RequestSettings.headers(for: url) {
             request.setValue(value, forHTTPHeaderField: key)
         }
         let task = session.downloadTask(with: request)
@@ -396,7 +396,7 @@ final class SegmentRunner: NSObject, ObservableObject {
 
     private func downloadInitSegment(url: URL, dir: URL) async throws {
         var request = URLRequest(url: url)
-        for (key, value) in RequestSettings.headers {
+        for (key, value) in RequestSettings.headers(for: url) {
             request.setValue(value, forHTTPHeaderField: key)
         }
         let (data, response) = try await URLSession.shared.data(for: request)
@@ -410,7 +410,7 @@ final class SegmentRunner: NSObject, ObservableObject {
         guard let job = jobs[jobId], let keyURI = job.keyURI, let url = URL(string: keyURI) else { return nil }
         if let cached = keyCache[jobId] { return cached }
         var request = URLRequest(url: url)
-        for (key, value) in RequestSettings.headers {
+        for (key, value) in RequestSettings.headers(for: url) {
             request.setValue(value, forHTTPHeaderField: key)
         }
         let (data, response) = try await URLSession.shared.data(for: request)

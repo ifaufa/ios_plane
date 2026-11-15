@@ -59,7 +59,7 @@ enum CodecProbe {
         var request = URLRequest(url: first.url)
         request.timeoutInterval = 10
         request.setValue("bytes=0-524287", forHTTPHeaderField: "Range")
-        for (key, value) in RequestSettings.headers {
+        for (key, value) in RequestSettings.headers(for: first.url) {
             request.setValue(value, forHTTPHeaderField: key)
         }
         guard let (data, response) = try? await URLSession.shared.data(for: request),
@@ -90,7 +90,7 @@ enum CodecProbe {
                                        mediaSequence: Int) async -> Verdict? {
         var keyRequest = URLRequest(url: keyURI)
         keyRequest.timeoutInterval = 8
-        for (name, value) in RequestSettings.headers {
+        for (name, value) in RequestSettings.headers(for: keyURI) {
             keyRequest.setValue(value, forHTTPHeaderField: name)
         }
         guard let (keyData, keyResponse) = try? await URLSession.shared.data(for: keyRequest),
@@ -104,7 +104,7 @@ enum CodecProbe {
         var segmentRequest = URLRequest(url: segmentURL)
         segmentRequest.timeoutInterval = 10
         segmentRequest.setValue("bytes=0-1048575", forHTTPHeaderField: "Range")
-        for (name, value) in RequestSettings.headers {
+        for (name, value) in RequestSettings.headers(for: segmentURL) {
             segmentRequest.setValue(value, forHTTPHeaderField: name)
         }
         guard let (cipher, response) = try? await URLSession.shared.data(for: segmentRequest),

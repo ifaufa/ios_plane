@@ -37,6 +37,8 @@ struct MiniPlayerWindow: View {
 
     @State private var dragOffset: CGSize = .zero
     @State private var resizeStart: Double = 0
+    @State private var hudText: String?
+    @State private var hudToken = 0
 
     private var displayWidth: CGFloat { CGFloat(max(200, min(480, width))) }
     private var displayHeight: CGFloat { displayWidth * 9 / 16 + 44 }
@@ -49,11 +51,30 @@ struct MiniPlayerWindow: View {
             let baseY = storedY <= 0 ? maxY : min(storedY, Double(maxY))
 
             VStack(spacing: 0) {
-                PlayerSurface(player: store.player)
-                    .frame(width: displayWidth - 8, height: displayWidth * 9 / 16)
-                    .background(Color.black)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                    .padding(.top, 4)
+                ZStack {
+                    PlayerSurface(player: store.player)
+
+                    // 单击＝播放/暂停；双击左半＝-10s，右半＝+10s
+                    PlayerTapOverlay(
+                        onSingleTap: { togglePlay() },
+                        onDoubleTap: { isLeft in seek(by: isLeft ? -10 : 10) }
+                    )
+                    .background(Color.clear)
+
+                    if let hudText {
+                        Text(hudText)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(.black.opacity(0.62), in: Capsule())
+                            .transition(.opacity)
+                    }
+                }
+                .frame(width: displayWidth - 8, height: displayWidth * 9 / 16)
+                .background(Color.black)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .padding(.top, 4)
 
                 controls
                     .frame(height: 40)
@@ -84,6 +105,39 @@ struct MiniPlayerWindow: View {
                         dragOffset = .zero
                     }
             )
+        }
+    }
+
+    // MARK: - 手势动作
+
+    private func togglePlay() {
+        store.togglePlay()
+        showHUD(store.isPlaying ? "播放" : "暂停")
+    }
+
+    private func seek(by delta: Double) {
+        let current = store.player.currentTime().seconds
+        guard current.isFinite else { return }
+        let total = store.player.currentItem?.duration.seconds ?? 0
+        var target = current + delta
+        if target < 0 { target = 0 }
+        if total.isFinite, total > 0, target > total - 0.5 { target = max(0, total - 0.5) }
+        store.player.seek(to: CMTime(seconds: target, preferredTimescale: 600),
+                          toleranceBefore: .zero,
+                          toleranceAfter: .zero)
+        showHUD(delta < 0 ? "−10 秒" : "+10 秒")
+        DiagnosticsLog.write("[播放] 悬浮窗双击 \(delta < 0 ? "快退" : "快进") 目标=\(Int(target))s")
+    }
+
+    private func showHUD(_ text: String) {
+        hudToken += 1
+        let token = hudToken
+        withAnimation(.easeOut(duration: 0.12)) { hudText = text }
+        Task {
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            if token == hudToken {
+                withAnimation(.easeIn(duration: 0.2)) { hudText = nil }
+            }
         }
     }
 
@@ -130,5 +184,54 @@ struct MiniPlayerWindow: View {
                         width = min(480, max(200, width + Double(value.translation.width) * 0.5))
                     }
             )
+    }
+}
+
+/// 单击/双击点击层（双击分区判定左右半屏）
+struct PlayerTapOverlay: UIViewRepresentable {
+    let onSingleTap: () -> Void
+    let onDoubleTap: (Bool) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onSingleTap: onSingleTap, onDoubleTap: onDoubleTap)
+    }
+
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView()
+        view.backgroundColor = .clear
+        let double = UITapGestureRecognizer(target: context.coordinator,
+                                            action: #selector(Coordinator.handleDouble(_:)))
+        double.numberOfTapsRequired = 2
+        let single = UITapGestureRecognizer(target: context.coordinator,
+                                            action: #selector(Coordinator.handleSingle(_:)))
+        single.require(toFail: double)
+        view.addGestureRecognizer(single)
+        view.addGestureRecognizer(double)
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        context.coordinator.onSingleTap = onSingleTap
+        context.coordinator.onDoubleTap = onDoubleTap
+    }
+
+    final class Coordinator: NSObject {
+        var onSingleTap: () -> Void
+        var onDoubleTap: (Bool) -> Void
+
+        init(onSingleTap: @escaping () -> Void, onDoubleTap: @escaping (Bool) -> Void) {
+            self.onSingleTap = onSingleTap
+            self.onDoubleTap = onDoubleTap
+        }
+
+        @objc func handleSingle(_ gesture: UITapGestureRecognizer) {
+            onSingleTap()
+        }
+
+        @objc func handleDouble(_ gesture: UITapGestureRecognizer) {
+            guard let view = gesture.view else { return }
+            let x = gesture.location(in: view).x
+            onDoubleTap(x < view.bounds.midX)
+        }
     }
 }

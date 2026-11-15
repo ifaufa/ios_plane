@@ -371,7 +371,7 @@ final class DownloadManager: NSObject, ObservableObject {
 
     /// 支持 Referer/UA 等防盗链请求头（AVAssetDownloadURLSession 需要以此方式注入）
     private static func makeAsset(url: URL) -> AVURLAsset {
-        let headers = RequestSettings.headers
+        let headers = RequestSettings.headers(for: url)
         guard !headers.isEmpty else { return AVURLAsset(url: url) }
         return AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
     }
