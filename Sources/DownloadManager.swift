@@ -223,9 +223,11 @@ final class DownloadManager: NSObject, ObservableObject {
             // 使用独立会话，避免打断正在播放的视频
             let session = try LocalHLS.open(playlistURL: playlistURL)
             defer { session.stop() }
-            let check = await LocalHLS.selfCheck(session.url)
+            // 校验使用与实际播放相同的地址（含局域网/令牌路径），避免"校验通过但实际播不了"
+            let verifyURL = session.lanURL ?? session.url
+            let check = await LocalHLS.selfCheck(verifyURL)
             DiagnosticsLog.write("[本地服务自检] \(check)")
-            verify = await LocalHLS.verifyByPlayer(session.url)
+            verify = await LocalHLS.verifyByPlayer(verifyURL)
         } catch {
             verify = LocalHLS.VerifyResult(playable: false, duration: 0, detail: error.localizedDescription)
         }

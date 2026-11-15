@@ -139,6 +139,51 @@ final class LocalHTTPServer {
         }
         return result
     }
+    /// 给播放列表中的 URI 注入 token：
+    /// - 媒体行：seg-000001.ts  → seg-000001.ts?t=xxx
+    /// - 标签属性：URI="key.bin" → URI="key.bin?t=xxx"
+    private func rewritePlaylist(_ text: String, token: String) -> String {
+        let lines = text.components(separatedBy: "\n")
+        var output: [String] = []
+        output.reserveCapacity(lines.count)
+        for raw in lines {
+            let line = raw.hasSuffix("\r") ? String(raw.dropLast()) : raw
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty {
+                output.append(line)
+                continue
+            }
+            if trimmed.hasPrefix("#") {
+                output.append(appendTokenToTag(line, token: token))
+                continue
+            }
+            output.append(appendTokenToURI(line, token: token))
+        }
+        return output.joined(separator: "\n")
+    }
+
+    private func appendTokenToTag(_ line: String, token: String) -> String {
+        guard line.contains("URI=\"") else { return line }
+        guard let regex = try? NSRegularExpression(pattern: "URI=\"([^\"]+)\"") else { return line }
+        let range = NSRange(line.startIndex..<line.endIndex, in: line)
+        var result = line
+        let matches = regex.matches(in: line, range: range).reversed()
+        for match in matches {
+            guard match.numberOfRanges > 1,
+                  let uriRange = Range(match.range(at: 1), in: result) else { continue }
+            let value = String(result[uriRange])
+            guard !value.contains("t=") else { continue }
+            let separator = value.contains("?") ? "&" : "?"
+            result.replaceSubrange(uriRange, with: value + "\(separator)t=\(token)")
+        }
+        return result
+    }
+
+    private func appendTokenToURI(_ line: String, token: String) -> String {
+        guard !line.contains("t=") else { return line }
+        let separator = line.contains("?") ? "&" : "?"
+        return line + "\(separator)t=\(token)"
+    }
     private func respond(to connection: NWConnection, header: String, root: URL) {
         let lines = header.split(separator: "\r\n", omittingEmptySubsequences: false)
         let requestLine = lines.first.map(String.init) ?? ""
@@ -167,10 +212,20 @@ final class LocalHTTPServer {
         }
 
         let fileURL = root.appendingPathComponent(name)
-        guard let data = try? Data(contentsOf: fileURL, options: .mappedIfSafe) else {
+        guard var data = try? Data(contentsOf: fileURL, options: .mappedIfSafe) else {
             DiagnosticsLog.write("[本地服务] 404 \(name)")
             send(status: "404 Not Found", headers: [:], body: Data(), to: connection)
             return
+        }
+
+        // 播放列表改写：把一次性 token 注入到每个分片/密钥/初始化段 URI 中。
+        // AVPlayer 解析相对路径时不会继承播放列表的 query，若不注入，分片请求会缺 token 被 403。
+        if !token.isEmpty, name.lowercased().hasSuffix(".m3u8"),
+           let text = String(data: data, encoding: .utf8) {
+            let rewritten = rewritePlaylist(text, token: token)
+            if let encoded = rewritten.data(using: .utf8) {
+                data = encoded
+            }
         }
 
         var rangeHeader: String?

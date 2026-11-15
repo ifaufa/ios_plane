@@ -354,6 +354,13 @@ final class PlaybackStore: ObservableObject {
         let failed = player.currentItem?.status == .failed
         if failed, let error = player.currentItem?.error as NSError? {
             DiagnosticsLog.write("[播放] item 失败 \(error.domain) \(error.code) \(error.localizedDescription)")
+            // 本地服务鉴权/权限类错误：重启服务也修不好，明确提示并停止无谓重试
+            if error.domain == NSURLErrorDomain, error.code == -1102 || error.code == -1011 || error.code == -1008 {
+                errorNotice = "本地播放服务鉴权失败，请重新点击该视频播放"
+                waitingTicks = 0
+                pauseTicks = 0
+                return
+            }
         }
         let waiting = player.timeControlStatus == .waitingToPlayAtSpecifiedRate
         let silentlyPaused = player.rate == 0
