@@ -20,6 +20,8 @@ struct BackupManifest: Codable {
     var bookmarks: [Bookmark]?
     /// 收藏分组（更旧的备份没有该字段）
     var bookmarkFolders: [BookmarkFolder]?
+    /// 请求头规则（旧备份没有该字段）
+    var requestProfiles: [RequestProfile]?
 }
 
 // MARK: - 归档读写
@@ -40,6 +42,7 @@ enum BackupService {
         var library: [VideoItem]
         var bookmarks: [Bookmark]
         var bookmarkFolders: [BookmarkFolder]
+        var requestProfiles: [RequestProfile]
         /// "video" / "bookmarks" / "all"
         var kind: String
     }
@@ -49,6 +52,7 @@ enum BackupService {
     static func makeArchive(items: [VideoItem],
                             bookmarks: [Bookmark],
                             bookmarkFolders: [BookmarkFolder] = [],
+                            requestProfiles: [RequestProfile] = [],
                             kind: String = "all",
                             includeFiles: Bool = true) throws -> (url: URL, files: Int) {
         let fm = FileManager.default
@@ -70,7 +74,8 @@ enum BackupService {
                                       library: items,
                                       entries: entries,
                                       bookmarks: bookmarks,
-                                      bookmarkFolders: bookmarkFolders)
+                                      bookmarkFolders: bookmarkFolders,
+                                      requestProfiles: requestProfiles)
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         let manifestData = try encoder.encode(manifest)
@@ -216,6 +221,7 @@ enum BackupService {
                              library: manifest.library,
                              bookmarks: manifest.bookmarks ?? [],
                              bookmarkFolders: manifest.bookmarkFolders ?? [],
+                             requestProfiles: manifest.requestProfiles ?? [],
                              kind: manifest.kind ?? "all")
     }
 
@@ -343,11 +349,12 @@ final class BackupManager: ObservableObject {
                 var exportedAt: Date
                 var folders: [BookmarkFolder]
                 var items: [Bookmark]
+                var requestProfiles: [RequestProfile]
             }
             let encoder = JSONEncoder()
             encoder.dateEncodingStrategy = .iso8601
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-            let data = try encoder.encode(Payload(exportedAt: Date(), folders: bookmarkFolders, items: bookmarks))
+            let data = try encoder.encode(Payload(exportedAt: Date(), folders: bookmarkFolders, items: bookmarks, requestProfiles: RequestSettings.profiles))
             try data.write(to: url, options: [.atomic])
 
             exportDirectory = dir
@@ -368,6 +375,7 @@ final class BackupManager: ObservableObject {
                     try BackupService.makeArchive(items: items,
                                                   bookmarks: bookmarks,
                                                   bookmarkFolders: folders,
+                                                  requestProfiles: kind == "video" ? [] : RequestSettings.profiles,
                                                   kind: kind,
                                                   includeFiles: kind != "bookmarks")
                 }.value
@@ -407,9 +415,10 @@ final class BackupManager: ObservableObject {
 
                 library.merge(result.library)
                 let addedBookmarks = BookmarkStore.shared.merge(result.bookmarks, folders: result.bookmarkFolders)
+                let addedProfiles = RequestSettings.mergeProfiles(result.requestProfiles)
 
                 let kindText = result.kind == "video" ? "视频" : (result.kind == "bookmarks" ? "收藏" : "全部")
-                var message = "（\(kindText)备份）共 \(result.total) 个文件条目，成功恢复 \(result.restored) 个，合并 \(result.library.count) 条记录、\(addedBookmarks) 条收藏。"
+                var message = "（\(kindText)备份）共 \(result.total) 个文件条目，成功恢复 \(result.restored) 个，合并 \(result.library.count) 条记录、\(addedBookmarks) 条收藏、\(addedProfiles) 条请求头规则。"
                 if !result.skipped.isEmpty {
                     let preview = result.skipped.prefix(3).joined(separator: "；")
                     message += "\n\n跳过 \(result.skipped.count) 个：\(preview)"

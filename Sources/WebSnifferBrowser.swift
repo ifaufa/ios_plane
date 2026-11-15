@@ -865,9 +865,20 @@ struct HeadersSettingsView: View {
                                     ))
                                     .labelsHidden()
                                 }
-                                Text(profiles[index].displayName)
-                                    .font(.caption2)
-                                    .foregroundStyle(Color.secondary)
+                                HStack(spacing: 6) {
+                                    Text(profiles[index].displayName)
+                                        .font(.caption2)
+                                        .foregroundStyle(Color.secondary)
+                                    let hits = profiles[index].hitCount ?? 0
+                                    if hits > 0 {
+                                        Text("命中 \(hits) 次")
+                                            .font(.caption2)
+                                            .padding(.horizontal, 5)
+                                            .padding(.vertical, 1)
+                                            .background(Color.accentColor.opacity(0.15), in: Capsule())
+                                            .foregroundStyle(Color.accentColor)
+                                    }
+                                }
                                 if !profiles[index].userAgent.isEmpty {
                                     Text("UA: \(profiles[index].userAgent.prefix(48))…")
                                         .font(.caption2)
@@ -905,6 +916,10 @@ struct HeadersSettingsView: View {
             }
             .navigationTitle("请求头")
             .navigationBarTitleDisplayMode(.inline)
+            .onAppear {
+                RequestSettings.flushHitCounts()
+                profiles = RequestSettings.profiles
+            }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("取消") { dismiss() }
@@ -917,7 +932,7 @@ struct HeadersSettingsView: View {
                 }
             }
             .sheet(item: $editing) { profile in
-                HeaderRuleEditor(profile: profile) { updated in
+                HeaderRuleEditor(profile: profile, existing: profiles.filter { $0.id != profile.id }) { updated in
                     if let index = profiles.firstIndex(where: { $0.id == updated.id }) {
                         profiles[index] = updated
                     } else {
@@ -934,11 +949,16 @@ private struct HeaderRuleEditor: View {
     @Environment(\.dismiss) private var dismiss
     @State private var draft: RequestProfile
     @State private var presetSelection: String = "自定义"
+    @State private var duplicatePattern: String?
     let onSave: (RequestProfile) -> Void
+    private let existingPatterns: [String]
 
-    init(profile: RequestProfile, onSave: @escaping (RequestProfile) -> Void) {
+    init(profile: RequestProfile, existing: [RequestProfile], onSave: @escaping (RequestProfile) -> Void) {
         _draft = State(initialValue: profile)
         self.onSave = onSave
+        self.existingPatterns = existing.map {
+            $0.hostPattern.lowercased().trimmingCharacters(in: .whitespaces)
+        }
     }
 
     var body: some View {
@@ -993,6 +1013,14 @@ private struct HeaderRuleEditor: View {
                     Toggle("启用该规则", isOn: $draft.enabled)
                 }
             }
+            .alert("域名重复", isPresented: Binding(
+                get: { duplicatePattern != nil },
+                set: { if !$0 { duplicatePattern = nil } }
+            )) {
+                Button("知道了", role: .cancel) { duplicatePattern = nil }
+            } message: {
+                Text("已存在相同域名的规则：\(duplicatePattern ?? "")。同一域名只会命中第一条启用的规则，请改用不同的域名，或先删除旧规则。")
+            }
             .navigationTitle("规则")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -1000,17 +1028,25 @@ private struct HeaderRuleEditor: View {
                     Button("取消") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("完成") {
-                        draft.name = draft.name.trimmingCharacters(in: .whitespacesAndNewlines)
-                        draft.hostPattern = draft.hostPattern.trimmingCharacters(in: .whitespacesAndNewlines)
-                        draft.referer = draft.referer.trimmingCharacters(in: .whitespacesAndNewlines)
-                        draft.userAgent = draft.userAgent.trimmingCharacters(in: .whitespacesAndNewlines)
-                        onSave(draft)
-                        dismiss()
-                    }
+                    Button("完成") { save() }
                 }
             }
         }
+    }
+
+    private func save() {
+        draft.name = draft.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        draft.hostPattern = draft.hostPattern.trimmingCharacters(in: .whitespacesAndNewlines)
+        draft.referer = draft.referer.trimmingCharacters(in: .whitespacesAndNewlines)
+        draft.userAgent = draft.userAgent.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let key = draft.hostPattern.lowercased()
+        if !key.isEmpty, existingPatterns.contains(key) {
+            duplicatePattern = draft.hostPattern
+            return
+        }
+        onSave(draft)
+        dismiss()
     }
 }
 

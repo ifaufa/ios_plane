@@ -10,6 +10,8 @@ struct RequestProfile: Identifiable, Codable, Equatable {
     var referer: String
     var userAgent: String
     var enabled: Bool
+    /// 最近命中次数（用于排查规则是否生效）
+    var hitCount: Int?
 
     var displayName: String {
         hostPattern.isEmpty ? "默认（所有网址）" : hostPattern
@@ -18,6 +20,10 @@ struct RequestProfile: Identifiable, Codable, Equatable {
 
 enum RequestSettings {
     private static let profilesKey = "req.profiles"
+    private static var cache: [RequestProfile]?
+    private static let cacheLock = NSLock()
+    private static var pendingHits: [UUID: Int] = [:]
+    private static var flushScheduled = false
     private static let legacyRefererKey = "req.referer"
     private static let legacyUAKey = "req.userAgent"
 
@@ -25,18 +31,66 @@ enum RequestSettings {
 
     static var profiles: [RequestProfile] {
         get {
+            cacheLock.lock()
+            if let cache {
+                cacheLock.unlock()
+                return cache
+            }
+            cacheLock.unlock()
+
             migrateIfNeeded()
             guard let data = UserDefaults.standard.data(forKey: profilesKey),
                   let list = try? JSONDecoder().decode([RequestProfile].self, from: data) else {
                 return []
             }
+            cacheLock.lock()
+            cache = list
+            cacheLock.unlock()
             return list
         }
         set {
+            cacheLock.lock()
+            cache = newValue
+            cacheLock.unlock()
             if let data = try? JSONEncoder().encode(newValue) {
                 UserDefaults.standard.set(data, forKey: profilesKey)
             }
         }
+    }
+
+    // MARK: - 命中统计
+
+    /// 记录一次命中（内存累计，定期落盘，避免每个分片请求都写 UserDefaults）
+    private static func bumpHit(_ id: UUID) {
+        cacheLock.lock()
+        pendingHits[id, default: 0] += 1
+        let shouldSchedule = !flushScheduled
+        if shouldSchedule { flushScheduled = true }
+        cacheLock.unlock()
+        guard shouldSchedule else { return }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 3) {
+            flushHitCounts()
+        }
+    }
+
+    /// 把内存中的命中次数合并到规则并持久化
+    static func flushHitCounts() {
+        cacheLock.lock()
+        let pending = pendingHits
+        pendingHits.removeAll()
+        flushScheduled = false
+        cacheLock.unlock()
+        guard !pending.isEmpty else { return }
+
+        var list = profiles
+        var changed = false
+        for index in list.indices {
+            if let delta = pending[list[index].id] {
+                list[index].hitCount = (list[index].hitCount ?? 0) + delta
+                changed = true
+            }
+        }
+        if changed { profiles = list }
     }
 
     /// 旧版全局配置迁移为「默认」规则（只做一次）
@@ -101,6 +155,12 @@ enum RequestSettings {
     }
 
     static func profile(for url: URL?) -> RequestProfile? {
+        let matched = matchProfile(for: url)
+        if let matched { bumpHit(matched.id) }
+        return matched
+    }
+
+    private static func matchProfile(for url: URL?) -> RequestProfile? {
         let host = url?.host?.lowercased() ?? ""
         let enabled = profiles.filter { $0.enabled }
         guard !enabled.isEmpty else { return nil }
@@ -116,6 +176,22 @@ enum RequestSettings {
             }
         }
         return enabled.first { $0.hostPattern.isEmpty }
+    }
+
+    /// 备份恢复时合并规则：按域名去重（已存在则跳过），返回新增条数
+    @discardableResult
+    static func mergeProfiles(_ incoming: [RequestProfile]) -> Int {
+        var list = profiles
+        let existing = Set(list.map { $0.hostPattern.lowercased().trimmingCharacters(in: .whitespaces) })
+        var added = 0
+        for profile in incoming {
+            let key = profile.hostPattern.lowercased().trimmingCharacters(in: .whitespaces)
+            guard !existing.contains(key) else { continue }
+            list.append(profile)
+            added += 1
+        }
+        if added > 0 { profiles = list }
+        return added
     }
 
     private static func matchesWildcard(_ pattern: String, host: String) -> Bool {
