@@ -76,10 +76,11 @@ enum MediaConverter {
                 let audioCount = ((try? await asset.loadTracks(withMediaType: .audio)) ?? []).count
                 let duration = ((try? await asset.load(.duration))?.seconds) ?? 0
                 let hasStss = MP4Inspector.describe(outputURL).contains("stss(")
+                let audioPlayable = await Self.hasDecodableAudio(outputURL)
                 DiagnosticsLog.write(String(format: "[转MP4] 自研封装校验 耗时 %.1fs 视频轨=%d 音频轨=%d stss=%@ 时长=%.1fs",
                                             Date().timeIntervalSince(start), videoCount, audioCount,
-                                            hasStss ? "已写入" : "未写入", duration))
-                guard videoCount == 1, audioCount >= 1, hasStss, duration > 1 else {
+                                            hasStss ? "已写入" : "未写入", duration) + (audioPlayable ? " 音频可解" : " 音频不可解"))
+                guard videoCount == 1, audioCount >= 1, hasStss, audioPlayable, duration > 1 else {
                     try? fm.removeItem(at: outputURL)
                     throw PlaylistError.network("转换失败：自研封装产物校验未通过（视频轨=\(videoCount) 音频轨=\(audioCount) stss=\(hasStss ? "有" : "无") 时长=\(String(format: "%.1f", duration))s）")
                 }
@@ -327,6 +328,32 @@ enum MediaConverter {
         if removed > 0 {
             DiagnosticsLog.write("[转MP4] 清理残留临时文件 \(removed) 个，释放 \(freed / (1024 * 1024))MB")
         }
+    }
+
+    /// P3：用 AVAssetReader 实际解出前 2 秒音频，确认音轨真的能播（防"能转但没声音"）
+    private static func hasDecodableAudio(_ url: URL) async -> Bool {
+        let asset = AVURLAsset(url: url)
+        guard let track = (try? await asset.loadTracks(withMediaType: .audio))?.first else { return false }
+        guard let reader = try? AVAssetReader(asset: asset) else { return false }
+        let settings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsFloatKey: false,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsNonInterleaved: false
+        ]
+        let output = AVAssetReaderTrackOutput(track: track, outputSettings: settings)
+        reader.add(output)
+        guard reader.startReading() else {
+            DiagnosticsLog.write("[转MP4] 音频自检：读取器启动失败 \(reader.error?.localizedDescription ?? "-")")
+            return false
+        }
+        defer { reader.cancelReading() }
+        var samples = 0
+        while samples < 32_000, let buffer = output.copyNextSampleBuffer() {
+            samples += CMSampleBufferGetNumSamples(buffer)
+        }
+        return samples > 0
     }
 
     private static func directorySize(_ url: URL) -> Int64 {

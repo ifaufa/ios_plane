@@ -107,6 +107,8 @@ final class DirectMuxer {
 
     /// 音频边转边写：内部聚成 1MB 再落盘，避免碎片小写
     func appendAudio(_ frame: Data) {
+        // P1：写入音频前先关闭当前视频 chunk，否则 chunk 内会被音频字节劈开（→ 画面花屏/抖动）
+        if videoChunkSamples != 0 { videoChunkSamples = 0 }
         if audioChunkSamples == 0 {
             audioChunkOffsets.append(writeOffset + UInt64(audioWriteBuffer.count))
         }
@@ -116,7 +118,9 @@ final class DirectMuxer {
         audioChunkSamples += 1
         if audioChunkSamples >= samplesPerChunk { audioChunkSamples = 0 }
 
+        // P1：只允许在音频 chunk 边界 flush，避免 chunk 内错位（→ 无声）
         if audioWriteBuffer.count >= 1 << 20 {
+            audioChunkSamples = 0
             flushAudioBuffer()
         }
     }
@@ -208,6 +212,15 @@ final class DirectMuxer {
         moov.append("moov".data(using: .ascii)!)
         moov.append(moovBody)
 
+        // P2：chunk 连续性校验（视频/音频 chunk 内不得被其它数据插入）
+        let expectedVideoChunks = (videoSizes.count + samplesPerChunk - 1) / samplesPerChunk
+        if videoChunkOffsets.count != expectedVideoChunks || audioChunkOffsets.count != (audioSizes.count + samplesPerChunk - 1) / samplesPerChunk {
+            throw MuxError(message: "chunk 数不符（视频 \(videoChunkOffsets.count)/\(expectedVideoChunks)，音频 \(audioChunkOffsets.count)）")
+        }
+            try validateChunks(offsets: videoChunkOffsets, sizes: videoSizes, label: "视频")
+            try validateChunks(offsets: audioChunkOffsets, sizes: audioSizes, label: "音频")
+            DiagnosticsLog.write("[转MP4] chunk 连续性校验通过 视频chunk=\(videoChunkOffsets.count) 音频chunk=\(audioChunkOffsets.count)")
+
         DiagnosticsLog.write("[转MP4] 收尾③写 moov \(moov.count)B 内存=\(os_proc_available_memory() / (1024 * 1024))MB")
         try handle.write(contentsOf: moov)
         flushSync()
@@ -221,6 +234,25 @@ final class DirectMuxer {
 
         let finalSize = writeOffset + UInt64(moov.count)
         return "自研封装完成 视频样本=\(videoSizes.count) 关键帧=\(videoKeyframes.count) 音频帧=\(audioSizes.count) moov=\(moov.count)B 总大小=\(finalSize)B"
+    }
+
+    /// 每个 chunk 内的样本必须在文件里连续（允许 chunk 之间插入其它数据）
+    private func validateChunks(offsets: [UInt64], sizes: [Int32], label: String) throws {
+        guard !offsets.isEmpty, !sizes.isEmpty else { return }
+        var index = 0
+        for chunkIndex in 0..<offsets.count {
+            let start = offsets[chunkIndex]
+            let end = min(index + samplesPerChunk, sizes.count)
+            var span: UInt64 = 0
+            for sample in index..<end { span += UInt64(sizes[sample]) }
+            guard start + span <= writeOffset else {
+                throw MuxError(message: "\(label) chunk#\(chunkIndex) 越界")
+            }
+            if chunkIndex + 1 < offsets.count, offsets[chunkIndex + 1] < start + span {
+                throw MuxError(message: "\(label) chunk#\(chunkIndex) 被其它数据插入（\(offsets[chunkIndex + 1]) < \(start + span)）")
+            }
+            index = end
+        }
     }
 
     private func be32(_ value: UInt32) -> [UInt8] {
