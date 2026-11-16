@@ -399,7 +399,7 @@ struct ContentView: View {
     @ViewBuilder
     private var downloadsSection: some View {
                 if !downloads.tasks.isEmpty {
-                    Section("下载任务 (\(downloads.activeCount)/\(downloads.maxConcurrent))") {
+                    Section {
                         ForEach(downloads.tasks) { task in
                             DownloadRow(task: task)
                                 .swipeActions {
@@ -408,6 +408,8 @@ struct ContentView: View {
                                     }
                                 }
                         }
+                    } header: {
+                        Text("下载任务 (\(downloads.activeCount)/\(downloads.maxConcurrent))")
                     } footer: {
                         Text("左滑任务可删除").font(.caption2)
                     }
