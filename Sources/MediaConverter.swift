@@ -70,7 +70,7 @@ enum MediaConverter {
         if useDirectMuxer {
             do {
                 let start = Date()
-                try await AVRemuxPipeline.remuxDirect(state: state, dir: dir, destination: outputURL, onProgress: onProgress)
+                try await AVRemuxPipeline.remuxDirect(state: state, dir: dir, destination: outputURL, upperBound: dirSize, onProgress: onProgress)
                 let asset = AVURLAsset(url: outputURL)
                 let videoCount = ((try? await asset.loadTracks(withMediaType: .video)) ?? []).count
                 let audioCount = ((try? await asset.loadTracks(withMediaType: .audio)) ?? []).count

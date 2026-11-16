@@ -101,7 +101,8 @@ enum AVRemuxPipeline {
                             collectAudio: Bool,
                             segmentRange: Range<Int>?,
                             resetAudioSpool: Bool,
-                            useDirect: Bool = false) throws {
+                            useDirect: Bool = false,
+                            directUpperBound: Int64 = 0) throws {
         let fm = FileManager.default
         if fm.fileExists(atPath: destination.path) {
             try fm.removeItem(at: destination)
@@ -109,7 +110,7 @@ enum AVRemuxPipeline {
         let spooling = collectAudio && !useDirect
         var directMuxer: DirectMuxer?
         if useDirect {
-            directMuxer = try DirectMuxer(destination: destination)
+            directMuxer = try DirectMuxer(destination: destination, expectedUpperBound: directUpperBound)
             DiagnosticsLog.write("[转MP4] 使用自研封装（不经 AVAssetWriter），目标=\(destination.lastPathComponent)")
         }
 
@@ -866,12 +867,12 @@ enum AVRemuxPipeline {
     static func remuxDirect(state: SegmentJobState,
                             dir: URL,
                             destination: URL,
+                            upperBound: Int64 = 0,
                             onProgress: ((Double) -> Void)? = nil) async throws {
-        try await Task.detached(priority: .userInitiated) {
             try run(state: state, dir: dir, destination: destination,
                     progress: onProgress, videoOnly: true, audioFormatFlags: 2,
                     collectAudio: true, segmentRange: nil, resetAudioSpool: true,
-                    useDirect: true)
+                    useDirect: true, directUpperBound: upperBound)
         }.value
     }
 

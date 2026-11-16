@@ -357,7 +357,8 @@ enum AudioTrackBuilder {
                                       esds: Data,
                                       timescale: UInt32,
                                       duration: Double,
-                                      trackID: UInt32) -> Data {
+                                        trackID: UInt32,
+                                        editShiftTicks: Int64 = 0) -> Data {
         let mediaDuration = UInt32(min(Double(UInt32.max), Double(frameCount) * 1024.0))
         let movieDuration = UInt32(min(Double(UInt32.max), duration * Double(max(1, timescale))))
 
@@ -497,6 +498,18 @@ enum AudioTrackBuilder {
         let mdia = box(type: "mdia", body: mdiaBody)
 
         var trakBody = Data()
+        // P2：与视频轨一致的 edit list（否则两轨起点相差 editShift）
+        if editShiftTicks > 0 {
+            var elstBody = Data()
+            elstBody.append(contentsOf: [0x00, 0x00, 0x00, 0x00])
+            elstBody.append(contentsOf: be32(1))
+            elstBody.append(contentsOf: be32(movieDuration))
+            let mediaTime = UInt32(max(0, editShiftTicks * Int64(max(8000, sampleRate)) / 90000))
+            elstBody.append(contentsOf: be32(mediaTime))
+            elstBody.append(contentsOf: be16(1))
+            elstBody.append(contentsOf: be16(0))
+            trakBody.append(box(type: "edts", body: box(type: "elst", body: elstBody)))
+        }
         trakBody.append(tkhd)
         trakBody.append(mdia)
         return box(type: "trak", body: trakBody)

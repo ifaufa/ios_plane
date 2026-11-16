@@ -18,6 +18,9 @@ final class DirectMuxer {
     private let destination: URL
 
     private var mdatContentStart: UInt64 = 0
+    private var mdatHeaderStart: UInt64 = 0
+    private var mdatHeaderLength: UInt64 = 8
+    private var usesLargeMdat = false
     private var writeOffset: UInt64 = 0
 
     // 视频样本表
@@ -49,7 +52,7 @@ final class DirectMuxer {
     /// 收尾进度（-1 = 未进入收尾），供心跳日志
     private(set) var appendProgressPercent: Int = -1
 
-    init(destination: URL) throws {
+    init(destination: URL, expectedUpperBound: Int64 = 0) throws {
         self.destination = destination
         let fm = FileManager.default
         if fm.fileExists(atPath: destination.path) { try? fm.removeItem(at: destination) }
@@ -74,13 +77,23 @@ final class DirectMuxer {
         ftyp.append(ftypBody)
         try handle.write(contentsOf: ftyp)
 
+        // P1：<4GB 用 32 位 size（外部播放器兼容性好）；仅超大文件才用 64 位 largesize
+        usesLargeMdat = expectedUpperBound > 4_000_000_000
+        mdatHeaderStart = UInt64(ftyp.count)
         var mdatHeader = Data()
-        mdatHeader.append(contentsOf: [0, 0, 0, 1])
-        mdatHeader.append("mdat".data(using: .ascii)!)
-        mdatHeader.append(contentsOf: [UInt8](repeating: 0, count: 8))
+        if usesLargeMdat {
+            mdatHeader.append(contentsOf: [0, 0, 0, 1])
+            mdatHeader.append("mdat".data(using: .ascii)!)
+            mdatHeader.append(contentsOf: [UInt8](repeating: 0, count: 8))
+            mdatHeaderLength = 16
+        } else {
+            mdatHeader.append(contentsOf: [0, 0, 0, 0])
+            mdatHeader.append("mdat".data(using: .ascii)!)
+            mdatHeaderLength = 8
+        }
         try handle.write(contentsOf: mdatHeader)
 
-        mdatContentStart = UInt64(ftyp.count + 16)
+        mdatContentStart = UInt64(ftyp.count) + mdatHeaderLength
         writeOffset = mdatContentStart
 
         videoSizes.reserveCapacity(400_000)
@@ -304,15 +317,28 @@ final class DirectMuxer {
         moov.append("moov".data(using: .ascii)!)
         moov.append(moovBody)
 
+        // P3：外部兼容性自检
+        DiagnosticsLog.write("[转MP4] 兼容性自检 mdat=\(usesLargeMdat ? "64位largesize" : "32位size") elst视频=\(editShift > 0 ? "有" : "无") elst音频=\(audioSizes.isEmpty ? "无音轨" : (editShift > 0 ? "有(对齐)" : "无")) ctts=version0 ftyp=isom/iso2/avc1/mp41")
         DiagnosticsLog.write("[转MP4] 收尾③写 moov \(moov.count)B editShift=\(editShift)ticks 内存=\(os_proc_available_memory() / (1024 * 1024))MB")
         try handle.write(contentsOf: moov)
         flushSync()
 
-        let totalMdat = 16 + (writeOffset - mdatContentStart)
-        var sizeBytes = Data()
-        sizeBytes.append(contentsOf: (0..<8).map { UInt8((totalMdat >> (56 - UInt64($0) * 8)) & 0xFF) })
-        try handle.seek(toOffset: mdatContentStart - 8)
-        try handle.write(contentsOf: sizeBytes)
+        let totalMdat = mdatHeaderLength + (writeOffset - mdatContentStart)
+        if usesLargeMdat {
+            var sizeBytes = Data()
+            sizeBytes.append(contentsOf: (0..<8).map { UInt8((totalMdat >> (56 - UInt64($0) * 8)) & 0xFF) })
+            try handle.seek(toOffset: mdatHeaderStart + 8)
+            try handle.write(contentsOf: sizeBytes)
+        } else {
+            guard totalMdat <= UInt64(UInt32.max) else {
+                throw MuxError(message: "输出超过 4GB 但使用了 32 位 mdat 头，请重试（会改用 64 位）")
+            }
+            var sizeBytes = Data()
+            sizeBytes.append(contentsOf: [UInt8((totalMdat >> 24) & 0xFF), UInt8((totalMdat >> 16) & 0xFF),
+                                         UInt8((totalMdat >> 8) & 0xFF), UInt8(totalMdat & 0xFF)])
+            try handle.seek(toOffset: mdatHeaderStart)
+            try handle.write(contentsOf: sizeBytes)
+        }
         try handle.close()
 
         let finalSize = writeOffset + UInt64(moov.count)
