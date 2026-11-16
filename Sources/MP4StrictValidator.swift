@@ -97,64 +97,60 @@ enum MP4StrictValidator {
 
     static func dumpCodecInfo(_ url: URL) {
         guard let data = try? Data(contentsOf: url, options: .mappedIfSafe), data.count > 16 else { return }
+        // ftyp（按实际 box 尺寸读取，避免读越界）
         if data.ascii(4, 4) == "ftyp" {
+            let ftypSize = Int(data.be32(0))
             var brands = data.ascii(8, 4)
             var off = 16
-            while off + 4 <= min(data.count, 40) { brands += "/" + data.ascii(off, 4); off += 4 }
-            DiagnosticsLog.write("[编码参数] ftyp=\(brands)")
+            while off + 4 <= min(ftypSize, data.count) { brands += "/" + data.ascii(off, 4); off += 4 }
+            DiagnosticsLog.write("[编码参数] ftyp=\\(brands)")
         }
-        if let avc1 = findBox(data, "avc1"), avc1.count > 86 {
-            let w = avc1.be16(8 + 24)
-            let h = avc1.be16(8 + 26)
-            let depth = avc1.be16(8 + 78)
-            let avcCStart = 8 + 78
-            if avc1.count > avcCStart + 8, avc1.ascii(avcCStart + 4, 4) == "avcC" {
-                let profile = avc1[avc1.startIndex + avcCStart + 8 + 1]
-                let level = avc1[avc1.startIndex + avcCStart + 8 + 3]
-                let lenSize = Int(avc1[avc1.startIndex + avcCStart + 8 + 4] & 0x03) + 1
-                let numSPS = Int(avc1[avc1.startIndex + avcCStart + 8 + 5] & 0x1F)
-                var pos = avcCStart + 8 + 6
-                var spsLen = 0; var spsHex = "-"
-                if numSPS > 0, pos + 2 <= avc1.count {
-                    spsLen = Int(avc1.be16(pos)); pos += 2
-                    spsHex = avc1.hex(pos, min(spsLen, 16)); pos += spsLen
-                }
-                var ppsLen = 0; var ppsHex = "-"
-                if pos < avc1.count {
-                    let numPPS = Int(avc1[avc1.startIndex + pos]); pos += 1
-                    if numPPS > 0, pos + 2 <= avc1.count {
-                        ppsLen = Int(avc1.be16(pos)); pos += 2
-                        ppsHex = avc1.hex(pos, min(ppsLen, 16))
+        // moov → trak → mdia → minf → stbl → stsd → avc1 / mp4a
+        for moov in boxes(in: data, from: 0) where moov.type == "moov" {
+            for trak in boxes(in: moov.data, from: 8) where trak.type == "trak" {
+                guard let mdia = firstBox(trak.data, type: "mdia"),
+                      let minf = firstBox(mdia, type: "minf"),
+                      let stbl = firstBox(minf, type: "stbl"),
+                      let stsd = firstBox(stbl, type: "stsd") else { continue }
+                for entry in boxes(in: stsd, from: 8) {
+                    if entry.type == "avc1" {
+                        let avc1 = entry.data
+                        let w = avc1.be16(8 + 24)
+                        let h = avc1.be16(8 + 26)
+                        let depth = avc1.be16(8 + 74)
+                        let avcCStart = 8 + 78
+                        if avc1.count > avcCStart + 8, avc1.ascii(avcCStart + 4, 4) == "avcC" {
+                            let profile = avc1[avc1.startIndex + avcCStart + 8 + 1]
+                            let level = avc1[avc1.startIndex + avcCStart + 8 + 3]
+                            let lenSize = Int(avc1[avc1.startIndex + avcCStart + 8 + 4] & 0x03) + 1
+                            let numSPS = Int(avc1[avc1.startIndex + avcCStart + 8 + 5] & 0x1F)
+                            var pos = avcCStart + 8 + 6
+                            var spsLen = 0; var spsHex = "-"
+                            if numSPS > 0, pos + 2 <= avc1.count {
+                                spsLen = Int(avc1.be16(pos)); pos += 2
+                                spsHex = avc1.hex(pos, min(spsLen, 16)); pos += spsLen
+                            }
+                            var ppsLen = 0; var ppsHex = "-"
+                            if pos < avc1.count {
+                                let numPPS = Int(avc1[avc1.startIndex + pos]); pos += 1
+                                if numPPS > 0, pos + 2 <= avc1.count {
+                                    ppsLen = Int(avc1.be16(pos)); pos += 2
+                                    ppsHex = avc1.hex(pos, min(ppsLen, 16))
+                                }
+                            }
+                            DiagnosticsLog.write("[编码参数] avc1 \\(w)x\\(h) depth=0x\\(String(depth, radix: 16)) profile=0x\\(String(profile, radix: 16)) level=0x\\(String(level, radix: 16)) lenSize=\\(lenSize) SPS=\\(spsLen)B \\(spsHex) PPS=\\(ppsLen)B \\(ppsHex)")
+                        }
+                    } else if entry.type == "mp4a" {
+                        let mp4a = entry.data
+                        let channels = mp4a.be16(8 + 16)
+                        let sr = mp4a.be32(8 + 24) >> 16
+                        DiagnosticsLog.write("[编码参数] mp4a channels=\\(channels) samplerate=\\(sr)")
                     }
                 }
-                DiagnosticsLog.write("[编码参数] avc1 \(w)x\(h) depth=0x\(String(depth, radix: 16)) profile=0x\(String(profile, radix: 16)) level=0x\(String(level, radix: 16)) lenSize=\(lenSize) SPS=\(spsLen)B \(spsHex) PPS=\(ppsLen)B \(ppsHex)")
             }
-        }
-        if let mp4a = findBox(data, "mp4a"), mp4a.count > 8 + 28 {
-            let channels = mp4a.be16(8 + 24)
-            let sr = mp4a.be32(8 + 28) >> 16
-            DiagnosticsLog.write("[编码参数] mp4a channels=\(channels) samplerate=\(sr)")
         }
     }
 
-    /// 在任意深度查找指定类型 box（含自身 8 字节头）
-    private static func findBox(_ data: Data, _ type: String) -> Data? {
-        var stack: [Int] = [0]
-        while let start = stack.popLast() {
-            var offset = start
-            while offset + 8 <= data.count {
-                let size = Int(data.be32(offset))
-                let t = data.ascii(offset + 4, 4)
-                guard size >= 8, offset + size <= data.count else { break }
-                if t == type {
-                    return data.subdata(in: (data.startIndex + offset)..<(data.startIndex + offset + size))
-                }
-                stack.append(offset + 8)
-                offset += size
-            }
-        }
-        return nil
-    }
 
     // MARK: - trak 校验
 

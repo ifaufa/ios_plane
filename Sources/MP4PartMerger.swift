@@ -306,6 +306,25 @@ enum MP4PartMerger {
         avc1Body.append(contentsOf: be16(0x0018))
         avc1Body.append(contentsOf: be16(0xFFFF))
         avc1Body.append(avcC)
+
+        // P1：补写 colr/fiel/chrm（文件 App 预览/相册等系统渲染管线需要，缺失会导致黑屏）
+        var colrBody = Data()
+        colrBody.append("nclc".data(using: .ascii)!)
+        colrBody.append(contentsOf: be16(1))     // colour_primaries = BT.709
+        colrBody.append(contentsOf: be16(1))     // transfer_characteristics
+        colrBody.append(contentsOf: be16(1))     // matrix_coefficients
+        colrBody.append(0)                       // full_range flag
+        avc1Body.append(box(type: "colr", body: colrBody))
+
+        var fielBody = Data()
+        fielBody.append(0)                       // version
+        fielBody.append(1)                       // fields = progressive
+        avc1Body.append(box(type: "fiel", body: fielBody))
+
+        var chrmBody = Data()
+        chrmBody.append(contentsOf: be16(0))     // chroma_sample_pos
+        avc1Body.append(box(type: "chrm", body: chrmBody))
+
         let avc1 = box(type: "avc1", body: avc1Body)
 
         var stsdBody = Data()
