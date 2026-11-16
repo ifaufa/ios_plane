@@ -234,7 +234,6 @@ enum AVRemuxPipeline {
                 let durationTicks = UInt32(max(1, frameStep))
                 decodeCursor += 1
                 let item = VideoItem(data: frame.data, pts: ptsTicks, dts: dtsTicks, isKey: frame.isKey)
-                let item = VideoItem(data: frame.data, pts: ptsTicks, dts: dtsTicks, isKey: frame.isKey)
                 if let muxer = directMuxer {
                     do {
                         try muxer.appendVideo(data: item.data, isKey: item.isKey, pts: item.pts, dts: item.dts, duration: durationTicks)
