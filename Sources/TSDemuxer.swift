@@ -8,6 +8,8 @@ final class TSDemuxer {
         var sps: Data
         var pps: Data
         var profileLevel: (UInt8, UInt8)
+        /// 由 SPS VUI 得到的每帧时长（90kHz ticks），0 表示未知
+        var frameTick: Int64 = 0
     }
     struct AudioInfo {
         var sampleRate: Int
@@ -372,7 +374,8 @@ final class TSDemuxer {
         let profile = sps[sps.startIndex + 1]
         let level = sps[sps.startIndex + 3]
         let (w, h) = Self.parseSPSDimensions(sps)
-        let info = VideoInfo(width: w, height: h, sps: sps, pps: pps, profileLevel: (profile, level))
+        let tick = Self.parseSPSTiming(sps) ?? 0
+        let info = VideoInfo(width: w, height: h, sps: sps, pps: pps, profileLevel: (profile, level), frameTick: tick)
         storedVideoInfo = info
         onInfo?(info, nil)
     }
@@ -621,6 +624,95 @@ final class TSDemuxer {
         width -= (cropLeft + cropRight) * cropUnitX
         height -= (cropTop + cropBottom) * cropUnitY
         return (max(0, width), max(0, height))
+    }
+
+    /// 从 SPS 的 VUI 里解析每帧时长（90kHz ticks），失败返回 nil
+    /// 这是 CFR 源最可靠的帧率来源（比递推 DTS 中位数稳定得多）
+    static func parseSPSTiming(_ sps: Data) -> Int64? {
+        let raw = [UInt8](sps)
+        guard raw.count > 5 else { return nil }
+        // 去 emulation prevention（0x00 0x00 后跟 0x03 时去掉 0x03）
+        var rbsp: [UInt8] = []
+        rbsp.reserveCapacity(raw.count)
+        var i = 0
+        var zeros = 0
+        while i < raw.count {
+            let b = raw[i]
+            if b == 0x03, zeros >= 2 { i += 1; continue }
+            rbsp.append(b)
+            if b == 0x00 { zeros += 1 } else { zeros = 0 }
+            i += 1
+        }
+        guard rbsp.count > 4 else { return nil }
+        let profile = rbsp[1]
+        var reader = BitReader(bytes: Array(rbsp[4...]))
+
+        _ = reader.readUE()                                 // sps_id
+        let highProfiles: Set<UInt8> = [100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135]
+        if highProfiles.contains(profile) {
+            let chromaFormat = reader.readUE()
+            if chromaFormat == 3 { _ = reader.readBits(1) }
+            _ = reader.readUE()                             // bit_depth_luma_minus8
+            _ = reader.readUE()                             // bit_depth_chroma_minus8
+            _ = reader.readBits(1)                          // qpprime_y_zero_transform_bypass
+            if reader.readBits(1) == 1 {                    // seq_scaling_matrix_present
+                let count = chromaFormat == 3 ? 12 : 8
+                for _ in 0..<count {
+                    if reader.readBits(1) == 1 {
+                        reader.skipScalingList(size: 16)
+                        reader.skipScalingList(size: 64)
+                    }
+                }
+            }
+        }
+        _ = reader.readUE()                                 // log2_max_frame_num_minus4
+        let pocType = reader.readUE()
+        if pocType == 0 {
+            _ = reader.readUE()                             // log2_max_pic_order_cnt_lsb_minus4
+        } else if pocType == 1 {
+            _ = reader.readBits(1)
+            _ = reader.readSE()
+            _ = reader.readSE()
+            let count = reader.readUE()
+            for _ in 0..<count { _ = reader.readSE() }
+        }
+        _ = reader.readUE()                                 // max_num_ref_frames
+        _ = reader.readBits(1)                              // gaps_in_frame_num
+        _ = reader.readUE()                                 // pic_width_in_mbs_minus1
+        _ = reader.readUE()                                 // pic_height_in_map_units_minus1
+        let frameMbsOnly = reader.readBits(1)
+        if frameMbsOnly == 0 { _ = reader.readBits(1) }
+        _ = reader.readBits(1)                              // direct_8x8_inference
+        if reader.readBits(1) == 1 {                        // frame_cropping_flag
+            _ = reader.readUE(); _ = reader.readUE()
+            _ = reader.readUE(); _ = reader.readUE()
+        }
+
+        // VUI
+        guard reader.readBits(1) == 1 else { return nil }   // vui_parameters_present_flag
+        if reader.readBits(1) == 1 {                        // aspect_ratio_info_present
+            let idc = reader.readBits(8)
+            if idc == 255 { _ = reader.readBits(16); _ = reader.readBits(16) }
+        }
+        if reader.readBits(1) == 1 { _ = reader.readBits(1) }  // overscan
+        if reader.readBits(1) == 1 {                        // video_signal_type
+            _ = reader.readBits(3)
+            _ = reader.readBits(1)
+            if reader.readBits(1) == 1 {                    // colour_description
+                _ = reader.readBits(8); _ = reader.readBits(8); _ = reader.readBits(8)
+            }
+        }
+        if reader.readBits(1) == 1 {                        // chroma_loc_info
+            _ = reader.readUE(); _ = reader.readUE()
+        }
+        guard reader.readBits(1) == 1 else { return nil }   // timing_info_present_flag
+        let numUnits = reader.readBits(32)
+        let timeScale = reader.readBits(32)
+        guard timeScale > 0, numUnits > 0 else { return nil }
+        // 逐行帧：fps = time_scale / (2 * num_units_in_tick)；frameTick = 90000 / fps
+        let tick = Int64(90000) * 2 * Int64(numUnits) / Int64(timeScale)
+        guard tick > 0, tick <= 45000 else { return nil }
+        return tick
     }
 }
 

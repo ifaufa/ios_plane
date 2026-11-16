@@ -162,6 +162,7 @@ enum AVRemuxPipeline {
         // 时间轴
         var frameStep: Int64 = 3750
         var frameStepLocked = false
+        var frameStepStable = 0
         var deltaSamples: [Int64] = []
         var lastRawDTS: Int64 = -1
         struct GopFrame { let data: Data; let isKey: Bool; let poc: Int?; let pts: Int64; let dts: Int64 }
@@ -592,7 +593,14 @@ enum AVRemuxPipeline {
                 }
             }
         }
-        demuxer.onInfo = { _, _ in }
+        demuxer.onInfo = { info, _ in
+            // 优先用 SPS VUI 的精确帧时长（CFR 源最可靠），并在收到时锁定，避免运行中位数漂移
+            if let info, info.frameTick > 0, !frameStepLocked {
+                frameStep = info.frameTick
+                frameStepLocked = true
+                DiagnosticsLog.write("[转MP4] 帧间隔已锁定（SPS VUI）frameStep=" + String(frameStep) + " ticks")
+            }
+        }
 
         demuxer.onVideoFrame = { data, pts, dts, isKey, isRef, poc in
             guard currentFailure() == nil else { return }
@@ -601,15 +609,23 @@ enum AVRemuxPipeline {
             if lastRawDTS >= 0 {
                 let delta = dts - lastRawDTS
                 if delta > 0, delta < 90000 {
-                    // 帧间隔锁定：前 60 帧取中位数后冻结，避免运行中位数漂移导致 pts/dts 与 stts 不一致（→抖动）
+                    // 帧间隔锁定（兜底）：中位数连续稳定 120 帧才锁定，避免把递推 DTS 早期错误值（如 8370）锁死
                     if !frameStepLocked {
                         deltaSamples.append(delta)
                         if deltaSamples.count > 60 { deltaSamples.removeFirst() }
                         if deltaSamples.count >= 60 {
                             let sorted = deltaSamples.sorted()
-                            frameStep = max(1, sorted[sorted.count / 2])
-                            frameStepLocked = true
-                            DiagnosticsLog.write("[转MP4] 帧间隔已锁定 frameStep=" + String(frameStep) + " ticks（前60帧中位数）")
+                            let candidate = max(1, sorted[sorted.count / 2])
+                            if candidate == frameStep {
+                                frameStepStable += 1
+                                if frameStepStable >= 120 {
+                                    frameStepLocked = true
+                                    DiagnosticsLog.write("[转MP4] 帧间隔已锁定 frameStep=" + String(frameStep) + " ticks（中位数稳定120帧）")
+                                }
+                            } else {
+                                frameStep = candidate
+                                frameStepStable = 0
+                            }
                         }
                     }
                     statsCount += 1
