@@ -63,6 +63,31 @@ final class LocalHTTPServer {
         return assignedPort
     }
 
+    // MARK: - 请求统计（供播放诊断使用）
+
+    private let statsLock = NSLock()
+    private var _requestCount = 0
+    private var _lastRequestAt: Date?
+
+    var requestCount: Int {
+        statsLock.lock(); defer { statsLock.unlock() }
+        return _requestCount
+    }
+
+    var secondsSinceLastRequest: TimeInterval? {
+        statsLock.lock(); defer { statsLock.unlock() }
+        guard let _lastRequestAt else { return nil }
+        return Date().timeIntervalSince(_lastRequestAt)
+    }
+
+    private func noteRequest(_ message: String) {
+        statsLock.lock()
+        _requestCount += 1
+        _lastRequestAt = Date()
+        statsLock.unlock()
+        DiagnosticsLog.write(message)
+    }
+
     func stop() {
         listener?.cancel()
         listener = nil
@@ -198,7 +223,7 @@ final class LocalHTTPServer {
         // 访问控制：本机回环直接放行；局域网访问必须带正确 token（AirPlay 时电视使用局域网地址）
         let rawTarget = path
         if !isLoopback(connection), !token.isEmpty, !rawTarget.contains("t=\(token)") {
-            DiagnosticsLog.write("[本地服务] 403 缺少令牌 \(rawTarget)")
+            noteRequest("[本地服务] 403 缺少令牌 \(rawTarget)")
             send(status: "403 Forbidden", headers: [:], body: Data(), to: connection)
             return
         }
@@ -213,7 +238,7 @@ final class LocalHTTPServer {
 
         let fileURL = root.appendingPathComponent(name)
         guard var data = try? Data(contentsOf: fileURL, options: .mappedIfSafe) else {
-            DiagnosticsLog.write("[本地服务] 404 \(name)")
+            noteRequest("[本地服务] 404 \(name)")
             send(status: "404 Not Found", headers: [:], body: Data(), to: connection)
             return
         }
@@ -241,7 +266,7 @@ final class LocalHTTPServer {
 
         if let rangeHeader, let range = parseRange(rangeHeader, total: data.count) {
             let sub = data.subdata(in: range)
-            DiagnosticsLog.write("[本地服务] \(method) \(name) 206 \(sub.count)B")
+            noteRequest("[本地服务] \(method) \(name) 206 \(sub.count)B")
             send(status: "206 Partial Content",
                  headers: [
                     "Content-Type": contentType,
@@ -251,7 +276,7 @@ final class LocalHTTPServer {
                  ],
                  body: isHead ? Data() : sub, to: connection)
         } else {
-            DiagnosticsLog.write("[本地服务] \(method) \(name) 200 \(data.count)B")
+            noteRequest("[本地服务] \(method) \(name) 200 \(data.count)B")
             send(status: "200 OK",
                  headers: [
                     "Content-Type": contentType,

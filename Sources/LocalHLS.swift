@@ -68,6 +68,11 @@ enum LocalHLS {
             self.server = server
         }
 
+        /// 本地服务请求统计（用于判断"播放器是否在发请求"）
+        var requestCount: Int { server.requestCount }
+        var secondsSinceLastRequest: TimeInterval? { server.secondsSinceLastRequest }
+
+
         func stop() {
             guard !stopped else { return }
             stopped = true

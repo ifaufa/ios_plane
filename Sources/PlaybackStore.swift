@@ -36,6 +36,12 @@ final class PlaybackStore: ObservableObject {
     private var pauseRecoveries = 0
     private var lastRecoveryTime = Date.distantPast
     private var recoveryAttempts = 0
+    /// 等待（waitingToPlay）自愈次数与上次时间
+    private var waitingRecoveries = 0
+    private var lastWaitingRecovery = Date.distantPast
+    /// 上次详细状态日志时间 / 上次记录的 ctl
+    private var lastStatusLogAt = Date.distantPast
+    private var lastLoggedCtl = -1
     private var loadStartedAt: Date?
     private var loadReported = false
     private var didMuteProbe = false
@@ -335,6 +341,11 @@ final class PlaybackStore: ObservableObject {
             DiagnosticsLog.write("[播放] 监督 status=\(statusValue) rate=\(String(format: "%.1f", player.rate)) ctl=\(player.timeControlStatus.rawValue) tick=\(tickCount)")
         }
 
+        // D1：状态变化或每 30 秒记录一次详细状态（用于定位卡滞原因）
+        if player.timeControlStatus.rawValue != lastLoggedCtl || tickCount % 60 == 0 {
+            logDetailedStatus("状态")
+        }
+
         if let item = player.currentItem, item.status == .unknown,
            let started = loadStartedAt, Date().timeIntervalSince(started) > 5, !loadReported {
             loadReported = true
@@ -370,8 +381,10 @@ final class PlaybackStore: ObservableObject {
         if failed || waiting {
             waitingTicks += 1
             pauseTicks = 0
-            if failed || waitingTicks >= 8 {
-                recoverIfNeeded(force: failed)
+            if failed {
+                recoverIfNeeded(force: true)
+            } else if waitingTicks >= 8 {
+                recoverFromWaiting()
             }
         } else if silentlyPaused {
             pauseTicks += 1
@@ -427,6 +440,7 @@ final class PlaybackStore: ObservableObject {
             if player.rate > 0 {
                 recoveryAttempts = 0
                 pauseRecoveries = 0
+                waitingRecoveries = 0
             }
         }
     }
@@ -518,6 +532,48 @@ final class PlaybackStore: ObservableObject {
             detail = "尺寸=\(Int(natural.width))x\(Int(natural.height))"
         }
         DiagnosticsLog.write("[播放] 资产自检 \(url.lastPathComponent) 轨道=\(tracks.count) 类型=\(tracks.map { $0.mediaType.rawValue }.joined(separator: ",")) 时长=\(Int(duration))s \(detail)")
+    }
+
+    /// 等待（waitingToPlayAtSpecifiedRate）自愈：原逻辑只处理 item.failed，等待状态永远不自愈
+    private func recoverFromWaiting() {
+        guard isActive, expectsPlaying else { return }
+        logDetailedStatus("等待超时")
+        guard waitingRecoveries < 2 else {
+            if waitingRecoveries == 2 {
+                waitingRecoveries = 3
+                DiagnosticsLog.write("[播放] 等待自愈已达上限，不再自动重试（需手动重开）")
+            }
+            return
+        }
+        guard Date().timeIntervalSince(lastWaitingRecovery) > 5 else { return }
+        lastWaitingRecovery = Date()
+        waitingRecoveries += 1
+        let seconds = player.currentTime().seconds
+        let position = seconds.isFinite && seconds > 0 ? seconds : lastSaved
+        DiagnosticsLog.write("[播放] 等待超时自愈 第\(waitingRecoveries)次 位置=\(Int(position))s 原因=\(player.reasonForWaitingToPlay?.rawValue ?? "-")")
+        waitingTicks = 0
+        loadItem(startAt: position)
+        play()
+    }
+
+    /// D1：详细状态（用于判断"播放器没发请求"还是"服务端没收到"）
+    private func logDetailedStatus(_ tag: String) {
+        lastStatusLogAt = Date()
+        lastLoggedCtl = player.timeControlStatus.rawValue
+        let item = player.currentItem
+        let pos = player.currentTime().seconds
+        let loaded = item?.loadedTimeRanges.first?.timeRangeValue.end.seconds ?? 0
+        let keepUp = item?.isPlaybackLikelyToKeepUp ?? false
+        let reason = player.reasonForWaitingToPlay?.rawValue ?? "-"
+        var errorText = "-"
+        if let e = item?.error { let ns = e as NSError; errorText = "\(ns.domain)/\(ns.code)" }
+        var sinceRequest = "-"
+        if let s = session?.secondsSinceLastRequest { sinceRequest = String(format: "%.0f", s) }
+        let requests = session?.requestCount ?? 0
+        DiagnosticsLog.write("[播放] \(tag) ctl=\(player.timeControlStatus.rawValue) reason=\(reason) keepUp=\(keepUp) loaded=\(String(format: "%.0f", loaded))s pos=\(String(format: "%.0f", pos))s itemStatus=\(item?.status.rawValue ?? -1) err=\(errorText) 距上次请求=\(sinceRequest)s 请求数=\(requests)")
+        if let entry = item?.accessLog()?.events.last {
+            DiagnosticsLog.write("[播放] access 停顿=\(entry.numberOfStalls) 字节=\(entry.numberOfBytesTransferred) 耗时=\(String(format: "%.0f", entry.transferDuration * 1000))ms uri=\(entry.uri ?? "-")")
+        }
     }
 
     private func recoverIfNeeded(force: Bool) {
