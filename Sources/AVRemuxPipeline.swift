@@ -869,6 +869,7 @@ enum AVRemuxPipeline {
                             destination: URL,
                             upperBound: Int64 = 0,
                             onProgress: ((Double) -> Void)? = nil) async throws {
+        try await Task.detached(priority: .userInitiated) {
             try run(state: state, dir: dir, destination: destination,
                     progress: onProgress, videoOnly: true, audioFormatFlags: 2,
                     collectAudio: true, segmentRange: nil, resetAudioSpool: true,
