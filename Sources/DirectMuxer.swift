@@ -30,6 +30,8 @@ final class DirectMuxer {
     private var audioSizes: [Int32] = []
     private var audioChunkOffsets: [UInt64] = []
     private var audioFramesInChunk = 0
+    /// 音频缓冲已攒够，等下一个视频 chunk 边界再写
+    private var audioFlushPending = false
 
     // 待写入缓冲
     private var pendingVideo = Data()
@@ -120,7 +122,7 @@ final class DirectMuxer {
         pendingAudio.append(frame)
         pendingAudioSizes.append(Int32(frame.count))
         if pendingAudio.count >= audioBatchBytes {
-            flushAudioChunk()
+            audioFlushPending = true
         }
     }
 
@@ -147,13 +149,19 @@ final class DirectMuxer {
             _ = fsync(handle.fileDescriptor)
             bytesSinceSync = 0
         }
+
+        // 视频 chunk 写完后（此刻 pendingVideoSizes 为空）再写音频，
+        // 保证视频 chunk 永远是"满 32 帧"，不会产生额外碎块
+        if audioFlushPending, !pendingAudioSizes.isEmpty {
+            writeAudioRegion()
+        }
     }
 
-    /// 只在视频 chunk 完整（pendingVideoSizes 为空）时调用，保证视频 chunk 不被音频劈开
-    private func flushAudioChunk() {
+    /// 只在视频 chunk 边界调用：把攒好的音频整段写入
+    private func writeAudioRegion() {
         guard !pendingAudioSizes.isEmpty else { return }
+        audioFlushPending = false
         do {
-            if !pendingVideoSizes.isEmpty { try flushVideoChunk() }
             let base = writeOffset
             var offsetInBuffer: UInt64 = 0
             for size in pendingAudioSizes {
@@ -179,6 +187,7 @@ final class DirectMuxer {
         }
     }
 
+
     // MARK: - 收尾
 
     func finish(width: Int,
@@ -192,7 +201,7 @@ final class DirectMuxer {
         appendProgressPercent = 0
         DiagnosticsLog.write("[转MP4] 收尾①写入剩余数据 视频待写=\(pendingVideoSizes.count) 音频待写=\(pendingAudioSizes.count) 内存=\(os_proc_available_memory() / (1024 * 1024))MB")
         try flushVideoChunk()
-        flushAudioChunk()
+        writeAudioRegion()
         flushSync()
         appendProgressPercent = 100
 
@@ -207,6 +216,9 @@ final class DirectMuxer {
         guard audioChunkOffsets.count == expectedAudioChunks else {
             throw MuxError(message: "音频 chunk 数不符（\(audioChunkOffsets.count) ≠ \(expectedAudioChunks)）")
         }
+        let fullChunks = videoSizes.count / samplesPerChunk
+        let lastRemainder = videoSizes.count % samplesPerChunk
+        DiagnosticsLog.write("[转MP4] 视频 chunk 结构 满块=\(fullChunks) 末块=\(lastRemainder == 0 ? samplesPerChunk : lastRemainder) 总块=\(videoChunkOffsets.count)")
         try validateChunks(offsets: videoChunkOffsets, sizes: videoSizes, label: "视频")
         try validateChunks(offsets: audioChunkOffsets, sizes: audioSizes, label: "音频")
 
