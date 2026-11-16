@@ -205,17 +205,9 @@ enum AVRemuxPipeline {
             // 显示顺序：以码流权威的 POC（图像顺序计数）为准（PES 级 PTS 系推算值，噪声大不可用于排序）
             var ptsByIndex = [Int64](repeating: 0, count: count)
             let pocs = gop.map { $0.poc }
-            let ptsList = gop.map { $0.pts }
-            // D2：显示顺序可切换（poc=POC 重排 / pts=按 PTS 排序 / none=不重排）
-            let orderMode = UserDefaults.standard.string(forKey: "mp4DisplayOrder") ?? "poc"
             var order: [Int]
             var orderSource = "原序"
-            if orderMode == "none" {
-                order = Array(0..<count)
-            } else if orderMode == "pts", Set(ptsList).count >= max(2, count / 2) {
-                order = (0..<count).sorted { ptsList[$0] < ptsList[$1] }
-                orderSource = "PTS"
-            } else if pocs.allSatisfy({ $0 != nil }) {
+            if pocs.allSatisfy({ $0 != nil }) {
                 order = (0..<count).sorted { (pocs[$0] ?? 0) < (pocs[$1] ?? 0) }
                 orderSource = "POC"
             } else {

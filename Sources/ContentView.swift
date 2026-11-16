@@ -9,6 +9,7 @@ struct ContentView: View {
     @ObservedObject private var playback = PlaybackStore.shared
     @AppStorage(LibrarySortMode.storageKey) private var sortModeRaw = LibrarySortMode.timeDesc.rawValue
     @State private var pendingLibraryAction: LibraryAction?
+    @State private var pendingLargeConvert: VideoItem?
     @State private var toastText: String?
     @State private var pendingToast: String?
     @State private var showAdd = false
@@ -311,6 +312,20 @@ struct ContentView: View {
                       primaryButton: .destructive(Text(action.confirmTitle)) { perform(action) },
                       secondaryButton: .cancel(Text("取消")))
             }
+            .confirmationDialog("该源体积较大",
+                                isPresented: Binding(get: { pendingLargeConvert != nil },
+                                                     set: { if !$0 { pendingLargeConvert = nil } }),
+                                titleVisibility: .visible) {
+                Button("继续（自研封装）") {
+                    if let item = pendingLargeConvert { startConvert(item) }
+                    pendingLargeConvert = nil
+                }
+                Button("取消", role: .cancel) { pendingLargeConvert = nil }
+            } message: {
+                if let item = pendingLargeConvert {
+                    Text("约 \(item.fileSize / 1_000_000_000)GB。自研封装可能因内存不足而中止；若失败，可到设置里关闭「使用自研封装」，改用系统分段合并。")
+                }
+            }
             .overlay(alignment: .top) { toastBanner }
             .onChange(of: segmentRunner.excludedNotice) { newValue in
                 guard let text = newValue else { return }
@@ -413,6 +428,14 @@ struct ContentView: View {
 
     private func convert(_ item: VideoItem) {
         guard convertingID == nil else { return }
+        if useDirectMuxer, item.fileSize > 2_300_000_000 {
+            pendingLargeConvert = item
+            return
+        }
+        startConvert(item)
+    }
+
+    private func startConvert(_ item: VideoItem) {
         convertingID = item.id
         conversionProgress = 0
         Task {
@@ -735,7 +758,6 @@ struct EngineSettingsView: View {
     @State private var adFingerprint = UserDefaults.standard.bool(forKey: AdFilter.fingerprintKey)
     @State private var writeStss = (UserDefaults.standard.object(forKey: "mp4WriteStss") as? Bool) ?? true
     @State private var useDirectMuxer = (UserDefaults.standard.object(forKey: "mp4UseDirectMuxer") as? Bool) ?? true
-    @State private var displayOrder = UserDefaults.standard.string(forKey: "mp4DisplayOrder") ?? "poc"
     @State private var fastStart = (UserDefaults.standard.object(forKey: "mp4FastStart") as? Bool) ?? false
     @State private var keepSegments = (UserDefaults.standard.object(forKey: "mp4KeepSegments") as? Bool) ?? true
     @State private var completionSound = (UserDefaults.standard.object(forKey: CompletionFeedback.soundKey) as? Bool) ?? true
@@ -769,11 +791,6 @@ struct EngineSettingsView: View {
                     }
                     Section {
                         Toggle("使用自研封装（推荐）", isOn: $useDirectMuxer)
-                        Picker("显示顺序（调试）", selection: $displayOrder) {
-                            Text("POC 重排").tag("poc")
-                            Text("按 PTS").tag("pts")
-                            Text("不重排").tag("none")
-                        }
                         Toggle("输出 faststart（moov 前置）", isOn: $fastStart)
                         Toggle("转换成功后保留原分片（可再次转换）", isOn: $keepSegments)
                         Toggle("转换时写入同步样本表(stss)", isOn: $writeStss)
@@ -827,7 +844,6 @@ struct EngineSettingsView: View {
                         UserDefaults.standard.set(adFingerprint, forKey: AdFilter.fingerprintKey)
                         UserDefaults.standard.set(writeStss, forKey: "mp4WriteStss")
                         UserDefaults.standard.set(useDirectMuxer, forKey: "mp4UseDirectMuxer")
-                        UserDefaults.standard.set(displayOrder, forKey: "mp4DisplayOrder")
                         UserDefaults.standard.set(fastStart, forKey: "mp4FastStart")
                         UserDefaults.standard.set(keepSegments, forKey: "mp4KeepSegments")
                         UserDefaults.standard.set(completionSound, forKey: CompletionFeedback.soundKey)
