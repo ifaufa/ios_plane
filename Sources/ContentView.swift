@@ -428,7 +428,8 @@ struct ContentView: View {
 
     private func convert(_ item: VideoItem) {
         guard convertingID == nil else { return }
-        if useDirectMuxer, item.fileSize > 2_300_000_000 {
+        let useDirect = (UserDefaults.standard.object(forKey: "mp4UseDirectMuxer") as? Bool) ?? true
+        if useDirect, item.fileSize > 2_300_000_000 {
             pendingLargeConvert = item
             return
         }
