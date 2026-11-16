@@ -110,7 +110,8 @@ enum AVRemuxPipeline {
         let spooling = collectAudio && !useDirect
         var directMuxer: DirectMuxer?
         if useDirect {
-            directMuxer = try DirectMuxer(destination: destination, expectedUpperBound: directUpperBound)
+            let fastStartEnabled = (UserDefaults.standard.object(forKey: "mp4FastStart") as? Bool) ?? false
+            directMuxer = try DirectMuxer(destination: destination, expectedUpperBound: directUpperBound, fastStart: fastStartEnabled)
             DiagnosticsLog.write("[转MP4] 使用自研封装（不经 AVAssetWriter），目标=\(destination.lastPathComponent)")
         }
 
@@ -200,16 +201,23 @@ enum AVRemuxPipeline {
             // 显示顺序：以码流权威的 POC（图像顺序计数）为准（PES 级 PTS 系推算值，噪声大不可用于排序）
             var ptsByIndex = [Int64](repeating: 0, count: count)
             let pocs = gop.map { $0.poc }
+            let ptsList = gop.map { $0.pts }
+            // D2：显示顺序可切换（poc=POC 重排 / pts=按 PTS 排序 / none=不重排）
+            let orderMode = UserDefaults.standard.string(forKey: "mp4DisplayOrder") ?? "poc"
             var order: [Int]
             var orderSource = "原序"
-            if pocs.allSatisfy({ $0 != nil }) {
+            if orderMode == "none" {
+                order = Array(0..<count)
+            } else if orderMode == "pts", Set(ptsList).count >= max(2, count / 2) {
+                order = (0..<count).sorted { ptsList[$0] < ptsList[$1] }
+                orderSource = "PTS"
+            } else if pocs.allSatisfy({ $0 != nil }) {
                 order = (0..<count).sorted { (pocs[$0] ?? 0) < (pocs[$1] ?? 0) }
                 orderSource = "POC"
             } else {
                 pocMissing += count
                 order = Array(0..<count)
             }
-            for (rank, idx) in order.enumerated() { ptsByIndex[idx] = displayCursor + Int64(rank) }
             if order == Array(0..<count) {
                 gopIdentityCount += 1
             } else {
@@ -805,6 +813,7 @@ enum AVRemuxPipeline {
             DiagnosticsLog.write(String(format: "[转MP4] GOP 重排统计 总数=%d 需重排=%d(%.1f%%) 无需重排=%d ctts范围=[%.0f, %.0f]帧",
                                         gopCount, gopReorderCount, percent, gopIdentityCount, cttsMinFrame, cttsMaxFrame))
         }
+        DiagnosticsLog.write("[转MP4] 显示顺序模式=\(UserDefaults.standard.string(forKey: "mp4DisplayOrder") ?? "poc")")
         DiagnosticsLog.write("[转MP4] 封装完成 视频帧=\(videoFrames) 音频帧=\(audioFrameIndex) GOP=\(gopCount) POC缺失=\(pocMissing) 帧间隔=\(frameStep)")
 
         // 自研封装：直接收尾（追加音频 + 写 moov），不经过 AVAssetWriter

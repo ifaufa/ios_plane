@@ -80,6 +80,12 @@ enum MediaConverter {
                 DiagnosticsLog.write(String(format: "[转MP4] 自研封装校验 耗时 %.1fs 视频轨=%d 音频轨=%d stss=%@ 时长=%.1fs",
                                             Date().timeIntervalSince(start), videoCount, audioCount,
                                             hasStss ? "已写入" : "未写入", duration) + (audioPlayable ? " 音频可解" : " 音频不可解"))
+                // D1：严格结构校验（模拟外部解析器）
+                let strict = MP4StrictValidator.validate(outputURL)
+                if strict.hasFatal {
+                    try? fm.removeItem(at: outputURL)
+                    throw PlaylistError.network("转换失败：结构校验未通过（\(strict.summary)）")
+                }
                 guard videoCount == 1, audioCount >= 1, hasStss, audioPlayable, duration > 1 else {
                     try? fm.removeItem(at: outputURL)
                     throw PlaylistError.network("转换失败：自研封装产物校验未通过（视频轨=\(videoCount) 音频轨=\(audioCount) stss=\(hasStss ? "有" : "无") 时长=\(String(format: "%.1f", duration))s）")

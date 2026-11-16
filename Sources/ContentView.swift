@@ -735,6 +735,8 @@ struct EngineSettingsView: View {
     @State private var adFingerprint = UserDefaults.standard.bool(forKey: AdFilter.fingerprintKey)
     @State private var writeStss = (UserDefaults.standard.object(forKey: "mp4WriteStss") as? Bool) ?? true
     @State private var useDirectMuxer = (UserDefaults.standard.object(forKey: "mp4UseDirectMuxer") as? Bool) ?? true
+    @State private var displayOrder = UserDefaults.standard.string(forKey: "mp4DisplayOrder") ?? "poc"
+    @State private var fastStart = (UserDefaults.standard.object(forKey: "mp4FastStart") as? Bool) ?? false
     @State private var keepSegments = (UserDefaults.standard.object(forKey: "mp4KeepSegments") as? Bool) ?? true
     @State private var completionSound = (UserDefaults.standard.object(forKey: CompletionFeedback.soundKey) as? Bool) ?? true
     @State private var completionNotice = (UserDefaults.standard.object(forKey: CompletionFeedback.noticeKey) as? Bool) ?? true
@@ -767,6 +769,12 @@ struct EngineSettingsView: View {
                     }
                     Section {
                         Toggle("使用自研封装（推荐）", isOn: $useDirectMuxer)
+                        Picker("显示顺序（调试）", selection: $displayOrder) {
+                            Text("POC 重排").tag("poc")
+                            Text("按 PTS").tag("pts")
+                            Text("不重排").tag("none")
+                        }
+                        Toggle("输出 faststart（moov 前置）", isOn: $fastStart)
                         Toggle("转换成功后保留原分片（可再次转换）", isOn: $keepSegments)
                         Toggle("转换时写入同步样本表(stss)", isOn: $writeStss)
                     } footer: {
@@ -819,6 +827,8 @@ struct EngineSettingsView: View {
                         UserDefaults.standard.set(adFingerprint, forKey: AdFilter.fingerprintKey)
                         UserDefaults.standard.set(writeStss, forKey: "mp4WriteStss")
                         UserDefaults.standard.set(useDirectMuxer, forKey: "mp4UseDirectMuxer")
+                        UserDefaults.standard.set(displayOrder, forKey: "mp4DisplayOrder")
+                        UserDefaults.standard.set(fastStart, forKey: "mp4FastStart")
                         UserDefaults.standard.set(keepSegments, forKey: "mp4KeepSegments")
                         UserDefaults.standard.set(completionSound, forKey: CompletionFeedback.soundKey)
                         UserDefaults.standard.set(completionNotice, forKey: CompletionFeedback.noticeKey)

@@ -21,6 +21,8 @@ final class DirectMuxer {
     private var mdatHeaderStart: UInt64 = 0
     private var mdatHeaderLength: UInt64 = 8
     private var usesLargeMdat = false
+    private var ftypData = Data()
+    private var fastStart = false
     private var writeOffset: UInt64 = 0
 
     // 视频样本表
@@ -52,7 +54,8 @@ final class DirectMuxer {
     /// 收尾进度（-1 = 未进入收尾），供心跳日志
     private(set) var appendProgressPercent: Int = -1
 
-    init(destination: URL, expectedUpperBound: Int64 = 0) throws {
+    init(destination: URL, expectedUpperBound: Int64 = 0, fastStart: Bool = false) throws {
+        self.fastStart = fastStart
         self.destination = destination
         let fm = FileManager.default
         if fm.fileExists(atPath: destination.path) { try? fm.removeItem(at: destination) }
@@ -76,6 +79,7 @@ final class DirectMuxer {
         ftyp.append("ftyp".data(using: .ascii)!)
         ftyp.append(ftypBody)
         try handle.write(contentsOf: ftyp)
+        ftypData = ftyp
 
         // P1：<4GB 用 32 位 size（外部播放器兼容性好）；仅超大文件才用 64 位 largesize
         usesLargeMdat = expectedUpperBound > 4_000_000_000
@@ -268,23 +272,8 @@ final class DirectMuxer {
         let movieDuration = UInt32(min(Double(UInt32.max),
                                        Double(totalTicks) / 90000.0 * Double(movieTimescale)))
 
-        let videoTrak = MP4PartMerger.makeVideoTrak(sampleCount: videoSizes.count,
-                                                    sizes: videoSizes,
-                                                    ctts: videoCtts,
-                                                    keyframes: videoKeyframes,
-                                                    frameStep: frameStep,
-                                                    chunkOffsets: videoChunkOffsets,
-                                                    samplesPerChunk: samplesPerChunk,
-                                                    width: width,
-                                                    height: height,
-                                                    sps: sps,
-                                                    pps: pps,
-                                                    movieDuration: movieDuration,
-                                                    editShift: editShift)
-
-        var audioTrak = Data()
+        let audioSeconds = audioSizes.isEmpty ? 0 : Double(audioSizes.count) * 1024.0 / Double(max(1, sampleRate))
         if !audioSizes.isEmpty {
-            let audioSeconds = Double(audioSizes.count) * 1024.0 / Double(max(1, sampleRate))
             let videoSeconds = Double(totalTicks) / 90000.0
             let deviation = abs(videoSeconds - audioSeconds) / max(1.0, audioSeconds)
             if deviation > 0.01 {
@@ -294,31 +283,33 @@ final class DirectMuxer {
                 DiagnosticsLog.write(String(format: "[转MP4] 音画时长一致 视频=%.1fs 音频=%.1fs 偏差=%.2f%%",
                                             videoSeconds, audioSeconds, deviation * 100))
             }
-            audioTrak = AudioTrackBuilder.makeAudioTrak(frameCount: audioSizes.count,
-                                                        sizes: audioSizes.map { Int($0) },
-                                                        offsets: audioChunkOffsets.map { UInt32(min($0, UInt64(UInt32.max))) },
-                                                        samplesPerChunk: samplesPerChunk,
-                                                        sampleRate: sampleRate,
-                                                        channels: channels,
-                                                        esds: MP4AudioFixer.makeESDS(asc: asc.isEmpty ? Data([0x11, 0x90]) : asc),
-                                                        timescale: movieTimescale,
-                                                        duration: audioSeconds,
-                                                        trackID: 2)
         }
 
-        var moovBody = Data()
-        moovBody.append(MP4PartMerger.makeMVHD(timescale: movieTimescale,
-                                               duration: movieDuration,
-                                               nextTrackID: audioTrak.isEmpty ? 2 : 3))
-        moovBody.append(videoTrak)
-        if !audioTrak.isEmpty { moovBody.append(audioTrak) }
-        var moov = Data()
-        moov.append(contentsOf: be32(UInt32(moovBody.count + 8)))
-        moov.append("moov".data(using: .ascii)!)
-        moov.append(moovBody)
-
         // P3：外部兼容性自检
-        DiagnosticsLog.write("[转MP4] 兼容性自检 mdat=\(usesLargeMdat ? "64位largesize" : "32位size") elst视频=\(editShift > 0 ? "有" : "无") elst音频=\(audioSizes.isEmpty ? "无音轨" : (editShift > 0 ? "有(对齐)" : "无")) ctts=version0 ftyp=isom/iso2/avc1/mp41")
+        DiagnosticsLog.write("[转MP4] 兼容性自检 mdat=\(usesLargeMdat ? "64位largesize" : "32位size") elst视频=\(editShift > 0 ? "有" : "无") elst音频=\(audioSizes.isEmpty ? "无音轨" : (editShift > 0 ? "有(对齐)" : "无")) ctts=version0 faststart=\(fastStart)")
+
+        var moov = buildMoov(width: width, height: height, sps: sps, pps: pps,
+                             frameStep: frameStep, sampleRate: sampleRate, channels: channels, asc: asc,
+                             editShift: editShift, movieDuration: movieDuration, movieTimescale: movieTimescale,
+                             audioSeconds: audioSeconds, offsetDelta: 0)
+
+        if fastStart {
+            // 两遍：先用 delta=0 得到 moov 长度，再用 delta=该长度重写（moov 长度不随偏移值变化）
+            let delta = UInt64(moov.count)
+            let shifted = buildMoov(width: width, height: height, sps: sps, pps: pps,
+                                    frameStep: frameStep, sampleRate: sampleRate, channels: channels, asc: asc,
+                                    editShift: editShift, movieDuration: movieDuration, movieTimescale: movieTimescale,
+                                    audioSeconds: audioSeconds, offsetDelta: delta)
+            guard shifted.count == moov.count else {
+                throw MuxError(message: "faststart 重建 moov 长度不一致（\(moov.count) ≠ \(shifted.count)）")
+            }
+            moov = shifted
+            DiagnosticsLog.write("[转MP4] 收尾③faststart 重写文件 moov=\(moov.count)B 内存=\(os_proc_available_memory() / (1024 * 1024))MB")
+            try rewriteFastStart(moov: moov)
+            let finalSize = UInt64(ftypData.count) + UInt64(moov.count) + 8 + (writeOffset - mdatContentStart)
+            return "自研封装完成(faststart) 视频样本=\(videoSizes.count) 关键帧=\(videoKeyframes.count) 音频帧=\(audioSizes.count) moov=\(moov.count)B 总大小=\(finalSize)B"
+        }
+
         DiagnosticsLog.write("[转MP4] 收尾③写 moov \(moov.count)B editShift=\(editShift)ticks 内存=\(os_proc_available_memory() / (1024 * 1024))MB")
         try handle.write(contentsOf: moov)
         flushSync()
@@ -345,7 +336,93 @@ final class DirectMuxer {
         return "自研封装完成 视频样本=\(videoSizes.count) 关键帧=\(videoKeyframes.count) 音频帧=\(audioSizes.count) moov=\(moov.count)B 总大小=\(finalSize)B"
     }
 
-    private func validateChunks(offsets: [UInt64], sizes: [Int32], label: String) throws {
+    /// 构建 moov；offsetDelta 用于 faststart（moov 前置后所有 chunk 偏移需整体后移）
+    private func buildMoov(width: Int, height: Int, sps: Data, pps: Data,
+                           frameStep: Int64, sampleRate: Int, channels: Int, asc: Data,
+                           editShift: Int64, movieDuration: UInt32, movieTimescale: UInt32,
+                           audioSeconds: Double, offsetDelta: UInt64) -> Data {
+        let videoTrak = MP4PartMerger.makeVideoTrak(sampleCount: videoSizes.count,
+                                                    sizes: videoSizes,
+                                                    ctts: videoCtts,
+                                                    keyframes: videoKeyframes,
+                                                    frameStep: frameStep,
+                                                    chunkOffsets: videoChunkOffsets.map { $0 + offsetDelta },
+                                                    samplesPerChunk: samplesPerChunk,
+                                                    width: width,
+                                                    height: height,
+                                                    sps: sps,
+                                                    pps: pps,
+                                                    movieDuration: movieDuration,
+                                                    editShift: editShift)
+        var body = Data()
+        body.append(MP4PartMerger.makeMVHD(timescale: movieTimescale,
+                                           duration: movieDuration,
+                                           nextTrackID: audioSizes.isEmpty ? 2 : 3))
+        body.append(videoTrak)
+        if !audioSizes.isEmpty {
+            let audioTrak = AudioTrackBuilder.makeAudioTrak(frameCount: audioSizes.count,
+                                                            sizes: audioSizes.map { Int($0) },
+                                                            offsets: audioChunkOffsets.map { UInt32(min($0 + offsetDelta, UInt64(UInt32.max))) },
+                                                            samplesPerChunk: samplesPerChunk,
+                                                            sampleRate: sampleRate,
+                                                            channels: channels,
+                                                            esds: MP4AudioFixer.makeESDS(asc: asc.isEmpty ? Data([0x11, 0x90]) : asc),
+                                                            timescale: movieTimescale,
+                                                            duration: audioSeconds,
+                                                            trackID: 2,
+                                                            editShiftTicks: editShift)
+            body.append(audioTrak)
+        }
+        var moov = Data()
+        moov.append(contentsOf: be32(UInt32(body.count + 8)))
+        moov.append("moov".data(using: .ascii)!)
+        moov.append(body)
+        return moov
+    }
+
+    /// P1：把 ftyp | mdat | moov 重排为 ftyp | moov | mdat（faststart）
+    private func rewriteFastStart(moov: Data) throws {
+        let payloadStart = mdatContentStart
+        let payloadLength = writeOffset - payloadStart
+        let tempURL = destination.deletingLastPathComponent()
+            .appendingPathComponent("faststart-" + UUID().uuidString + ".mp4")
+        FileManager.default.createFile(atPath: tempURL.path, contents: nil)
+        guard let out = try? FileHandle(forWritingTo: tempURL) else {
+            throw MuxError(message: "无法创建 faststart 临时文件")
+        }
+        defer { try? out.close() }
+
+        try out.write(contentsOf: ftypData)
+        try out.write(contentsOf: moov)
+        let total = UInt64(8) + payloadLength
+        guard total <= UInt64(UInt32.max) else {
+            throw MuxError(message: "faststart 仅支持小于 4GB 的输出")
+        }
+        var mdatHeader = Data()
+        mdatHeader.append(contentsOf: [UInt8((total >> 24) & 0xFF), UInt8((total >> 16) & 0xFF),
+                                       UInt8((total >> 8) & 0xFF), UInt8(total & 0xFF)])
+        mdatHeader.append("mdat".data(using: .ascii)!)
+        try out.write(contentsOf: mdatHeader)
+
+        try handle.seek(toOffset: payloadStart)
+        var copied: UInt64 = 0
+        while copied < payloadLength {
+            let want = Int(min(UInt64(4 << 20), payloadLength - copied))
+            guard let chunk = try? handle.read(upToCount: want), !chunk.isEmpty else { break }
+            try out.write(contentsOf: chunk)
+            copied += UInt64(chunk.count)
+        }
+        guard copied == payloadLength else {
+            throw MuxError(message: "faststart 拷贝不完整（\(copied)/\(payloadLength)）")
+        }
+        try? out.close()
+        try? handle.close()
+        try? FileManager.default.removeItem(at: destination)
+        try FileManager.default.moveItem(at: tempURL, to: destination)
+        DiagnosticsLog.write("[转MP4] faststart 完成 载荷=\(payloadLength / (1024 * 1024))MB 新顺序=ftyp|moov|mdat")
+    }
+
+    private func validateChunks(
         guard !offsets.isEmpty, !sizes.isEmpty else { return }
         var index = 0
         for chunkIndex in 0..<offsets.count {
