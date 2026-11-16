@@ -799,19 +799,19 @@ enum AVRemuxPipeline {
             // P2：收尾前内存预检（收尾要追加音频并构造 moov，内存不足会被系统直接杀掉）
             muxer.flushSync()
             var availableMemory = Double(os_proc_available_memory())
-            if availableMemory < 250.0 * 1024 * 1024 {
+            if availableMemory < 400.0 * 1024 * 1024 {
                 DiagnosticsLog.write("[转MP4] 收尾前内存偏低 可用=\(Int(availableMemory / (1024 * 1024)))MB，先刷盘等待")
                 let waitStart = Date()
-                while Double(os_proc_available_memory()) < 250.0 * 1024 * 1024,
-                      Date().timeIntervalSince(waitStart) < 30 {
+                while Double(os_proc_available_memory()) < 400.0 * 1024 * 1024,
+                      Date().timeIntervalSince(waitStart) < 60 {
                     Thread.sleep(forTimeInterval: 0.5)
                 }
                 availableMemory = Double(os_proc_available_memory())
             }
             DiagnosticsLog.write("[转MP4] 内存预检 可用=\(Int(availableMemory / (1024 * 1024)))MB")
-            if availableMemory < 120.0 * 1024 * 1024 {
+            if availableMemory < 160.0 * 1024 * 1024 {
                 try? FileManager.default.removeItem(at: destination)
-                throw RemuxError(message: "内存不足（\(Int(availableMemory / (1024 * 1024)))MB），收尾已中止并清理半成品；原分片已保留")
+                throw RemuxError(message: "内存不足（\(Int(availableMemory / (1024 * 1024)))MB），收尾已中止。原分片已保留，可稍后重试转换。")
             }
             DiagnosticsLog.write("[转MP4] 自研封装：开始收尾（音频已边转边写入）")
             var finishError: Error?

@@ -273,41 +273,66 @@ final class DirectMuxer {
         }
         defer { try? spool.close() }
 
+        // P4：小块（64KB）写入 + 每次 fsync，内存占用恒定，不依赖大缓冲
         var buffer = Data()
-        buffer.reserveCapacity(4 << 20)
+        buffer.reserveCapacity(96 * 1024)
         var frameIndex = 0
         var chunkStartOffset = writeOffset
-        var written = 0
+        var writtenSinceLog = 0
+        var totalWritten = 0
+        var lastLogPercent = 0
 
         while frameIndex < audioSizes.count {
             if frameIndex % samplesPerChunk == 0 {
                 chunkStartOffset = writeOffset + UInt64(buffer.count)
-            }
-            let end = min(frameIndex + samplesPerChunk, audioSizes.count)
-            for index in frameIndex..<end {
-                let size = Int(audioSizes[index])
-                guard let chunk = try? spool.read(upToCount: size), chunk.count == size else {
-                    throw MuxError(message: "音频临时文件读取不完整（帧 \(index)）")
-                }
-                buffer.append(chunk)
-                written += size
-                if buffer.count >= 4 << 20 {
-                    try handle.write(contentsOf: buffer)
-                    writeOffset += UInt64(buffer.count)
-                    buffer.removeAll(keepingCapacity: true)
-                }
-            }
-            if written > 0, frameIndex % samplesPerChunk == 0 {
                 audioChunkOffsets.append(chunkStartOffset)
             }
-            frameIndex = end
+            let size = Int(audioSizes[frameIndex])
+            guard let chunk = try? spool.read(upToCount: size), chunk.count == size else {
+                throw MuxError(message: "音频临时文件读取不完整（帧 \(frameIndex)）")
+            }
+            buffer.append(chunk)
+            writtenSinceLog += size
+            frameIndex += 1
+
+            if buffer.count >= 64 * 1024 || frameIndex >= audioSizes.count {
+                try writeAudioBuffer(&buffer)
+                totalWritten += writtenSinceLog
+                writtenSinceLog = 0
+
+                // P1：内存感知限速（脏页堆积会把进程顶死）
+                let available = Double(os_proc_available_memory())
+                if available < 150.0 * 1024 * 1024 {
+                    let waitStart = Date()
+                    while Double(os_proc_available_memory()) < 150.0 * 1024 * 1024,
+                          Date().timeIntervalSince(waitStart) < 30 {
+                        Thread.sleep(forTimeInterval: 0.05)
+                    }
+                }
+
+                let percent = Int(Double(totalWritten) / Double(max(1, audioSizeTotal)) * 100)
+                if percent >= lastLogPercent + 20 {
+                    lastLogPercent = percent
+                    DiagnosticsLog.write("[转MP4] 音频追加 \(percent)% 已写=\(totalWritten / (1024 * 1024))MB 内存=\(os_proc_available_memory() / (1024 * 1024))MB")
+                }
+            }
         }
-        if !buffer.isEmpty {
-            try handle.write(contentsOf: buffer)
-            writeOffset += UInt64(buffer.count)
-            buffer.removeAll(keepingCapacity: false)
-        }
+
+        if !buffer.isEmpty { try writeAudioBuffer(&buffer) }
         flushSync()
+    }
+
+    private var audioSizeTotal: Int { audioSizes.reduce(0) { $0 + Int($1) } }
+
+    private func writeAudioBuffer(_ buffer: inout Data) throws {
+        guard !buffer.isEmpty else { return }
+        try handle.write(contentsOf: buffer)
+        writeOffset += UInt64(buffer.count)
+        bytesSinceSync += UInt64(buffer.count)
+        buffer.removeAll(keepingCapacity: true)
+        // P4：每次写后刷盘，脏页不累积
+        _ = fsync(handle.fileDescriptor)
+        bytesSinceSync = 0
     }
 
     private func be32(_ value: UInt32) -> [UInt8] {
