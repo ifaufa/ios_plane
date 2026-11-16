@@ -272,7 +272,7 @@ enum MP4StrictValidator {
         // 首个样本的 NAL 类型（视频轨应含 IDR，类型 5）
         if let stsd = firstBox(stbl, type: "stsd"),
            let firstOffset = chunkOffsets.first,
-           let handlerIsVideo = trackIsVideo(trak, mdia: mdia) {
+           trackIsVideo(trak, mdia: mdia) {
             _ = stsd
             if handlerIsVideo, let size = sizes.first, size > 0, size < 4_000_000 {
                 try? handle.seek(toOffset: firstOffset)
