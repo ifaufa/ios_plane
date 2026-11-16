@@ -280,10 +280,11 @@ enum MP4PartMerger {
         let dinf = box(type: "dinf", body: box(type: "dref", body: drefBody))
 
         var avcCBody = Data()
+        // sps 是含 1 字节 NAL 头的完整 NAL：profile_idc 在 [1]、compatibility 在 [2]、level_idc 在 [3]
         avcCBody.append(contentsOf: [1,
-                                     sps.count > 0 ? sps[sps.startIndex] : 0x64,
-                                     sps.count > 1 ? sps[sps.startIndex + 1] : 0x00,
-                                     sps.count > 2 ? sps[sps.startIndex + 2] : 0x1F,
+                                     sps.count > 1 ? sps[sps.startIndex + 1] : 0x64,
+                                     sps.count > 2 ? sps[sps.startIndex + 2] : 0x00,
+                                     sps.count > 3 ? sps[sps.startIndex + 3] : 0x1F,
                                      0xFF, 0xE1])
         avcCBody.append(contentsOf: be16(UInt16(sps.count)))
         avcCBody.append(sps)
