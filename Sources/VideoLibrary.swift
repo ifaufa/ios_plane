@@ -201,6 +201,31 @@ final class VideoLibrary: ObservableObject {
         return freed
     }
 
+    /// 批量删除所有 MP4（保留分片，可再次转换），返回释放字节数
+    @discardableResult
+    func cleanupAllMP4KeepingSegments() -> Int64 {
+        quarantineStoreIfNeeded()
+        let fm = FileManager.default
+        var freed: Int64 = 0
+        var count = 0
+        for index in items.indices {
+            guard !items[index].fileName.lowercased().hasSuffix(".m3u8"),
+                  let name = items[index].segmentDirName, !name.isEmpty else { continue }
+            let mp4URL = localURL(for: items[index])
+            let size = Int64((try? mp4URL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+            guard (try? fm.removeItem(at: mp4URL)) != nil else { continue }
+            freed += size
+            count += 1
+            items[index].fileName = name + "/index.m3u8"
+            items[index].fileSize = Self.directorySize(Self.assetsDir.appendingPathComponent(name, isDirectory: true))
+        }
+        if count > 0 {
+            save()
+            DiagnosticsLog.write("[清理] 批量删除 MP4 \(count) 个 释放 \(freed / (1024 * 1024))MB（分片已保留）")
+        }
+        return freed
+    }
+
     static func directorySize(_ url: URL) -> Int64 {
         let fm = FileManager.default
         guard let enumerator = fm.enumerator(at: url, includingPropertiesForKeys: [.fileSizeKey]) else { return 0 }

@@ -12,6 +12,7 @@ struct ContentView: View {
     @State private var pendingSegmentDelete: VideoItem?
     @State private var pendingMP4Delete: VideoItem?
     @State private var pendingCleanupAllSegments = false
+    @State private var pendingCleanupAllMP4 = false
     @State private var toastText: String?
     @State private var pendingToast: String?
     @State private var showAdd = false
@@ -75,6 +76,12 @@ struct ContentView: View {
                         .swipeActions {
                             Button("删除", role: .destructive) {
                                 library.remove(item)
+                            }
+                            if library.hasSegments(item), !item.fileName.lowercased().hasSuffix(".m3u8") {
+                                Button("删MP4", role: .destructive) {
+                                    pendingMP4Delete = item
+                                }
+                                .tint(.blue)
                             }
                             if library.hasSegments(item) {
                                 Button("删分片", role: .destructive) {
@@ -150,6 +157,7 @@ struct ContentView: View {
                             }
                         Divider()
                         Button("清理所有分片") { pendingCleanupAllSegments = true }
+                        Button("删除所有 MP4（保留分片）") { pendingCleanupAllMP4 = true }
                         }
                     } label: {
                         Image(systemName: "arrow.up.arrow.down")
@@ -259,7 +267,7 @@ struct ContentView: View {
                 Text(info.message)
             }
             .modifier(DownloadRemovalAlert(pending: $pendingRemoval) { downloads.remove($0) })
-            .modifier(SegmentCleanupAlerts(pendingSegmentDelete: $pendingSegmentDelete, pendingCleanupAll: $pendingCleanupAllSegments) { item in library.deleteSegments(for: item) } onCleanupAll: { library.cleanupAllSegments() })
+            .modifier(SegmentCleanupAlerts(pendingSegmentDelete: $pendingSegmentDelete, pendingCleanupAll: $pendingCleanupAllSegments, pendingMP4Delete: $pendingMP4Delete, pendingCleanupAllMP4: $pendingCleanupAllMP4) { item in library.deleteSegments(for: item) } onCleanupAll: { library.cleanupAllSegments() } onDeleteMP4: { item in library.deleteMP4KeepingSegments(for: item) } onCleanupAllMP4: { library.cleanupAllMP4KeepingSegments() })
             .overlay(alignment: .top) { toastBanner }
             .onChange(of: segmentRunner.excludedNotice) { newValue in
                 guard let text = newValue else { return }
@@ -489,8 +497,12 @@ private struct DownloadRemovalAlert: ViewModifier {
 private struct SegmentCleanupAlerts: ViewModifier {
     @Binding var pendingSegmentDelete: VideoItem?
     @Binding var pendingCleanupAll: Bool
+    @Binding var pendingMP4Delete: VideoItem?
+    @Binding var pendingCleanupAllMP4: Bool
     let onDeleteSegments: (VideoItem) -> Void
     let onCleanupAll: () -> Void
+    let onDeleteMP4: (VideoItem) -> Void
+    let onCleanupAllMP4: () -> Void
 
     func body(content: Content) -> some View {
         content
@@ -511,6 +523,24 @@ private struct SegmentCleanupAlerts: ViewModifier {
                 Button("清理", role: .destructive) { onCleanupAll() }
             } message: {
                 Text("将删除所有已保留的原始分片，只保留 MP4。此操作不可恢复。")
+            }
+            .alert("删除 MP4？", isPresented: Binding(
+                get: { pendingMP4Delete != nil },
+                set: { if !$0 { pendingMP4Delete = nil } }
+            )) {
+                Button("取消", role: .cancel) { pendingMP4Delete = nil }
+                Button("删除 MP4", role: .destructive) {
+                    if let item = pendingMP4Delete { onDeleteMP4(item) }
+                    pendingMP4Delete = nil
+                }
+            } message: {
+                Text("将删除已转换的 MP4，原始分片保留，之后可再次转换。")
+            }
+            .alert("删除所有 MP4？", isPresented: $pendingCleanupAllMP4) {
+                Button("取消", role: .cancel) {}
+                Button("删除 MP4", role: .destructive) { onCleanupAllMP4() }
+            } message: {
+                Text("将删除所有已转换的 MP4，原始分片全部保留，可随时再次转换。")
             }
     }
 }
