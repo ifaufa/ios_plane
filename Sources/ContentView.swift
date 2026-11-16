@@ -8,11 +8,7 @@ struct ContentView: View {
     @ObservedObject private var segmentRunner = SegmentRunner.shared
     @ObservedObject private var playback = PlaybackStore.shared
     @AppStorage(LibrarySortMode.storageKey) private var sortModeRaw = LibrarySortMode.timeDesc.rawValue
-    @State private var pendingRemoval: DownloadTaskInfo?
-    @State private var pendingSegmentDelete: VideoItem?
-    @State private var pendingMP4Delete: VideoItem?
-    @State private var pendingCleanupAllSegments = false
-    @State private var pendingCleanupAllMP4 = false
+    @State private var pendingLibraryAction: LibraryAction?
     @State private var toastText: String?
     @State private var pendingToast: String?
     @State private var showAdd = false
@@ -75,17 +71,26 @@ struct ContentView: View {
                         }
                         .swipeActions {
                             Button("删除", role: .destructive) {
-                                library.remove(item)
+                                let target = item
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                                    pendingLibraryAction = .deleteAll(target)
+                                }
                             }
                             if library.hasSegments(item), !item.fileName.lowercased().hasSuffix(".m3u8") {
                                 Button("删MP4", role: .destructive) {
-                                    pendingMP4Delete = item
+                                    let target = item
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                                        pendingLibraryAction = .deleteMP4(target)
+                                    }
                                 }
                                 .tint(.blue)
                             }
                             if library.hasSegments(item) {
                                 Button("删分片", role: .destructive) {
-                                    pendingSegmentDelete = item
+                                    let target = item
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                                        pendingLibraryAction = .deleteSegments(target)
+                                    }
                                 }
                                 .tint(.orange)
                             }
@@ -111,6 +116,36 @@ struct ContentView: View {
                                     Label("导出", systemImage: "square.and.arrow.up")
                                 }
                                 .tint(.green)
+                            }
+                        }
+                        .contextMenu {
+                            if library.hasSegments(item), !item.fileName.lowercased().hasSuffix(".m3u8") {
+                                Button {
+                                    let target = item
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                                        pendingLibraryAction = .deleteMP4(target)
+                                    }
+                                } label: {
+                                    Label("删除 MP4（保留分片）", systemImage: "film")
+                                }
+                            }
+                            if library.hasSegments(item) {
+                                Button(role: .destructive) {
+                                    let target = item
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                                        pendingLibraryAction = .deleteSegments(target)
+                                    }
+                                } label: {
+                                    Label("删除分片（保留 MP4）", systemImage: "scissors")
+                                }
+                            }
+                            Button(role: .destructive) {
+                                let target = item
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                                    pendingLibraryAction = .deleteAll(target)
+                                }
+                            } label: {
+                                Label("全部删除", systemImage: "trash")
                             }
                         }
                     }
@@ -156,8 +191,12 @@ struct ContentView: View {
                                 }
                             }
                         Divider()
-                        Button("清理所有分片") { pendingCleanupAllSegments = true }
-                        Button("删除所有 MP4（保留分片）") { pendingCleanupAllMP4 = true }
+                        Button("清理所有分片") {
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { pendingLibraryAction = .cleanupSegments }
+                        }
+                        Button("删除所有 MP4（保留分片）") {
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { pendingLibraryAction = .cleanupMP4 }
+                        }
                         }
                     } label: {
                         Image(systemName: "arrow.up.arrow.down")
@@ -266,8 +305,12 @@ struct ContentView: View {
             } message: { info in
                 Text(info.message)
             }
-            .modifier(DownloadRemovalAlert(pending: $pendingRemoval) { downloads.remove($0) })
-            .modifier(SegmentCleanupAlerts(pendingSegmentDelete: $pendingSegmentDelete, pendingCleanupAll: $pendingCleanupAllSegments, pendingMP4Delete: $pendingMP4Delete, pendingCleanupAllMP4: $pendingCleanupAllMP4) { item in library.deleteSegments(for: item) } onCleanupAll: { library.cleanupAllSegments() } onDeleteMP4: { item in library.deleteMP4KeepingSegments(for: item) } onCleanupAllMP4: { library.cleanupAllMP4KeepingSegments() })
+            .alert(item: $pendingLibraryAction) { action in
+                Alert(title: Text(action.title),
+                      message: Text(action.message),
+                      primaryButton: .destructive(Text(action.confirmTitle)) { perform(action) },
+                      secondaryButton: .cancel(Text("取消")))
+            }
             .overlay(alignment: .top) { toastBanner }
             .onChange(of: segmentRunner.excludedNotice) { newValue in
                 guard let text = newValue else { return }
@@ -425,7 +468,10 @@ struct ContentView: View {
                             DownloadRow(task: task)
                                 .swipeActions {
                                     Button("删除", role: .destructive) {
-                                        pendingRemoval = task
+                                        let target = task
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                            pendingLibraryAction = .deleteDownload(target)
+                        }
                                     }
                                 }
                         }
@@ -435,6 +481,29 @@ struct ContentView: View {
                         Text("左滑任务可删除").font(.caption2)
                     }
                 }
+    }
+
+    private func perform(_ action: LibraryAction) {
+        switch action {
+        case .deleteSegments(let item):
+            DiagnosticsLog.write("[清理] 执行 删分片 \(item.title)")
+            library.deleteSegments(for: item)
+        case .deleteMP4(let item):
+            DiagnosticsLog.write("[清理] 执行 删MP4 \(item.title)")
+            library.deleteMP4KeepingSegments(for: item)
+        case .deleteAll(let item):
+            DiagnosticsLog.write("[清理] 执行 全部删除 \(item.title)")
+            library.remove(item)
+        case .cleanupSegments:
+            let freed = library.cleanupAllSegments()
+            showToast("已清理分片，释放 \(freed / (1024 * 1024))MB")
+        case .cleanupMP4:
+            let freed = library.cleanupAllMP4KeepingSegments()
+            showToast("已删除 MP4，释放 \(freed / (1024 * 1024))MB（分片已保留）")
+        case .deleteDownload(let task):
+            DiagnosticsLog.write("[清理] 执行 删除下载任务 \(task.title)")
+            downloads.remove(task)
+        }
     }
 
     private func openPlayer(_ item: VideoItem) {
@@ -474,76 +543,7 @@ struct ContentView: View {
     }
 }
 
-private struct DownloadRemovalAlert: ViewModifier {
-    @Binding var pending: DownloadTaskInfo?
-    let onRemove: (DownloadTaskInfo) -> Void
 
-    func body(content: Content) -> some View {
-        content.alert("删除这个下载任务？", isPresented: Binding(
-            get: { pending != nil },
-            set: { if !$0 { pending = nil } }
-        )) {
-            Button("取消", role: .cancel) { pending = nil }
-            Button("删除", role: .destructive) {
-                if let task = pending { onRemove(task) }
-                pending = nil
-            }
-        } message: {
-            Text("将删除该任务已下载的分片与任务记录，且不可恢复。视频库中已转换的成品不受影响。")
-        }
-    }
-}
-
-private struct SegmentCleanupAlerts: ViewModifier {
-    @Binding var pendingSegmentDelete: VideoItem?
-    @Binding var pendingCleanupAll: Bool
-    @Binding var pendingMP4Delete: VideoItem?
-    @Binding var pendingCleanupAllMP4: Bool
-    let onDeleteSegments: (VideoItem) -> Void
-    let onCleanupAll: () -> Void
-    let onDeleteMP4: (VideoItem) -> Void
-    let onCleanupAllMP4: () -> Void
-
-    func body(content: Content) -> some View {
-        content
-            .alert("删除分片？", isPresented: Binding(
-                get: { pendingSegmentDelete != nil },
-                set: { if !$0 { pendingSegmentDelete = nil } }
-            )) {
-                Button("取消", role: .cancel) { pendingSegmentDelete = nil }
-                Button("删除分片", role: .destructive) {
-                    if let item = pendingSegmentDelete { onDeleteSegments(item) }
-                    pendingSegmentDelete = nil
-                }
-            } message: {
-                Text("将删除该视频的原始分片，只保留 MP4。删除后无法再次转换。")
-            }
-            .alert("清理所有分片？", isPresented: $pendingCleanupAll) {
-                Button("取消", role: .cancel) {}
-                Button("清理", role: .destructive) { onCleanupAll() }
-            } message: {
-                Text("将删除所有已保留的原始分片，只保留 MP4。此操作不可恢复。")
-            }
-            .alert("删除 MP4？", isPresented: Binding(
-                get: { pendingMP4Delete != nil },
-                set: { if !$0 { pendingMP4Delete = nil } }
-            )) {
-                Button("取消", role: .cancel) { pendingMP4Delete = nil }
-                Button("删除 MP4", role: .destructive) {
-                    if let item = pendingMP4Delete { onDeleteMP4(item) }
-                    pendingMP4Delete = nil
-                }
-            } message: {
-                Text("将删除已转换的 MP4，原始分片保留，之后可再次转换。")
-            }
-            .alert("删除所有 MP4？", isPresented: $pendingCleanupAllMP4) {
-                Button("取消", role: .cancel) {}
-                Button("删除 MP4", role: .destructive) { onCleanupAllMP4() }
-            } message: {
-                Text("将删除所有已转换的 MP4，原始分片全部保留，可随时再次转换。")
-            }
-    }
-}
 
 struct DownloadRow: View {
     let task: DownloadTaskInfo
@@ -827,6 +827,59 @@ struct EngineSettingsView: View {
                     }
                 }
             }
+        }
+    }
+}
+
+enum LibraryAction: Identifiable {
+    case deleteSegments(VideoItem)
+    case deleteMP4(VideoItem)
+    case deleteAll(VideoItem)
+    case cleanupSegments
+    case cleanupMP4
+    case deleteDownload(DownloadTaskInfo)
+
+    var id: String {
+        switch self {
+        case .deleteSegments(let item): return "seg-\(item.id)"
+        case .deleteMP4(let item): return "mp4-\(item.id)"
+        case .deleteAll(let item): return "all-\(item.id)"
+        case .cleanupSegments: return "cleanup-seg"
+        case .cleanupMP4: return "cleanup-mp4"
+        case .deleteDownload(let task): return "task-\(task.id)"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .deleteSegments: return "删除分片？"
+        case .deleteMP4: return "删除 MP4？"
+        case .deleteAll: return "删除这个视频？"
+        case .cleanupSegments: return "清理所有分片？"
+        case .cleanupMP4: return "删除所有 MP4？"
+        case .deleteDownload: return "删除这个下载任务？"
+        }
+    }
+
+    var message: String {
+        switch self {
+        case .deleteSegments: return "将删除该视频的原始分片，只保留 MP4。删除后无法再次转换。"
+        case .deleteMP4: return "将删除已转换的 MP4，原始分片保留，之后可再次转换。"
+        case .deleteAll: return "将同时删除 MP4 与原始分片，不可恢复。"
+        case .cleanupSegments: return "将删除所有已保留的原始分片，只保留 MP4。此操作不可恢复。"
+        case .cleanupMP4: return "将删除所有已转换的 MP4，原始分片全部保留，可随时再次转换。"
+        case .deleteDownload: return "将删除该任务已下载的分片与任务记录，且不可恢复。视频库中已转换的成品不受影响。"
+        }
+    }
+
+    var confirmTitle: String {
+        switch self {
+        case .deleteSegments: return "删除分片"
+        case .deleteMP4: return "删除 MP4"
+        case .deleteAll: return "删除"
+        case .cleanupSegments: return "清理"
+        case .cleanupMP4: return "删除 MP4"
+        case .deleteDownload: return "删除"
         }
     }
 }
