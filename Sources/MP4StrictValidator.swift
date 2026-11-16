@@ -96,56 +96,81 @@ enum MP4StrictValidator {
     // MARK: - 编码参数 dump（与系统引擎产物做对照）
 
     static func dumpCodecInfo(_ url: URL) {
-        guard let data = try? Data(contentsOf: url, options: .mappedIfSafe), data.count > 16 else { return }
-        // ftyp（按实际 box 尺寸读取，避免读越界）
-        if data.ascii(4, 4) == "ftyp" {
-            let ftypSize = Int(data.be32(0))
-            var brands = data.ascii(8, 4)
-            var off = 16
-            while off + 4 <= min(ftypSize, data.count) { brands += "/" + data.ascii(off, 4); off += 4 }
-            DiagnosticsLog.write("[编码参数] ftyp=\\(brands)")
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return }
+        defer { try? handle.close() }
+        guard let size = try? handle.seekToEnd(), size > 0 else { return }
+
+        // 顶层扫描：ftyp 品牌 + 定位 moov（不整体拷贝 mdat）
+        var moovData: Data?
+        var offset: UInt64 = 0
+        while offset + 8 <= size {
+            try? handle.seek(toOffset: offset)
+            guard let header = try? handle.read(upToCount: 16), header.count >= 8 else { break }
+            var boxSize = UInt64(header.be32(0))
+            let type = header.ascii(4, 4)
+            var headerLength: UInt64 = 8
+            if boxSize == 1, header.count >= 16 {
+                boxSize = header.be64(8); headerLength = 16
+            } else if boxSize == 0 {
+                boxSize = size - offset
+            }
+            guard boxSize >= headerLength, offset + boxSize <= size else { break }
+
+            if type == "ftyp" {
+                var brands = header.ascii(8, 4)
+                var pos = offset + 16
+                while pos + 4 <= min(offset + boxSize, size) {
+                    try? handle.seek(toOffset: pos)
+                    if let b = try? handle.read(upToCount: 4), b.count == 4 { brands += "/" + b.ascii(0, 4) }
+                    pos += 4
+                }
+                DiagnosticsLog.write("[编码参数] ftyp=" + brands)
+            }
+            if type == "moov" {
+                try? handle.seek(toOffset: offset)
+                moovData = try? handle.read(upToCount: Int(boxSize))
+            }
+            offset += boxSize
         }
-        // moov → trak → mdia → minf → stbl → stsd → avc1 / mp4a
-        for moov in boxes(in: data, from: 0) where moov.type == "moov" {
-            for trak in boxes(in: moov.data, from: 8) where trak.type == "trak" {
-                guard let mdia = firstBox(trak.data, type: "mdia"),
-                      let minf = firstBox(mdia, type: "minf"),
-                      let stbl = firstBox(minf, type: "stbl"),
-                      let stsd = firstBox(stbl, type: "stsd") else { continue }
-                for entry in boxes(in: stsd, from: 8) {
-                    if entry.type == "avc1" {
-                        let avc1 = entry.data
-                        let w = avc1.be16(8 + 24)
-                        let h = avc1.be16(8 + 26)
-                        let depth = avc1.be16(8 + 74)
-                        let avcCStart = 8 + 78
-                        if avc1.count > avcCStart + 8, avc1.ascii(avcCStart + 4, 4) == "avcC" {
-                            let profile = avc1[avc1.startIndex + avcCStart + 8 + 1]
-                            let level = avc1[avc1.startIndex + avcCStart + 8 + 3]
-                            let lenSize = Int(avc1[avc1.startIndex + avcCStart + 8 + 4] & 0x03) + 1
-                            let numSPS = Int(avc1[avc1.startIndex + avcCStart + 8 + 5] & 0x1F)
-                            var pos = avcCStart + 8 + 6
-                            var spsLen = 0; var spsHex = "-"
-                            if numSPS > 0, pos + 2 <= avc1.count {
-                                spsLen = Int(avc1.be16(pos)); pos += 2
-                                spsHex = avc1.hex(pos, min(spsLen, 16)); pos += spsLen
-                            }
-                            var ppsLen = 0; var ppsHex = "-"
-                            if pos < avc1.count {
-                                let numPPS = Int(avc1[avc1.startIndex + pos]); pos += 1
-                                if numPPS > 0, pos + 2 <= avc1.count {
-                                    ppsLen = Int(avc1.be16(pos)); pos += 2
-                                    ppsHex = avc1.hex(pos, min(ppsLen, 16))
-                                }
-                            }
-                            DiagnosticsLog.write("[编码参数] avc1 \\(w)x\\(h) depth=0x\\(String(depth, radix: 16)) profile=0x\\(String(profile, radix: 16)) level=0x\\(String(level, radix: 16)) lenSize=\\(lenSize) SPS=\\(spsLen)B \\(spsHex) PPS=\\(ppsLen)B \\(ppsHex)")
+
+        guard let moov = moovData else { return }
+        for trak in boxes(in: moov, from: 8) where trak.type == "trak" {
+            guard let mdia = firstBox(trak.data, type: "mdia"),
+                  let minf = firstBox(mdia, type: "minf"),
+                  let stbl = firstBox(minf, type: "stbl"),
+                  let stsd = firstBox(stbl, type: "stsd") else { continue }
+            for entry in boxes(in: stsd, from: 16) {
+                if entry.type == "avc1" {
+                    let avc1 = entry.data
+                    let w = avc1.be16(32)
+                    let h = avc1.be16(34)
+                    let avcCStart = 86
+                    if avc1.count > avcCStart + 8, avc1.ascii(avcCStart + 4, 4) == "avcC" {
+                        let profile = avc1[avc1.startIndex + avcCStart + 8 + 1]
+                        let level = avc1[avc1.startIndex + avcCStart + 8 + 3]
+                        let lenSize = Int(avc1[avc1.startIndex + avcCStart + 8 + 4] & 0x03) + 1
+                        let numSPS = Int(avc1[avc1.startIndex + avcCStart + 8 + 5] & 0x1F)
+                        var pos = avcCStart + 8 + 6
+                        var spsLen = 0; var spsHex = "-"
+                        if numSPS > 0, pos + 2 <= avc1.count {
+                            spsLen = Int(avc1.be16(pos)); pos += 2
+                            spsHex = avc1.hex(pos, min(spsLen, 24)); pos += spsLen
                         }
-                    } else if entry.type == "mp4a" {
-                        let mp4a = entry.data
-                        let channels = mp4a.be16(8 + 16)
-                        let sr = mp4a.be32(8 + 24) >> 16
-                        DiagnosticsLog.write("[编码参数] mp4a channels=\\(channels) samplerate=\\(sr)")
+                        var ppsLen = 0; var ppsHex = "-"
+                        if pos < avc1.count {
+                            let numPPS = Int(avc1[avc1.startIndex + pos]); pos += 1
+                            if numPPS > 0, pos + 2 <= avc1.count {
+                                ppsLen = Int(avc1.be16(pos)); pos += 2
+                                ppsHex = avc1.hex(pos, min(ppsLen, 24))
+                            }
+                        }
+                        DiagnosticsLog.write("[编码参数] avc1 " + String(w) + "x" + String(h) + " profile=0x" + String(profile, radix: 16) + " level=0x" + String(level, radix: 16) + " lenSize=" + String(lenSize) + " SPS=" + String(spsLen) + "B " + spsHex + " PPS=" + String(ppsLen) + "B " + ppsHex)
                     }
+                } else if entry.type == "mp4a" {
+                    let mp4a = entry.data
+                    let channels = mp4a.be16(24)
+                    let sr = mp4a.be32(32) >> 16
+                    DiagnosticsLog.write("[编码参数] mp4a channels=" + String(channels) + " samplerate=" + String(sr))
                 }
             }
         }
