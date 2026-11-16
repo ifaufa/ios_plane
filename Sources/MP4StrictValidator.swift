@@ -273,6 +273,7 @@ enum MP4StrictValidator {
         if let stsd = firstBox(stbl, type: "stsd"),
            let firstOffset = chunkOffsets.first,
            trackIsVideo(trak, mdia: mdia) {
+            let handlerIsVideo = true
             _ = stsd
             if handlerIsVideo, let size = sizes.first, size > 0, size < 4_000_000 {
                 try? handle.seek(toOffset: firstOffset)
