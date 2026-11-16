@@ -422,7 +422,7 @@ final class DirectMuxer {
         DiagnosticsLog.write("[转MP4] faststart 完成 载荷=\(payloadLength / (1024 * 1024))MB 新顺序=ftyp|moov|mdat")
     }
 
-    private func validateChunks(
+    private func validateChunks(offsets: [UInt64], sizes: [Int32], label: String) throws {
         guard !offsets.isEmpty, !sizes.isEmpty else { return }
         var index = 0
         for chunkIndex in 0..<offsets.count {
