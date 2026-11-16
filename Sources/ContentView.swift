@@ -49,20 +49,7 @@ struct ContentView: View {
                             .foregroundStyle(.orange)
                     }
                 }
-                if !downloads.tasks.isEmpty {
-                    Section("下载任务 (\(downloads.activeCount)/\(downloads.maxConcurrent))") {
-                        ForEach(downloads.tasks) { task in
-                            DownloadRow(task: task)
-                                .swipeActions {
-                                    Button("删除", role: .destructive) {
-                                        pendingRemoval = task
-                                    }
-                                }
-                        }
-                    } footer: {
-                        Text("左滑任务可删除").font(.caption2)
-                    }
-                }
+                downloadsSection
                 Section("视频库 (\(library.items.count))") {
                     ForEach(sortedItems) { item in
                         HStack(spacing: 12) {
@@ -260,18 +247,7 @@ struct ContentView: View {
             } message: { info in
                 Text(info.message)
             }
-            .alert("删除这个下载任务？", isPresented: Binding(
-                get: { pendingRemoval != nil },
-                set: { if !$0 { pendingRemoval = nil } }
-            )) {
-                Button("取消", role: .cancel) { pendingRemoval = nil }
-                Button("删除", role: .destructive) {
-                    if let task = pendingRemoval { downloads.remove(task) }
-                    pendingRemoval = nil
-                }
-            } message: {
-                Text("将删除该任务已下载的分片与任务记录，且不可恢复。视频库中已转换的成品不受影响。")
-            }
+            .modifier(DownloadRemovalAlert(pending: $pendingRemoval) { downloads.remove($0) })
             .overlay(alignment: .top) { toastBanner }
             .onChange(of: segmentRunner.excludedNotice) { newValue in
                 guard let text = newValue else { return }
@@ -420,6 +396,24 @@ struct ContentView: View {
         return library.items.sorted(by: mode)
     }
 
+    @ViewBuilder
+    private var downloadsSection: some View {
+                if !downloads.tasks.isEmpty {
+                    Section("下载任务 (\(downloads.activeCount)/\(downloads.maxConcurrent))") {
+                        ForEach(downloads.tasks) { task in
+                            DownloadRow(task: task)
+                                .swipeActions {
+                                    Button("删除", role: .destructive) {
+                                        pendingRemoval = task
+                                    }
+                                }
+                        }
+                    } footer: {
+                        Text("左滑任务可删除").font(.caption2)
+                    }
+                }
+    }
+
     private func openPlayer(_ item: VideoItem) {
         let url = library.localURL(for: item)
         let exists = FileManager.default.fileExists(atPath: url.path)
@@ -454,6 +448,26 @@ struct ContentView: View {
         library.remove(ids: selected)
         selected.removeAll()
         selectionMode = false
+    }
+}
+
+private struct DownloadRemovalAlert: ViewModifier {
+    @Binding var pending: DownloadTaskInfo?
+    let onRemove: (DownloadTaskInfo) -> Void
+
+    func body(content: Content) -> some View {
+        content.alert("删除这个下载任务？", isPresented: Binding(
+            get: { pending != nil },
+            set: { if !$0 { pending = nil } }
+        )) {
+            Button("取消", role: .cancel) { pending = nil }
+            Button("删除", role: .destructive) {
+                if let task = pending { onRemove(task) }
+                pending = nil
+            }
+        } message: {
+            Text("将删除该任务已下载的分片与任务记录，且不可恢复。视频库中已转换的成品不受影响。")
+        }
     }
 }
 
