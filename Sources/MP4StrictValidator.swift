@@ -278,10 +278,21 @@ enum MP4StrictValidator {
             if handlerIsVideo, let size = sizes.first, size > 0, size < 4_000_000 {
                 try? handle.seek(toOffset: firstOffset)
                 if let data = try? handle.read(upToCount: Int(size)), data.count == Int(size) {
-                    let firstNAL = data.count >= 5 ? Int(data[data.startIndex + 4] & 0x1F) : -1
-                    if firstNAL != 5 {
+                    // 扫描该 AU 内所有 NAL：必须包含 IDR（类型 5）；SEI(6) 在前属正常
+                    var types: [Int] = []
+                    var cursor = 0
+                    while cursor + 4 <= data.count, types.count < 32 {
+                        let length = Int(data.be32(cursor))
+                        cursor += 4
+                        guard length > 0, cursor + length <= data.count else { break }
+                        types.append(Int(data[data.startIndex + cursor] & 0x1F))
+                        cursor += length
+                    }
+                    let typeList = types.map { String($0) }.joined(separator: ",")
+                    DiagnosticsLog.write("[严格校验] \(label) 首样本 NAL=[\(typeList)]")
+                    if !types.contains(5) {
                         report.issues.append(Issue(fatal: true,
-                                                   text: "\(label) 首个样本不是 IDR（NAL=\(firstNAL)），外部解码器可能黑屏"))
+                                                   text: "\(label) 首样本不含 IDR（NAL=[\(typeList)]），外部解码器会黑屏"))
                     }
                 }
             }

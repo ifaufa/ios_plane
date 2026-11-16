@@ -175,6 +175,8 @@ enum AVRemuxPipeline {
         var pushedBeforeWriter = 0
         var pocMissing = 0
         var gopCount = 0
+        var startedWriting = false
+        var startSkipped = 0
         var gopOrderMismatch = 0
         var gopReorderCount = 0
         var gopIdentityCount = 0
@@ -246,9 +248,15 @@ enum AVRemuxPipeline {
                 // 时长统一用中位帧间隔（该源为恒定帧率；逐帧 DTS 是递推出来的，噪声大不可用）
                 let ptsTicks = ptsByIndex[index] * frameStep
                 let dtsTicks = decodeCursor * frameStep
+                // 起始必须真正含 IDR：某些源首帧只有 SEI（NAL=6），被当成关键帧会导致外部解码器黑屏
+                if !startedWriting, directMuxer != nil, !Self.containsIDR(frame.data) {
+                    startSkipped += 1
+                    continue
+                }
                 let durationTicks = UInt32(max(1, frameStep))
                 decodeCursor += 1
                 let item = VideoItem(data: frame.data, pts: ptsTicks, dts: dtsTicks, isKey: frame.isKey)
+                startedWriting = true
                 if let muxer = directMuxer {
                     do {
                         try muxer.appendVideo(data: item.data, isKey: item.isKey, pts: item.pts, dts: item.dts, duration: durationTicks)
@@ -814,7 +822,7 @@ enum AVRemuxPipeline {
                                         gopCount, gopReorderCount, percent, gopIdentityCount, cttsMinFrame, cttsMaxFrame))
         }
         DiagnosticsLog.write("[转MP4] 显示顺序模式=\(UserDefaults.standard.string(forKey: "mp4DisplayOrder") ?? "poc")")
-        DiagnosticsLog.write("[转MP4] 封装完成 视频帧=\(videoFrames) 音频帧=\(audioFrameIndex) GOP=\(gopCount) POC缺失=\(pocMissing) 帧间隔=\(frameStep)")
+        DiagnosticsLog.write("[转MP4] 封装完成 视频帧=\(videoFrames) 音频帧=\(audioFrameIndex) GOP=\(gopCount) POC缺失=\(pocMissing) 帧间隔=\(frameStep) 起始跳过=\(startSkipped)")
 
         // 自研封装：直接收尾（追加音频 + 写 moov），不经过 AVAssetWriter
         if let muxer = directMuxer {
@@ -947,6 +955,24 @@ enum AVRemuxPipeline {
     }
 
     /// 校验 AVCC 样本结构：4 字节长度前缀 + NAL，长度必须严格首尾闭合
+    /// 该 AU 是否含 IDR（NAL 类型 5）——首帧必须是真 IDR，否则外部解码器黑屏
+    private static func containsIDR(_ data: Data) -> Bool {
+        let bytes = [UInt8](data)
+        var offset = 0
+        var units = 0
+        while offset + 4 <= bytes.count, units < 64 {
+            let length = (Int(bytes[offset]) << 24) | (Int(bytes[offset + 1]) << 16)
+                | (Int(bytes[offset + 2]) << 8) | Int(bytes[offset + 3])
+            offset += 4
+            guard length > 0, offset + length <= bytes.count else { return false }
+            if bytes[offset] & 0x1F == 5 { return true }
+            offset += length
+            units += 1
+        }
+        return false
+    }
+
+
     private static func isValidAVCC(_ data: Data) -> Bool {
         guard data.count >= 5 else { return false }
         let bytes = [UInt8](data)
