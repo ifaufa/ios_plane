@@ -263,8 +263,15 @@ final class DirectMuxer {
 
         var editShift: Int64 = 0
         if let minOffset = videoCtts.min(), minOffset < 0 {
-            editShift = Int64(-minOffset)
-            for index in videoCtts.indices { videoCtts[index] += Int32(editShift) }
+            let magnitude = Int64(-minOffset)
+            // 保护：偏移量超出正常 B 帧重排范围（>10 帧）说明排序异常，直接 clamp 为 0，避免写出超大 elst
+            if magnitude > frameStep * 10 {
+                DiagnosticsLog.write("[转MP4] 显示偏移异常（min=\(minOffset) ticks），已 clamp 为 0 而非写 elst")
+                for index in videoCtts.indices where videoCtts[index] < 0 { videoCtts[index] = 0 }
+            } else {
+                editShift = magnitude
+                for index in videoCtts.indices { videoCtts[index] += Int32(editShift) }
+            }
         }
 
         let totalTicks = Int64(videoSizes.count) * frameStep

@@ -105,6 +105,7 @@ final class PlaybackStore: ObservableObject {
         isHLS = url.pathExtension.lowercased() == "m3u8"
         lastSaved = video.lastPosition ?? 0
         recoveryAttempts = 0
+        errorNotice = nil
         waitingTicks = 0
         pauseTicks = 0
         pauseRecoveries = 0

@@ -220,6 +220,7 @@ enum AVRemuxPipeline {
                 pocMissing += count
                 order = Array(0..<count)
             }
+            for (rank, idx) in order.enumerated() { ptsByIndex[idx] = displayCursor + Int64(rank) }
             if order == Array(0..<count) {
                 gopIdentityCount += 1
             } else {
