@@ -8,6 +8,7 @@ struct ContentView: View {
     @ObservedObject private var segmentRunner = SegmentRunner.shared
     @ObservedObject private var playback = PlaybackStore.shared
     @AppStorage(LibrarySortMode.storageKey) private var sortModeRaw = LibrarySortMode.timeDesc.rawValue
+    @State private var pendingRemoval: DownloadTaskInfo?
     @State private var toastText: String?
     @State private var pendingToast: String?
     @State private var showAdd = false
@@ -54,10 +55,12 @@ struct ContentView: View {
                             DownloadRow(task: task)
                                 .swipeActions {
                                     Button("删除", role: .destructive) {
-                                        downloads.remove(task)
+                                        pendingRemoval = task
                                     }
                                 }
                         }
+                    } footer: {
+                        Text("左滑任务可删除").font(.caption2)
                     }
                 }
                 Section("视频库 (\(library.items.count))") {
@@ -256,6 +259,18 @@ struct ContentView: View {
                 Button("好", role: .cancel) {}
             } message: { info in
                 Text(info.message)
+            }
+            .alert("删除这个下载任务？", isPresented: Binding(
+                get: { pendingRemoval != nil },
+                set: { if !$0 { pendingRemoval = nil } }
+            )) {
+                Button("取消", role: .cancel) { pendingRemoval = nil }
+                Button("删除", role: .destructive) {
+                    if let task = pendingRemoval { downloads.remove(task) }
+                    pendingRemoval = nil
+                }
+            } message: {
+                Text("将删除该任务已下载的分片与任务记录，且不可恢复。视频库中已转换的成品不受影响。")
             }
             .overlay(alignment: .top) { toastBanner }
             .onChange(of: segmentRunner.excludedNotice) { newValue in
@@ -493,7 +508,6 @@ struct DownloadRow: View {
                 case .failed:
                     Button("重试") { downloads.resume(task) }
                 }
-                Button("删除", role: .destructive) { downloads.remove(task) }
             }
             .font(.caption)
             .buttonStyle(.borderless)
