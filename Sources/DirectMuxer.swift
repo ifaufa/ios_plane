@@ -198,6 +198,13 @@ final class DirectMuxer {
         try validateChunks(offsets: videoChunkOffsets, sizes: videoSizes, label: "视频")
         try validateChunks(offsets: audioChunkOffsets, sizes: audioSizes, label: "音频")
         DiagnosticsLog.write("[转MP4] chunk 连续性校验通过 视频chunk=\(videoChunkOffsets.count) 音频chunk=\(audioChunkOffsets.count)")
+        // P3：显示偏移范围校验（>10 帧说明重排异常）
+        let maxCtts = videoCtts.map { abs($0) }.max() ?? 0
+        if Int(maxCtts) > Int(frameStep) * 10 {
+            DiagnosticsLog.write("[转MP4] 警告：显示偏移过大 max=\(maxCtts)ticks（帧间隔=\(frameStep)）")
+        } else {
+            DiagnosticsLog.write("[转MP4] 显示偏移正常 max=\(maxCtts)ticks（帧间隔=\(frameStep)）")
+        }
 
         var editShift: Int64 = 0
         if let minOffset = videoCtts.min(), minOffset < 0 {
@@ -243,6 +250,16 @@ final class DirectMuxer {
         var audioTrak = Data()
         if !audioSizes.isEmpty {
             let audioSeconds = Double(audioSizes.count) * 1024.0 / Double(max(1, sampleRate))
+            // P3：音画时长一致性告警（偏差 >1% 说明时间轴仍有问题）
+            let videoSeconds = Double(totalTicks) / 90000.0
+            let deviation = abs(videoSeconds - audioSeconds) / max(1.0, audioSeconds)
+            if deviation > 0.01 {
+                DiagnosticsLog.write(String(format: "[转MP4] 警告：音画时长偏差 %.1f%%（视频=%.1fs 音频=%.1fs）",
+                                            deviation * 100, videoSeconds, audioSeconds))
+            } else {
+                DiagnosticsLog.write(String(format: "[转MP4] 音画时长一致 视频=%.1fs 音频=%.1fs 偏差=%.2f%%",
+                                            videoSeconds, audioSeconds, deviation * 100))
+            }
             audioTrak = AudioTrackBuilder.makeAudioTrak(frameCount: audioSizes.count,
                                                         sizes: audioSizes.map { Int($0) },
                                                         offsets: audioChunkOffsets.map { UInt32(min($0, UInt64(UInt32.max))) },

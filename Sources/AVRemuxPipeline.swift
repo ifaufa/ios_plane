@@ -173,6 +173,7 @@ enum AVRemuxPipeline {
         var pushedBeforeWriter = 0
         var pocMissing = 0
         var gopCount = 0
+        var gopOrderMismatch = 0
 
         func setFailure(_ message: String) {
             lock.lock()
@@ -191,28 +192,33 @@ enum AVRemuxPipeline {
             guard !gop.isEmpty else { return }
             gopCount += 1
             let count = gop.count
+            // 显示顺序：优先用真实 PTS 排序（PES 级 PTS 是绝对值），POC 作为交叉校验
             var ptsByIndex = [Int64](repeating: 0, count: count)
             let pocs = gop.map { $0.poc }
-            if pocs.allSatisfy({ $0 != nil }) {
-                let order = (0..<count).sorted { (pocs[$0] ?? 0) < (pocs[$1] ?? 0) }
-                for (rank, idx) in order.enumerated() { ptsByIndex[idx] = displayCursor + Int64(rank) }
+            let ptsList = gop.map { $0.pts }
+            let ptsDistinct = Set(ptsList).count
+            var order: [Int]
+            var orderSource = "原序"
+            if ptsDistinct >= max(2, count - count / 4) {
+                order = (0..<count).sorted { ptsList[$0] < ptsList[$1] }
+                orderSource = "PTS"
+            } else if pocs.allSatisfy({ $0 != nil }) {
+                order = (0..<count).sorted { (pocs[$0] ?? 0) < (pocs[$1] ?? 0) }
+                orderSource = "POC"
             } else {
                 pocMissing += count
-                for idx in 0..<count { ptsByIndex[idx] = displayCursor + Int64(idx) }
+                order = Array(0..<count)
             }
-
-            // 真实时间戳是否可信（不递增/负值/偏移过大则退回 POC 网格）
-            var useRaw = baseDTS >= 0
-            if useRaw {
-                var previousDTS = Int64.min
-                for frame in gop {
-                    let dtsRel = frame.dts - baseDTS
-                    let ptsRel = frame.pts - baseDTS
-                    if dtsRel < 0 || ptsRel < 0 { useRaw = false; break }
-                    if previousDTS != Int64.min, frame.dts <= previousDTS { useRaw = false; break }
-                    if abs(ptsRel - dtsRel) > frameStep * 8 { useRaw = false; break }
-                    previousDTS = frame.dts
+            for (rank, idx) in order.enumerated() { ptsByIndex[idx] = displayCursor + Int64(rank) }
+            if orderSource == "PTS", pocs.allSatisfy({ $0 != nil }) {
+                let pocOrder = (0..<count).sorted { (pocs[$0] ?? 0) < (pocs[$1] ?? 0) }
+                if pocOrder != order && gopOrderMismatch < 3 {
+                    gopOrderMismatch += 1
+                    DiagnosticsLog.write("[转MP4] 显示顺序不一致（以 PTS 为准）GOP=\(gopCount) 帧数=\(count)")
                 }
+            }
+            if gopCount <= 3 || gopCount % 2000 == 0 {
+                DiagnosticsLog.write("[转MP4] 显示顺序来源=\(orderSource) GOP=\(gopCount) 帧数=\(count)")
             }
 
             // 关键：必须在入队前创建 writer。队列容量有限，
@@ -222,22 +228,12 @@ enum AVRemuxPipeline {
             }
             for index in 0..<count {
                 let frame = gop[index]
-                let ptsTicks: Int64
-                let dtsTicks: Int64
-                let durationTicks: UInt32
-                if useRaw {
-                    ptsTicks = frame.pts - baseDTS
-                    dtsTicks = frame.dts - baseDTS
-                    let nextValue = index + 1 < count ? gop[index + 1].dts : (nextDTS ?? frame.dts + frameStep)
-                    var delta = nextValue - frame.dts
-                    if delta <= 0 || delta > 90000 { delta = frameStep }
-                    durationTicks = UInt32(max(1, delta))
-                } else {
-                    ptsTicks = ptsByIndex[index] * frameStep
-                    dtsTicks = decodeCursor * frameStep
-                    durationTicks = UInt32(max(1, frameStep))
-                }
+                // 时长统一用中位帧间隔（该源为恒定帧率；逐帧 DTS 是递推出来的，噪声大不可用）
+                let ptsTicks = ptsByIndex[index] * frameStep
+                let dtsTicks = decodeCursor * frameStep
+                let durationTicks = UInt32(max(1, frameStep))
                 decodeCursor += 1
+                let item = VideoItem(data: frame.data, pts: ptsTicks, dts: dtsTicks, isKey: frame.isKey)
                 let item = VideoItem(data: frame.data, pts: ptsTicks, dts: dtsTicks, isKey: frame.isKey)
                 if let muxer = directMuxer {
                     do {
