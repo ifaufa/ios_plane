@@ -411,11 +411,16 @@ final class DirectMuxer {
         mdatHeader.append("mdat".data(using: .ascii)!)
         try out.write(contentsOf: mdatHeader)
 
-        try handle.seek(toOffset: payloadStart)
+        // P1 修复：写句柄不能读，需独立的读句柄
+        guard let reader = try? FileHandle(forReadingFrom: destination) else {
+            throw MuxError(message: "无法打开源文件进行 faststart 拷贝")
+        }
+        defer { try? reader.close() }
+        try reader.seek(toOffset: payloadStart)
         var copied: UInt64 = 0
         while copied < payloadLength {
             let want = Int(min(UInt64(4 << 20), payloadLength - copied))
-            guard let chunk = try? handle.read(upToCount: want), !chunk.isEmpty else { break }
+            guard let chunk = try? reader.read(upToCount: want), !chunk.isEmpty else { break }
             try out.write(contentsOf: chunk)
             copied += UInt64(chunk.count)
         }

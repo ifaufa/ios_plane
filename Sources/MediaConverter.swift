@@ -78,6 +78,7 @@ enum MediaConverter {
                 let hasStss = MP4Inspector.describe(outputURL).contains("stss(")
                 let audioPlayable = await Self.hasDecodableAudio(outputURL)
                 DiagnosticsLog.write(String(format: "[转MP4] 自研封装校验 耗时 %.1fs 视频轨=%d 音频轨=%d stss=%@ 时长=%.1fs",
+                MP4StrictValidator.dumpCodecInfo(outputURL)
                                             Date().timeIntervalSince(start), videoCount, audioCount,
                                             hasStss ? "已写入" : "未写入", duration) + (audioPlayable ? " 音频可解" : " 音频不可解"))
                 // D1：严格结构校验（模拟外部解析器）
@@ -183,6 +184,7 @@ enum MediaConverter {
                                             Date().timeIntervalSince(start), videoCount, audioCount,
                                             wroteStss ? "已写入" : "未写入"))
 
+                MP4StrictValidator.dumpCodecInfo(outputURL)
                 if videoCount != 1 || audioCount < 1 || !wroteStss {
                     var reasons: [String] = []
                     if videoCount != 1 { reasons.append("产物视频轨=\(videoCount)") }
