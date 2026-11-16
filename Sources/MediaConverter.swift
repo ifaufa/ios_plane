@@ -77,10 +77,11 @@ enum MediaConverter {
                 let duration = ((try? await asset.load(.duration))?.seconds) ?? 0
                 let hasStss = MP4Inspector.describe(outputURL).contains("stss(")
                 let audioPlayable = await Self.hasDecodableAudio(outputURL)
-                DiagnosticsLog.write(String(format: "[转MP4] 自研封装校验 耗时 %.1fs 视频轨=%d 音频轨=%d stss=%@ 时长=%.1fs",
+                let verifyText = String(format: "[转MP4] 自研封装校验 耗时 %.1fs 视频轨=%d 音频轨=%d stss=%@ 时长=%.1fs",
+                                        Date().timeIntervalSince(start), videoCount, audioCount,
+                                        hasStss ? "已写入" : "未写入", duration)
+                DiagnosticsLog.write(verifyText + (audioPlayable ? " 音频可解" : " 音频不可解"))
                 MP4StrictValidator.dumpCodecInfo(outputURL)
-                                            Date().timeIntervalSince(start), videoCount, audioCount,
-                                            hasStss ? "已写入" : "未写入", duration) + (audioPlayable ? " 音频可解" : " 音频不可解"))
                 // D1：严格结构校验（模拟外部解析器）
                 let strict = MP4StrictValidator.validate(outputURL)
                 if strict.hasFatal {
