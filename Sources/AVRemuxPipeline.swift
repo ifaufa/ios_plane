@@ -174,6 +174,10 @@ enum AVRemuxPipeline {
         var pocMissing = 0
         var gopCount = 0
         var gopOrderMismatch = 0
+        var gopReorderCount = 0
+        var gopIdentityCount = 0
+        var cttsMinFrame = 0.0
+        var cttsMaxFrame = 0.0
 
         func setFailure(_ message: String) {
             lock.lock()
@@ -205,16 +209,20 @@ enum AVRemuxPipeline {
                 order = Array(0..<count)
             }
             for (rank, idx) in order.enumerated() { ptsByIndex[idx] = displayCursor + Int64(rank) }
-            if gopCount <= 3 || gopCount % 2000 == 0 {
-                DiagnosticsLog.write("[转MP4] 显示顺序来源=\(orderSource) GOP=\(gopCount) 帧数=\(count)")
+            if order == Array(0..<count) {
+                gopIdentityCount += 1
+            } else {
+                gopReorderCount += 1
             }
-            if orderSource == "PTS", pocs.allSatisfy({ $0 != nil }) {
-                let pocOrder = (0..<count).sorted { (pocs[$0] ?? 0) < (pocs[$1] ?? 0) }
-                if pocOrder != order && gopOrderMismatch < 3 {
-                    gopOrderMismatch += 1
-                    DiagnosticsLog.write("[转MP4] 显示顺序不一致（以 PTS 为准）GOP=\(gopCount) 帧数=\(count)")
-                }
+            var localMin = 0.0
+            var localMax = 0.0
+            for (rank, idx) in order.enumerated() {
+                let delta = Double(idx - rank)
+                localMin = min(localMin, delta)
+                localMax = max(localMax, delta)
             }
+            cttsMinFrame = min(cttsMinFrame, localMin)
+            cttsMaxFrame = max(cttsMaxFrame, localMax)
             if gopCount <= 3 || gopCount % 2000 == 0 {
                 DiagnosticsLog.write("[转MP4] 显示顺序来源=\(orderSource) GOP=\(gopCount) 帧数=\(count)")
             }
@@ -790,6 +798,11 @@ enum AVRemuxPipeline {
             let percent = Double(statsNonUniform) / Double(statsCount) * 100
             DiagnosticsLog.write(String(format: "[转MP4] 帧间隔分布 min=%lld med=%lld max=%lld 非均匀=%.1f%% 采样=%d",
                                         statsMin, frameStep, statsMax, percent, statsCount))
+        }
+        if gopCount > 0 {
+            let percent = Double(gopReorderCount) / Double(gopCount) * 100
+            DiagnosticsLog.write(String(format: "[转MP4] GOP 重排统计 总数=%d 需重排=%d(%.1f%%) 无需重排=%d ctts范围=[%.0f, %.0f]帧",
+                                        gopCount, gopReorderCount, percent, gopIdentityCount, cttsMinFrame, cttsMaxFrame))
         }
         DiagnosticsLog.write("[转MP4] 封装完成 视频帧=\(videoFrames) 音频帧=\(audioFrameIndex) GOP=\(gopCount) POC缺失=\(pocMissing) 帧间隔=\(frameStep)")
 
