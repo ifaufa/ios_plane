@@ -34,7 +34,6 @@ final class DirectMuxer {
     // 音频样本表
     private var audioSizes: [Int32] = []
     private var audioChunkOffsets: [UInt64] = []
-    private var audioFramesInChunk = 0
     /// 音频缓冲已攒够，等下一个视频 chunk 边界再写
     private var audioFlushPending = false
 
@@ -174,30 +173,33 @@ final class DirectMuxer {
         }
     }
 
-    /// 只在视频 chunk 边界调用：把攒好的音频整段写入
+    /// 只在视频 chunk 边界调用：**只写「完整 32 帧」音频块**，不足 32 帧的尾巴留在缓冲
+    /// （否则一个音频 chunk 会跨两次写入、中间被视频 chunk 劈开 → 播放卡顿/失声）
     private func writeAudioRegion() {
-        guard !pendingAudioSizes.isEmpty else { return }
+        let completeFrames = (pendingAudioSizes.count / samplesPerChunk) * samplesPerChunk
+        guard completeFrames > 0 else { return }
         audioFlushPending = false
+        var bytes = 0
+        for i in 0..<completeFrames { bytes += Int(pendingAudioSizes[i]) }
+        let chunkData = pendingAudio.subdata(in: 0..<bytes)
         do {
             let base = writeOffset
+            try handle.write(contentsOf: chunkData)
+            writeOffset += UInt64(chunkData.count)
+            bytesSinceSync += UInt64(chunkData.count)
             var offsetInBuffer: UInt64 = 0
-            for size in pendingAudioSizes {
-                if audioFramesInChunk == 0 {
+            for i in 0..<completeFrames {
+                if i % samplesPerChunk == 0 {
                     audioChunkOffsets.append(base + offsetInBuffer)
                 }
-                audioSizes.append(size)
-                offsetInBuffer += UInt64(size)
-                audioFramesInChunk += 1
-                if audioFramesInChunk >= samplesPerChunk { audioFramesInChunk = 0 }
+                audioSizes.append(pendingAudioSizes[i])
+                offsetInBuffer += UInt64(pendingAudioSizes[i])
             }
-            try handle.write(contentsOf: pendingAudio)
-            writeOffset += UInt64(pendingAudio.count)
-            bytesSinceSync += UInt64(pendingAudio.count)
         } catch {
             DiagnosticsLog.write("[转MP4] 音频写入失败：\(error.localizedDescription)")
         }
-        pendingAudio.removeAll(keepingCapacity: true)
-        pendingAudioSizes.removeAll(keepingCapacity: true)
+        pendingAudio.removeSubrange(0..<bytes)
+        pendingAudioSizes.removeFirst(completeFrames)
         if bytesSinceSync >= 256 * 1024 * 1024 {
             _ = fsync(handle.fileDescriptor)
             bytesSinceSync = 0
@@ -219,6 +221,17 @@ final class DirectMuxer {
         DiagnosticsLog.write("[转MP4] 收尾①写入剩余数据 视频待写=\(pendingVideoSizes.count) 音频待写=\(pendingAudioSizes.count) 内存=\(os_proc_available_memory() / (1024 * 1024))MB")
         try flushVideoChunk()
         writeAudioRegion()
+        // 最后不足 32 帧的音频尾巴，作为最后一个 chunk 整段写入（保证 chunk 完整、不丢帧）
+        if !pendingAudioSizes.isEmpty {
+            let base = writeOffset
+            try handle.write(contentsOf: pendingAudio)
+            writeOffset += UInt64(pendingAudio.count)
+            bytesSinceSync += UInt64(pendingAudio.count)
+            audioChunkOffsets.append(base)
+            audioSizes.append(contentsOf: pendingAudioSizes)
+            pendingAudio.removeAll(keepingCapacity: true)
+            pendingAudioSizes.removeAll(keepingCapacity: true)
+        }
         flushSync()
         appendProgressPercent = 100
 
