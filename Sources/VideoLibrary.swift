@@ -235,11 +235,12 @@ final class VideoLibrary: ObservableObject {
     }
 
     /// 转 MP4 成功后更新条目
-    func replace(_ item: VideoItem, fileName: String, duration: Double, fileSize: Int64) {
+    func replace(_ item: VideoItem, fileName: String, duration: Double, fileSize: Int64, segmentDirName: String? = nil) {
         guard let index = items.firstIndex(where: { $0.id == item.id }) else { return }
         items[index].fileName = fileName
         items[index].duration = duration
         items[index].fileSize = fileSize
+        items[index].segmentDirName = segmentDirName
         save()
     }
 
