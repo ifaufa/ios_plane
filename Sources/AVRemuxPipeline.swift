@@ -644,8 +644,11 @@ enum AVRemuxPipeline {
 
             let ready = videoInput?.isReadyForMoreMediaData ?? false
             let status = writer?.status.rawValue ?? -1
-            if directMuxer != nil {
-                DiagnosticsLog.write("[转MP4] 心跳 段=\(processedSegments) 帧=\(frames) (直写) 停滞=\(stallTicks) \(demuxer.debugBufferSizes()) 内存=\(os_proc_available_memory() / (1024 * 1024))MB")
+            if let muxer = directMuxer {
+                let finishPercent = muxer.appendProgressPercent
+                if finishPercent >= 0 { stallTicks = 0 }
+                let stage = finishPercent >= 0 ? "收尾 追加音频 \(finishPercent)%" : "直写"
+                DiagnosticsLog.write("[转MP4] 心跳 段=\(processedSegments) 帧=\(frames) (\(stage)) 停滞=\(stallTicks) \(demuxer.debugBufferSizes()) 内存=\(os_proc_available_memory() / (1024 * 1024))MB")
             } else {
                 DiagnosticsLog.write("[转MP4] 心跳 段=\(processedSegments) 帧=\(frames) 队列=\(videoQueue.depth) ready=\(ready) status=\(status) 停滞=\(stallTicks) \(demuxer.debugBufferSizes()) 内存=\(os_proc_available_memory() / (1024 * 1024))MB")
             }

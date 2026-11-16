@@ -39,6 +39,8 @@ final class DirectMuxer {
     private var pendingVideoKeys: [Int32] = []
 
     private let samplesPerChunk = 32
+    /// 收尾追加音频进度（-1 表示尚未进入收尾），供心跳日志使用
+    private(set) var appendProgressPercent: Int = -1
     private var bytesSinceSync: UInt64 = 0
 
     init(destination: URL) throws {
@@ -281,6 +283,8 @@ final class DirectMuxer {
         var writtenSinceLog = 0
         var totalWritten = 0
         var lastLogPercent = 0
+        var lastPercent = 0
+        var lastProgressAt = Date()
 
         while frameIndex < audioSizes.count {
             if frameIndex % samplesPerChunk == 0 {
@@ -300,24 +304,29 @@ final class DirectMuxer {
                 totalWritten += writtenSinceLog
                 writtenSinceLog = 0
 
-                // P1：内存感知限速（脏页堆积会把进程顶死）
-                let available = Double(os_proc_available_memory())
-                if available < 150.0 * 1024 * 1024 {
-                    let waitStart = Date()
-                    while Double(os_proc_available_memory()) < 150.0 * 1024 * 1024,
-                          Date().timeIntervalSince(waitStart) < 30 {
-                        Thread.sleep(forTimeInterval: 0.05)
-                    }
+                // P1：绝不长时间阻塞（145MB 属页缓存占用，等不到"回升"）
+                if Double(os_proc_available_memory()) < 150.0 * 1024 * 1024 {
+                    _ = fsync(handle.fileDescriptor)
+                    bytesSinceSync = 0
+                    usleep(20_000)
                 }
 
+                // P2：进度看门狗（60 秒无进展即中止，绝不无限等待）
                 let percent = Int(Double(totalWritten) / Double(max(1, audioSizeTotal)) * 100)
-                if percent >= lastLogPercent + 20 {
+                appendProgressPercent = percent
+                if percent > lastPercent {
+                    lastPercent = percent
+                    lastProgressAt = Date()
+                } else if Date().timeIntervalSince(lastProgressAt) > 60 {
+                    throw MuxError(message: "收尾写入停滞（已写 \(percent)%），已中止；原分片已保留，可重试")
+                }
+                if percent >= lastLogPercent + 10 {
                     lastLogPercent = percent
                     DiagnosticsLog.write("[转MP4] 音频追加 \(percent)% 已写=\(totalWritten / (1024 * 1024))MB 内存=\(os_proc_available_memory() / (1024 * 1024))MB")
                 }
+
             }
         }
-
         if !buffer.isEmpty { try writeAudioBuffer(&buffer) }
         flushSync()
     }
