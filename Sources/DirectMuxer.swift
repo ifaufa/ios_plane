@@ -22,6 +22,7 @@ final class DirectMuxer {
     // 视频样本表
     private var videoSizes: [Int32] = []
     private var videoCtts: [Int32] = []
+    private var videoDurations: [UInt32] = []
     private var videoKeyframes: [Int32] = []
     private var videoChunkOffsets: [UInt64] = []
 
@@ -33,6 +34,7 @@ final class DirectMuxer {
     private var pendingVideo = Data()
     private var pendingVideoSizes: [Int32] = []
     private var pendingVideoCtts: [Int32] = []
+    private var pendingVideoDurations: [UInt32] = []
     private var pendingVideoKeys: [Int32] = []
     private var pendingAudio = Data()
     private var pendingAudioSizes: [Int32] = []
@@ -83,6 +85,8 @@ final class DirectMuxer {
         pendingAudio.reserveCapacity(1 << 16)
         pendingVideoSizes.reserveCapacity(samplesPerChunk)
         pendingVideoCtts.reserveCapacity(samplesPerChunk)
+        pendingVideoDurations.reserveCapacity(samplesPerChunk)
+        videoDurations.reserveCapacity(400_000)
         pendingVideoKeys.reserveCapacity(4)
         pendingAudioSizes.reserveCapacity(samplesPerChunk)
     }
@@ -97,10 +101,11 @@ final class DirectMuxer {
 
     // MARK: - 样本写入
 
-    func appendVideo(data: Data, isKey: Bool, pts: Int64, dts: Int64) throws {
+    func appendVideo(data: Data, isKey: Bool, pts: Int64, dts: Int64, duration: UInt32 = 0) throws {
         pendingVideo.append(data)
         pendingVideoSizes.append(Int32(data.count))
         pendingVideoCtts.append(Int32(pts - dts))
+        pendingVideoDurations.append(duration)
         if isKey { pendingVideoKeys.append(Int32(pendingVideoSizes.count - 1)) }
 
         if pendingVideoSizes.count >= samplesPerChunk {
@@ -129,11 +134,13 @@ final class DirectMuxer {
         let base = videoSizes.count
         videoSizes.append(contentsOf: pendingVideoSizes)
         videoCtts.append(contentsOf: pendingVideoCtts)
+        videoDurations.append(contentsOf: pendingVideoDurations)
         for key in pendingVideoKeys { videoKeyframes.append(Int32(base) + key) }
 
         pendingVideo.removeAll(keepingCapacity: true)
         pendingVideoSizes.removeAll(keepingCapacity: true)
         pendingVideoCtts.removeAll(keepingCapacity: true)
+        pendingVideoDurations.removeAll(keepingCapacity: true)
         pendingVideoKeys.removeAll(keepingCapacity: true)
 
         if bytesSinceSync >= 256 * 1024 * 1024 {
@@ -198,7 +205,22 @@ final class DirectMuxer {
             for index in videoCtts.indices { videoCtts[index] += Int32(editShift) }
         }
 
-        let totalTicks = Int64(videoSizes.count) * frameStep
+        // 真实时间轴：按逐帧时长求和；缺失时退回均匀网格
+        var totalTicks = Int64(videoSizes.count) * frameStep
+        if videoDurations.count == videoSizes.count, !videoDurations.isEmpty {
+            totalTicks = videoDurations.reduce(Int64(0)) { $0 + Int64($1) }
+            let avg = Double(totalTicks) / Double(videoDurations.count)
+            let uniform = Double(frameStep)
+            DiagnosticsLog.write(String(format: "[转MP4] 时间轴 逐帧时长 平均=%.1f 中位=%lld 合计=%.1fs（均匀网格=%.1fs）",
+                                        avg, frameStep, Double(totalTicks) / 90000.0,
+                                        Double(Int64(videoSizes.count) * frameStep) / 90000.0))
+            let durationMin = videoDurations.min() ?? 0
+            let durationMax = videoDurations.max() ?? 0
+            guard durationMin > 0, Int(durationMax) <= 45000 else {
+                throw MuxError(message: "帧时长异常（min=\(durationMin) max=\(durationMax)），已中止以免产出抖动视频")
+            }
+            DiagnosticsLog.write("[转MP4] 时长校验通过 min=\(durationMin) max=\(durationMax) 总时长=\(String(format: "%.1f", Double(totalTicks) / 90000.0))s")
+        }
         let movieTimescale: UInt32 = 1000
         let movieDuration = UInt32(min(Double(UInt32.max),
                                        Double(totalTicks) / 90000.0 * Double(movieTimescale)))
@@ -215,7 +237,8 @@ final class DirectMuxer {
                                                     sps: sps,
                                                     pps: pps,
                                                     movieDuration: movieDuration,
-                                                    editShift: editShift)
+                                                    editShift: editShift,
+                                                    durations: videoDurations.count == videoSizes.count ? videoDurations : nil)
 
         var audioTrak = Data()
         if !audioSizes.isEmpty {

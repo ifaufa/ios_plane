@@ -161,7 +161,12 @@ enum AVRemuxPipeline {
         var frameStep: Int64 = 3750
         var deltaSamples: [Int64] = []
         var lastRawDTS: Int64 = -1
-        struct GopFrame { let data: Data; let isKey: Bool; let poc: Int? }
+        struct GopFrame { let data: Data; let isKey: Bool; let poc: Int?; let pts: Int64; let dts: Int64 }
+        var baseDTS: Int64 = -1
+        var statsCount = 0
+        var statsNonUniform = 0
+        var statsMin: Int64 = Int64.max
+        var statsMax: Int64 = 0
         var gop: [GopFrame] = []
         var displayCursor: Int64 = 0
         var decodeCursor: Int64 = 0
@@ -182,7 +187,7 @@ enum AVRemuxPipeline {
         }
 
         /// 一个 GOP 结束：按 POC（码流权威显示顺序）重排后，仍以解码序写入
-        func flushGop() {
+        func flushGop(nextDTS: Int64? = nil) {
             guard !gop.isEmpty else { return }
             gopCount += 1
             let count = gop.count
@@ -190,27 +195,53 @@ enum AVRemuxPipeline {
             let pocs = gop.map { $0.poc }
             if pocs.allSatisfy({ $0 != nil }) {
                 let order = (0..<count).sorted { (pocs[$0] ?? 0) < (pocs[$1] ?? 0) }
-                for (rank, idx) in order.enumerated() {
-                    ptsByIndex[idx] = displayCursor + Int64(rank)
-                }
+                for (rank, idx) in order.enumerated() { ptsByIndex[idx] = displayCursor + Int64(rank) }
             } else {
                 pocMissing += count
                 for idx in 0..<count { ptsByIndex[idx] = displayCursor + Int64(idx) }
             }
+
+            // 真实时间戳是否可信（不递增/负值/偏移过大则退回 POC 网格）
+            var useRaw = baseDTS >= 0
+            if useRaw {
+                var previousDTS = Int64.min
+                for frame in gop {
+                    let dtsRel = frame.dts - baseDTS
+                    let ptsRel = frame.pts - baseDTS
+                    if dtsRel < 0 || ptsRel < 0 { useRaw = false; break }
+                    if previousDTS != Int64.min, frame.dts <= previousDTS { useRaw = false; break }
+                    if abs(ptsRel - dtsRel) > frameStep * 8 { useRaw = false; break }
+                    previousDTS = frame.dts
+                }
+            }
+
             // 关键：必须在入队前创建 writer。队列容量有限，
             // 若先 push 再等"累计 N 帧才建 writer"，队列填满后 push 永久阻塞（表现为卡在 0%）
             if writer == nil, directMuxer == nil, currentFailure() == nil {
                 do { try makeWriterIfNeeded(force: true) } catch { setFailure(error.localizedDescription) }
             }
             for index in 0..<count {
-                let item = VideoItem(data: gop[index].data,
-                                     pts: ptsByIndex[index] * frameStep,
-                                     dts: decodeCursor * frameStep,
-                                     isKey: gop[index].isKey)
+                let frame = gop[index]
+                let ptsTicks: Int64
+                let dtsTicks: Int64
+                let durationTicks: UInt32
+                if useRaw {
+                    ptsTicks = frame.pts - baseDTS
+                    dtsTicks = frame.dts - baseDTS
+                    let nextValue = index + 1 < count ? gop[index + 1].dts : (nextDTS ?? frame.dts + frameStep)
+                    var delta = nextValue - frame.dts
+                    if delta <= 0 || delta > 90000 { delta = frameStep }
+                    durationTicks = UInt32(max(1, delta))
+                } else {
+                    ptsTicks = ptsByIndex[index] * frameStep
+                    dtsTicks = decodeCursor * frameStep
+                    durationTicks = UInt32(max(1, frameStep))
+                }
                 decodeCursor += 1
+                let item = VideoItem(data: frame.data, pts: ptsTicks, dts: dtsTicks, isKey: frame.isKey)
                 if let muxer = directMuxer {
                     do {
-                        try muxer.appendVideo(data: item.data, isKey: item.isKey, pts: item.pts, dts: item.dts)
+                        try muxer.appendVideo(data: item.data, isKey: item.isKey, pts: item.pts, dts: item.dts, duration: durationTicks)
                         lock.lock()
                         videoFrames += 1
                         lastVideoPTS = item.pts
@@ -537,6 +568,7 @@ enum AVRemuxPipeline {
         demuxer.onVideoFrame = { data, pts, dts, isKey, isRef, poc in
             guard currentFailure() == nil else { return }
 
+            if baseDTS < 0, dts >= 0 { baseDTS = dts }
             if lastRawDTS >= 0 {
                 let delta = dts - lastRawDTS
                 if delta > 0, delta < 90000 {
@@ -544,12 +576,17 @@ enum AVRemuxPipeline {
                     if deltaSamples.count > 60 { deltaSamples.removeFirst() }
                     let sorted = deltaSamples.sorted()
                     frameStep = max(1, sorted[sorted.count / 2])
+                    // P1：统计真实帧间隔分布（判断是否 VFR）
+                    statsCount += 1
+                    statsMin = min(statsMin, delta)
+                    statsMax = max(statsMax, delta)
+                    if delta != frameStep { statsNonUniform += 1 }
                 }
             }
             lastRawDTS = dts
 
-            if isKey, !gop.isEmpty { flushGop() }
-            gop.append(GopFrame(data: data, isKey: isKey, poc: poc))
+            if isKey, !gop.isEmpty { flushGop(nextDTS: dts) }
+            gop.append(GopFrame(data: data, isKey: isKey, poc: poc, pts: pts, dts: dts))
             if gop.count > 600 { flushGop() }
 
             if writer == nil, directMuxer == nil {
@@ -753,6 +790,11 @@ enum AVRemuxPipeline {
         }
         let keyframeCount = directMuxer?.keyframeCount ?? lastKeyframeIndices.count
         DiagnosticsLog.write("[转MP4] 关键帧数=\(keyframeCount)/\(videoFrames) 用于补写 stss")
+        if statsCount > 0 {
+            let percent = Double(statsNonUniform) / Double(statsCount) * 100
+            DiagnosticsLog.write(String(format: "[转MP4] 帧间隔分布 min=%lld med=%lld max=%lld 非均匀=%.1f%% 采样=%d",
+                                        statsMin, frameStep, statsMax, percent, statsCount))
+        }
         DiagnosticsLog.write("[转MP4] 封装完成 视频帧=\(videoFrames) 音频帧=\(audioFrameIndex) GOP=\(gopCount) POC缺失=\(pocMissing) 帧间隔=\(frameStep)")
 
         // 自研封装：直接收尾（追加音频 + 写 moov），不经过 AVAssetWriter

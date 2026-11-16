@@ -215,8 +215,15 @@ enum MP4PartMerger {
                                       sps: Data,
                                       pps: Data,
                                       movieDuration: UInt32,
-                                      editShift: Int64) -> Data {
-        let mediaDuration = UInt32(min(Double(UInt32.max), Double(sampleCount) * Double(frameStep)))
+                                      editShift: Int64,
+                                      durations: [UInt32]? = nil) -> Data {
+        let mediaDuration: UInt32
+        if let durations, !durations.isEmpty {
+            let total = durations.reduce(Int64(0)) { $0 + Int64($1) }
+            mediaDuration = UInt32(min(Double(UInt32.max), Double(total)))
+        } else {
+            mediaDuration = UInt32(min(Double(UInt32.max), Double(sampleCount) * Double(frameStep)))
+        }
 
         var tkhdBody = Data()
         tkhdBody.append(contentsOf: [0x00, 0x00, 0x00, 0x03])
@@ -307,11 +314,27 @@ enum MP4PartMerger {
         stsdBody.append(avc1)
         let stsd = box(type: "stsd", body: stsdBody)
 
+        var sttsRuns: [(count: UInt32, duration: UInt32)] = []
+        if let durations, !durations.isEmpty {
+            sttsRuns.reserveCapacity(min(durations.count, 4096))
+            for duration in durations {
+                let value = max(1, duration)
+                if let last = sttsRuns.last, last.duration == value {
+                    sttsRuns[sttsRuns.count - 1].count += 1
+                } else {
+                    sttsRuns.append((1, value))
+                }
+            }
+        } else {
+            sttsRuns.append((UInt32(sampleCount), UInt32(max(1, frameStep))))
+        }
         var sttsBody = Data()
         sttsBody.append(contentsOf: [0x00, 0x00, 0x00, 0x00])
-        sttsBody.append(contentsOf: be32(1))
-        sttsBody.append(contentsOf: be32(UInt32(sampleCount)))
-        sttsBody.append(contentsOf: be32(UInt32(frameStep)))
+        sttsBody.append(contentsOf: be32(UInt32(sttsRuns.count)))
+        for run in sttsRuns {
+            sttsBody.append(contentsOf: be32(run.count))
+            sttsBody.append(contentsOf: be32(run.duration))
+        }
         let stts = box(type: "stts", body: sttsBody)
 
         var cttsEntries: [(count: UInt32, offset: Int32)] = []
