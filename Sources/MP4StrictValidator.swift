@@ -93,6 +93,69 @@ enum MP4StrictValidator {
         return report
     }
 
+    // MARK: - 编码参数 dump（与系统引擎产物做对照）
+
+    static func dumpCodecInfo(_ url: URL) {
+        guard let data = try? Data(contentsOf: url, options: .mappedIfSafe), data.count > 16 else { return }
+        if data.ascii(4, 4) == "ftyp" {
+            var brands = data.ascii(8, 4)
+            var off = 16
+            while off + 4 <= min(data.count, 40) { brands += "/" + data.ascii(off, 4); off += 4 }
+            DiagnosticsLog.write("[编码参数] ftyp=\(brands)")
+        }
+        if let avc1 = findBox(data, "avc1"), avc1.count > 86 {
+            let w = avc1.be16(8 + 24)
+            let h = avc1.be16(8 + 26)
+            let depth = avc1.be16(8 + 78)
+            let avcCStart = 8 + 78
+            if avc1.count > avcCStart + 8, avc1.ascii(avcCStart + 4, 4) == "avcC" {
+                let profile = avc1[avc1.startIndex + avcCStart + 8 + 1]
+                let level = avc1[avc1.startIndex + avcCStart + 8 + 3]
+                let lenSize = Int(avc1[avc1.startIndex + avcCStart + 8 + 4] & 0x03) + 1
+                let numSPS = Int(avc1[avc1.startIndex + avcCStart + 8 + 5] & 0x1F)
+                var pos = avcCStart + 8 + 6
+                var spsLen = 0; var spsHex = "-"
+                if numSPS > 0, pos + 2 <= avc1.count {
+                    spsLen = Int(avc1.be16(pos)); pos += 2
+                    spsHex = avc1.hex(pos, min(spsLen, 16)); pos += spsLen
+                }
+                var ppsLen = 0; var ppsHex = "-"
+                if pos < avc1.count {
+                    let numPPS = Int(avc1[avc1.startIndex + pos]); pos += 1
+                    if numPPS > 0, pos + 2 <= avc1.count {
+                        ppsLen = Int(avc1.be16(pos)); pos += 2
+                        ppsHex = avc1.hex(pos, min(ppsLen, 16))
+                    }
+                }
+                DiagnosticsLog.write("[编码参数] avc1 \(w)x\(h) depth=0x\(String(depth, radix: 16)) profile=0x\(String(profile, radix: 16)) level=0x\(String(level, radix: 16)) lenSize=\(lenSize) SPS=\(spsLen)B \(spsHex) PPS=\(ppsLen)B \(ppsHex)")
+            }
+        }
+        if let mp4a = findBox(data, "mp4a"), mp4a.count > 8 + 28 {
+            let channels = mp4a.be16(8 + 24)
+            let sr = mp4a.be32(8 + 28) >> 16
+            DiagnosticsLog.write("[编码参数] mp4a channels=\(channels) samplerate=\(sr)")
+        }
+    }
+
+    /// 在任意深度查找指定类型 box（含自身 8 字节头）
+    private static func findBox(_ data: Data, _ type: String) -> Data? {
+        var stack: [Int] = [0]
+        while let start = stack.popLast() {
+            var offset = start
+            while offset + 8 <= data.count {
+                let size = Int(data.be32(offset))
+                let t = data.ascii(offset + 4, 4)
+                guard size >= 8, offset + size <= data.count else { break }
+                if t == type {
+                    return data.subdata(in: (data.startIndex + offset)..<(data.startIndex + offset + size))
+                }
+                stack.append(offset + 8)
+                offset += size
+            }
+        }
+        return nil
+    }
+
     // MARK: - trak 校验
 
     private static func validateTrack(_ trak: Data, index: Int, handle: FileHandle,
@@ -118,12 +181,10 @@ enum MP4StrictValidator {
             return
         }
 
-        // stsd
         if firstBox(stbl, type: "stsd") == nil {
             report.issues.append(Issue(fatal: true, text: "\(label) 缺少 stsd"))
         }
 
-        // stsz
         guard let stsz = firstBox(stbl, type: "stsz"), stsz.count >= 20 else {
             report.issues.append(Issue(fatal: true, text: "\(label) 缺少 stsz"))
             return
@@ -143,7 +204,6 @@ enum MP4StrictValidator {
         }
         let totalBytes = sizes.reduce(UInt64(0), +)
 
-        // stsc
         guard let stsc = firstBox(stbl, type: "stsc"), stsc.count >= 16 else {
             report.issues.append(Issue(fatal: true, text: "\(label) 缺少 stsc"))
             return
@@ -159,7 +219,6 @@ enum MP4StrictValidator {
             runs.append((Int(stsc.be32(base)), Int(stsc.be32(base + 4))))
         }
 
-        // stco / co64
         var chunkOffsets: [UInt64] = []
         if let stco = firstBox(stbl, type: "stco") {
             let n = Int(stco.be32(12))
@@ -180,7 +239,6 @@ enum MP4StrictValidator {
             return
         }
 
-        // 按 stsc 展开每个 chunk 的样本数，校验样本总数与总量
         var chunkSampleCounts: [Int] = []
         var sampleIndex = 0
         var runIndex = 0
@@ -193,11 +251,9 @@ enum MP4StrictValidator {
             sampleIndex += take
         }
         if sampleIndex != sampleCount {
-            report.issues.append(Issue(fatal: true,
-                                       text: "\(label) stsc 展开样本数 \(sampleIndex) ≠ stsz \(sampleCount)"))
+            report.issues.append(Issue(fatal: true, text: "\(label) stsc 展开样本数 \(sampleIndex) ≠ stsz \(sampleCount)"))
         }
 
-        // 校验每个 chunk 落在 mdat 内、且 chunk 内样本连续
         var cursor = 0
         var payloadSum: UInt64 = 0
         for (chunkIndex, take) in chunkSampleCounts.enumerated() where take > 0 {
@@ -206,13 +262,11 @@ enum MP4StrictValidator {
             for i in cursor..<(cursor + take) { span += sizes[i] }
             payloadSum += span
             if start < mdatStart || start + span > mdatEnd {
-                report.issues.append(Issue(fatal: true,
-                                           text: "\(label) chunk#\(chunkIndex + 1) 越界（\(start)+\(span) 不在 mdat 内）"))
+                report.issues.append(Issue(fatal: true, text: "\(label) chunk#\(chunkIndex + 1) 越界（\(start)+\(span) 不在 mdat 内）"))
                 break
             }
             if chunkIndex + 1 < chunkOffsets.count, chunkOffsets[chunkIndex + 1] < start + span {
-                report.issues.append(Issue(fatal: true,
-                                           text: "\(label) chunk#\(chunkIndex + 1) 与前一块重叠"))
+                report.issues.append(Issue(fatal: true, text: "\(label) chunk#\(chunkIndex + 1) 与前一块重叠"))
                 break
             }
             cursor += take
@@ -221,7 +275,6 @@ enum MP4StrictValidator {
             report.issues.append(Issue(fatal: true, text: "\(label) 样本字节合计 \(payloadSum) ≠ stsz 合计 \(totalBytes)"))
         }
 
-        // stts 总时长 vs mdhd
         if let stts = firstBox(stbl, type: "stts") {
             let n = Int(stts.be32(12))
             var sum: UInt64 = 0
@@ -234,13 +287,11 @@ enum MP4StrictValidator {
                 let diff = abs(Double(sum) - Double(mediaDuration))
                 let ratio = diff / Double(mediaDuration)
                 if ratio > 0.005 {
-                    report.issues.append(Issue(fatal: false,
-                                               text: "\(label) stts 合计 \(sum) 与 mdhd \(mediaDuration) 偏差 \(String(format: "%.2f", ratio * 100))%"))
+                    report.issues.append(Issue(fatal: false, text: "\(label) stts 合计 \(sum) 与 mdhd \(mediaDuration) 偏差 \(String(format: "%.2f", ratio * 100))%"))
                 }
             }
         }
 
-        // ctts 非负
         if let ctts = firstBox(stbl, type: "ctts") {
             let version = ctts[ctts.startIndex]
             let n = Int(ctts.be32(12))
@@ -258,7 +309,6 @@ enum MP4StrictValidator {
             DiagnosticsLog.write("[严格校验] \(label) ctts=\(n)条 最大偏移=\(maxOffset)ticks")
         }
 
-        // stss 首个样本必须是 1（1-based）
         if let stss = firstBox(stbl, type: "stss") {
             let n = Int(stss.be32(12))
             if n > 0, stss.count >= 20 {
@@ -269,31 +319,24 @@ enum MP4StrictValidator {
             }
         }
 
-        // 首个样本的 NAL 类型（视频轨应含 IDR，类型 5）
-        if let stsd = firstBox(stbl, type: "stsd"),
+        if trackIsVideo(trak, mdia: mdia),
            let firstOffset = chunkOffsets.first,
-           trackIsVideo(trak, mdia: mdia) {
-            let handlerIsVideo = true
-            _ = stsd
-            if handlerIsVideo, let size = sizes.first, size > 0, size < 4_000_000 {
-                try? handle.seek(toOffset: firstOffset)
-                if let data = try? handle.read(upToCount: Int(size)), data.count == Int(size) {
-                    // 扫描该 AU 内所有 NAL：必须包含 IDR（类型 5）；SEI(6) 在前属正常
-                    var types: [Int] = []
-                    var cursor = 0
-                    while cursor + 4 <= data.count, types.count < 32 {
-                        let length = Int(data.be32(cursor))
-                        cursor += 4
-                        guard length > 0, cursor + length <= data.count else { break }
-                        types.append(Int(data[data.startIndex + cursor] & 0x1F))
-                        cursor += length
-                    }
-                    let typeList = types.map { String($0) }.joined(separator: ",")
-                    DiagnosticsLog.write("[严格校验] \(label) 首样本 NAL=[\(typeList)]")
-                    if !types.contains(5) {
-                        report.issues.append(Issue(fatal: true,
-                                                   text: "\(label) 首样本不含 IDR（NAL=[\(typeList)]），外部解码器会黑屏"))
-                    }
+           let size = sizes.first, size > 0, size < 4_000_000 {
+            try? handle.seek(toOffset: firstOffset)
+            if let data = try? handle.read(upToCount: Int(size)), data.count == Int(size) {
+                var types: [Int] = []
+                var cur = 0
+                while cur + 4 <= data.count, types.count < 32 {
+                    let length = Int(data.be32(cur))
+                    cur += 4
+                    guard length > 0, cur + length <= data.count else { break }
+                    types.append(Int(data[data.startIndex + cur] & 0x1F))
+                    cur += length
+                }
+                let typeList = types.map { String($0) }.joined(separator: ",")
+                DiagnosticsLog.write("[严格校验] \(label) 首样本 NAL=[\(typeList)]")
+                if !types.contains(5) {
+                    report.issues.append(Issue(fatal: true, text: "\(label) 首样本不含 IDR（NAL=[\(typeList)]），外部解码器会黑屏"))
                 }
             }
         }
@@ -316,7 +359,6 @@ enum MP4StrictValidator {
         return data
     }
 
-    /// 列出容器内容（data 从容器 body 起点开始）
     private static func boxes(in container: Data, from start: Int) -> [Box] {
         var result: [Box] = []
         var offset = start
@@ -331,7 +373,6 @@ enum MP4StrictValidator {
         return result
     }
 
-    /// 让孩子 box 自带 8 字节头（便于统一用 be32(12)/be32(16) 偏移读取）
     private static func withHeader(type: String, size: Int, body: Data) -> Data {
         var data = Data()
         data.append(contentsOf: [UInt8((size >> 24) & 0xFF), UInt8((size >> 16) & 0xFF),
@@ -346,72 +387,7 @@ enum MP4StrictValidator {
     }
 }
 
-    // MARK: - 编码参数 dump（与系统引擎产物做对照）
-
-    static func dumpCodecInfo(_ url: URL) {
-        guard let data = try? Data(contentsOf: url, options: .mappedIfSafe), data.count > 16 else { return }
-        if data.ascii(4, 4) == "ftyp" {
-            var brands = data.ascii(8, 4)
-            var off = 16
-            while off + 4 <= min(data.count, 40) { brands += "/" + data.ascii(off, 4); off += 4 }
-            DiagnosticsLog.write("[编码参数] ftyp=\\(brands)")
-        }
-        if let avc1 = findBox(data, "avc1"), avc1.count > 86 {
-            let w = avc1.be16(8 + 24)
-            let h = avc1.be16(8 + 26)
-            let depth = avc1.be16(8 + 78)
-            let avcCStart = 8 + 78
-            if avc1.count > avcCStart + 8, avc1.ascii(avcCStart + 4, 4) == "avcC" {
-                let profile = avc1[avc1.startIndex + avcCStart + 8 + 1]
-                let level = avc1[avc1.startIndex + avcCStart + 8 + 3]
-                let lenSize = Int(avc1[avc1.startIndex + avcCStart + 8 + 4] & 0x03) + 1
-                let numSPS = Int(avc1[avc1.startIndex + avcCStart + 8 + 5] & 0x1F)
-                var pos = avcCStart + 8 + 6
-                var spsLen = 0; var spsHex = "-"
-                if numSPS > 0, pos + 2 <= avc1.count { spsLen = Int(avc1.be16(pos)); pos += 2; spsHex = avc1.hex(pos, min(spsLen, 16)); pos += spsLen }
-                var ppsLen = 0; var ppsHex = "-"
-                if pos < avc1.count {
-                    let numPPS = Int(avc1[avc1.startIndex + pos]); pos += 1
-                    if numPPS > 0, pos + 2 <= avc1.count { ppsLen = Int(avc1.be16(pos)); pos += 2; ppsHex = avc1.hex(pos, min(ppsLen, 16)) }
-                }
-                DiagnosticsLog.write("[编码参数] avc1 \\(w)x\\(h) depth=0x\\(String(depth, radix: 16)) profile=0x\\(String(profile, radix: 16)) level=0x\\(String(level, radix: 16)) lenSize=\\(lenSize) SPS=\\(spsLen)B \\(spsHex) PPS=\\(ppsLen)B \\(ppsHex)")
-            }
-        }
-        if let mp4a = findBox(data, "mp4a"), mp4a.count > 8 + 28 {
-            let channels = mp4a.be16(8 + 24)
-            let sr = mp4a.be32(8 + 28) >> 16
-            DiagnosticsLog.write("[编码参数] mp4a channels=\\(channels) samplerate=\\(sr)")
-        }
-    }
-
-    /// 在任意深度查找指定类型 box（含自身 8 字节头）
-    private static func findBox(_ data: Data, _ type: String) -> Data? {
-        var stack: [Int] = [0]
-        while let start = stack.popLast() {
-            var offset = start
-            while offset + 8 <= data.count {
-                let size = Int(data.be32(offset))
-                let t = data.ascii(offset + 4, 4)
-                guard size >= 8, offset + size <= data.count else { break }
-                if t == type {
-                    return data.subdata(in: (data.startIndex + offset)..<(data.startIndex + offset + size))
-                }
-                stack.append(offset + 8)
-                offset += size
-            }
-        }
-        return nil
-    }
-
-
 private extension Data {
-    func be32(_ offset: Int) -> UInt32 {
-        guard offset >= 0, offset + 4 <= count else { return 0 }
-        var value: UInt32 = 0
-        for i in 0..<4 { value = (value << 8) | UInt32(self[startIndex + offset + i]) }
-        return value
-    }
-
     func be16(_ offset: Int) -> UInt16 {
         guard offset >= 0, offset + 2 <= count else { return 0 }
         var value: UInt16 = 0
@@ -419,13 +395,12 @@ private extension Data {
         return value
     }
 
-    func hex(_ offset: Int, _ length: Int) -> String {
-        guard offset >= 0, offset + length <= count else { return "-" }
-        var out = ""
-        for i in 0..<length { out += String(format: "%02x", self[startIndex + offset + i]) }
-        return out
+    func be32(_ offset: Int) -> UInt32 {
+        guard offset >= 0, offset + 4 <= count else { return 0 }
+        var value: UInt32 = 0
+        for i in 0..<4 { value = (value << 8) | UInt32(self[startIndex + offset + i]) }
+        return value
     }
-
 
     func be64(_ offset: Int) -> UInt64 {
         guard offset >= 0, offset + 8 <= count else { return 0 }
@@ -437,5 +412,12 @@ private extension Data {
     func ascii(_ offset: Int, _ length: Int) -> String {
         guard offset >= 0, offset + length <= count else { return "????" }
         return String(decoding: self[(startIndex + offset)..<(startIndex + offset + length)], as: UTF8.self)
+    }
+
+    func hex(_ offset: Int, _ length: Int) -> String {
+        guard offset >= 0, offset + length <= count else { return "-" }
+        var out = ""
+        for i in 0..<length { out += String(format: "%02x", self[startIndex + offset + i]) }
+        return out
     }
 }
