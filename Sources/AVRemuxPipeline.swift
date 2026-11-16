@@ -221,6 +221,15 @@ enum AVRemuxPipeline {
                 order = Array(0..<count)
             }
             for (rank, idx) in order.enumerated() { ptsByIndex[idx] = displayCursor + Int64(rank) }
+            // D2 诊断：前几个 GOP 打印 POC 序列，判断 POC 是否稠密/正确
+            if gopCount <= 5 {
+                let pocStr = pocs.map { $0.map(String.init) ?? "?" }.joined(separator: ",")
+                let compact = pocs.compactMap { $0 }
+                let dense = Set(compact).count == count
+                let minPoc = compact.min() ?? 0
+                let maxPoc = compact.max() ?? 0
+                DiagnosticsLog.write("[转MP4] POC诊断 GOP=" + String(gopCount) + " 帧数=" + String(count) + " dense=" + String(dense) + " min=" + String(minPoc) + " max=" + String(maxPoc) + " pocs=[" + pocStr + "]")
+            }
             if order == Array(0..<count) {
                 gopIdentityCount += 1
             } else {

@@ -56,6 +56,7 @@ final class TSDemuxer {
     private var prevPocLsb = 0
     private var prevPoc = 0
     private var pocMissingCount = 0
+    private var pocParamsLogged = false
     private var multiAUCount = 0
     /// 已学习到的帧间隔（90kHz ticks），用于同 PES 多帧的 DTS 递推
     private var frameStep: Int64 = 3750
@@ -273,6 +274,10 @@ final class TSDemuxer {
                     pocParams = parsed
                     prevPocLsb = 0
                     prevPoc = 0
+                    if !pocParamsLogged {
+                        pocParamsLogged = true
+                        DiagnosticsLog.write("[转MP4] POC参数 log2MaxPocLsb=" + String(parsed.log2MaxPocLsb) + " pocType=" + String(parsed.pocType))
+                    }
                 }
                 continue
             }
