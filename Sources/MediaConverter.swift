@@ -9,7 +9,7 @@ enum MediaConverter {
     }
 
     static func convertToMP4(item: VideoItem,
-                             onProgress: ((Double) -> Void)? = nil) async throws -> (fileName: String, duration: Double, fileSize: Int64) {
+                             onProgress: ((Double) -> Void)? = nil) async throws -> (fileName: String, duration: Double, fileSize: Int64, segmentDirName: String?) {
         guard item.fileName.lowercased().hasSuffix(".m3u8") else {
             throw ConversionError(message: "该视频已经是单体文件，无需转换")
         }
