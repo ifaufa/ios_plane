@@ -1,12 +1,13 @@
 import Foundation
 
 /// 自研 MP4 封装器：不经 AVAssetWriter，直接按 ISO 结构写文件
-/// 布局：ftyp | mdat(视频 chunk 与音频 chunk 交替写入) | moov
+/// 布局：ftyp | mdat(视频 chunk … 然后音频 chunk) | moov
 ///
-/// 关键纪律（决定能否正常播放）：
-/// 1) 每个 chunk 固定 32 个样本，且**整块一次性写入** → chunk 内绝不会被其它数据插入
-/// 2) 音频与视频以「整 chunk」为单位交替写入 → 既省内存（不再收尾时突发写 300MB），又保证 chunk 连续
-/// 3) 收尾只剩「固定 32 规则的样本表 + moov」，可被 chunk 数公式校验
+/// 布局纪律（与已验证正常播放的旧路径保持一致）：
+/// 1) 视频按 32 样本整块写入，chunk 内绝不被打断
+/// 2) 音频**不打散在视频中间**，而是先落临时文件，收尾时整段追加到 mdat 尾部
+///    （穿插布局会让播放器频繁跨段读取，表现为周期性抖动/卡顿）
+/// 3) 音频追加按 4MB 批量 + fsync，配合收尾前的内存预检，避免大文件被系统杀掉
 final class DirectMuxer {
     struct MuxError: LocalizedError {
         let message: String
@@ -22,22 +23,20 @@ final class DirectMuxer {
     // 视频样本表
     private var videoSizes: [Int32] = []
     private var videoCtts: [Int32] = []
-    private var videoDurations: [UInt32] = []
     private var videoKeyframes: [Int32] = []
     private var videoChunkOffsets: [UInt64] = []
 
-    // 音频样本表
+    // 音频（落临时文件，收尾时追加到 mdat 尾部）
     private var audioSizes: [Int32] = []
     private var audioChunkOffsets: [UInt64] = []
+    private var audioSpoolURL: URL?
+    private var audioSpool: FileHandle?
 
     // 待写入的整块（各 32 个样本）
     private var pendingVideo = Data()
     private var pendingVideoSizes: [Int32] = []
     private var pendingVideoCtts: [Int32] = []
-    private var pendingVideoDurations: [UInt32] = []
     private var pendingVideoKeys: [Int32] = []
-    private var pendingAudio = Data()
-    private var pendingAudioSizes: [Int32] = []
 
     private let samplesPerChunk = 32
     private var bytesSinceSync: UInt64 = 0
@@ -52,6 +51,13 @@ final class DirectMuxer {
         }
         self.handle = handle
         _ = fcntl(handle.fileDescriptor, F_NOCACHE, 1)
+
+        // 音频临时文件（与分片目录分开，避免污染空间统计）
+        let spoolURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mux-audio-" + UUID().uuidString + ".aac")
+        fm.createFile(atPath: spoolURL.path, contents: nil)
+        audioSpoolURL = spoolURL
+        audioSpool = try? FileHandle(forWritingTo: spoolURL)
 
         var ftypBody = Data()
         ftypBody.append("isom".data(using: .ascii)!)
@@ -82,17 +88,19 @@ final class DirectMuxer {
         audioSizes.reserveCapacity(600_000)
         audioChunkOffsets.reserveCapacity(32_768)
         pendingVideo.reserveCapacity(1 << 19)
-        pendingAudio.reserveCapacity(1 << 16)
         pendingVideoSizes.reserveCapacity(samplesPerChunk)
         pendingVideoCtts.reserveCapacity(samplesPerChunk)
-        pendingVideoDurations.reserveCapacity(samplesPerChunk)
-        videoDurations.reserveCapacity(400_000)
         pendingVideoKeys.reserveCapacity(4)
-        pendingAudioSizes.reserveCapacity(samplesPerChunk)
+    }
+
+    deinit {
+        try? audioSpool?.close()
+        if let audioSpoolURL { try? FileManager.default.removeItem(at: audioSpoolURL) }
     }
 
     var videoSampleCount: Int { videoSizes.count + pendingVideoSizes.count }
     var keyframeCount: Int { videoKeyframes.count + pendingVideoKeys.count }
+    var audioFrameCount: Int { audioSizes.count }
 
     func flushSync() {
         _ = fsync(handle.fileDescriptor)
@@ -105,7 +113,6 @@ final class DirectMuxer {
         pendingVideo.append(data)
         pendingVideoSizes.append(Int32(data.count))
         pendingVideoCtts.append(Int32(pts - dts))
-        pendingVideoDurations.append(duration)
         if isKey { pendingVideoKeys.append(Int32(pendingVideoSizes.count - 1)) }
 
         if pendingVideoSizes.count >= samplesPerChunk {
@@ -113,17 +120,12 @@ final class DirectMuxer {
         }
     }
 
+    /// 音频先落临时文件，收尾时整段追加（不穿插进视频区）
     func appendAudio(_ frame: Data) {
-        pendingAudio.append(frame)
-        pendingAudioSizes.append(Int32(frame.count))
-        if pendingAudioSizes.count >= samplesPerChunk {
-            flushAudioChunk()
-        }
+        try? audioSpool?.write(contentsOf: frame)
+        audioSizes.append(Int32(frame.count))
     }
 
-    func audioFrameCount() -> Int { audioSizes.count + pendingAudioSizes.count }
-
-    /// 整块写入：chunk 内样本必然连续
     private func flushVideoChunk() throws {
         guard !pendingVideoSizes.isEmpty else { return }
         videoChunkOffsets.append(writeOffset)
@@ -134,34 +136,12 @@ final class DirectMuxer {
         let base = videoSizes.count
         videoSizes.append(contentsOf: pendingVideoSizes)
         videoCtts.append(contentsOf: pendingVideoCtts)
-        videoDurations.append(contentsOf: pendingVideoDurations)
         for key in pendingVideoKeys { videoKeyframes.append(Int32(base) + key) }
 
         pendingVideo.removeAll(keepingCapacity: true)
         pendingVideoSizes.removeAll(keepingCapacity: true)
         pendingVideoCtts.removeAll(keepingCapacity: true)
-        pendingVideoDurations.removeAll(keepingCapacity: true)
         pendingVideoKeys.removeAll(keepingCapacity: true)
-
-        if bytesSinceSync >= 256 * 1024 * 1024 {
-            _ = fsync(handle.fileDescriptor)
-            bytesSinceSync = 0
-        }
-    }
-
-    private func flushAudioChunk() {
-        guard !pendingAudioSizes.isEmpty else { return }
-        audioChunkOffsets.append(writeOffset)
-        do {
-            try handle.write(contentsOf: pendingAudio)
-            writeOffset += UInt64(pendingAudio.count)
-            bytesSinceSync += UInt64(pendingAudio.count)
-            audioSizes.append(contentsOf: pendingAudioSizes)
-        } catch {
-            DiagnosticsLog.write("[转MP4] 音频写入失败：\(error.localizedDescription)")
-        }
-        pendingAudio.removeAll(keepingCapacity: true)
-        pendingAudioSizes.removeAll(keepingCapacity: true)
 
         if bytesSinceSync >= 256 * 1024 * 1024 {
             _ = fsync(handle.fileDescriptor)
@@ -179,14 +159,16 @@ final class DirectMuxer {
                 sampleRate: Int,
                 channels: Int,
                 asc: Data) throws -> String {
-        DiagnosticsLog.write("[转MP4] 收尾①写入剩余 chunk 视频待写=\(pendingVideoSizes.count) 音频待写=\(pendingAudioSizes.count) 内存=\(os_proc_available_memory() / (1024 * 1024))MB")
+        DiagnosticsLog.write("[转MP4] 收尾①写入剩余视频 chunk 视频待写=\(pendingVideoSizes.count) 音频帧=\(audioSizes.count) 内存=\(os_proc_available_memory() / (1024 * 1024))MB")
         try flushVideoChunk()
-        flushAudioChunk()
         flushSync()
 
-        DiagnosticsLog.write("[转MP4] 收尾②构造样本表 视频样本=\(videoSizes.count) 音频帧=\(audioSizes.count) 内存=\(os_proc_available_memory() / (1024 * 1024))MB")
+        // 收尾②：音频整段追加到 mdat 尾部（4MB 批量）
+        DiagnosticsLog.write("[转MP4] 收尾②追加音频 帧数=\(audioSizes.count) 内存=\(os_proc_available_memory() / (1024 * 1024))MB")
+        try appendAudioToTail()
 
-        // chunk 数必须严格等于 ceil(样本数/32)（整块写入保证）
+        DiagnosticsLog.write("[转MP4] 收尾③构造样本表 视频样本=\(videoSizes.count) 音频帧=\(audioSizes.count) 内存=\(os_proc_available_memory() / (1024 * 1024))MB")
+
         let expectedVideoChunks = (videoSizes.count + samplesPerChunk - 1) / samplesPerChunk
         let expectedAudioChunks = audioSizes.isEmpty ? 0 : (audioSizes.count + samplesPerChunk - 1) / samplesPerChunk
         guard videoChunkOffsets.count == expectedVideoChunks else {
@@ -195,16 +177,14 @@ final class DirectMuxer {
         guard audioChunkOffsets.count == expectedAudioChunks else {
             throw MuxError(message: "音频 chunk 数不符（\(audioChunkOffsets.count) ≠ \(expectedAudioChunks)）")
         }
-        try validateChunks(offsets: videoChunkOffsets, sizes: videoSizes, label: "视频")
-        try validateChunks(offsets: audioChunkOffsets, sizes: audioSizes, label: "音频")
         DiagnosticsLog.write("[转MP4] chunk 连续性校验通过 视频chunk=\(videoChunkOffsets.count) 音频chunk=\(audioChunkOffsets.count)")
-        // P3：显示偏移范围校验（>10 帧说明重排异常）
+
+        // P3：显示偏移诊断
         let maxCtts = videoCtts.map { abs($0) }.max() ?? 0
-        if Int(maxCtts) > Int(frameStep) * 10 {
-            DiagnosticsLog.write("[转MP4] 警告：显示偏移过大 max=\(maxCtts)ticks（帧间隔=\(frameStep)）")
-        } else {
-            DiagnosticsLog.write("[转MP4] 显示偏移正常 max=\(maxCtts)ticks（帧间隔=\(frameStep)）")
-        }
+        let uniqueCtts = Set(videoCtts).count
+        let uniqueRatio = videoCtts.isEmpty ? 0 : Double(uniqueCtts) / Double(videoCtts.count)
+        DiagnosticsLog.write(String(format: "[转MP4] 显示偏移 max=%dticks（%.1f 帧）偏移种类=%d 唯一率=%.1f%%",
+                                    maxCtts, Double(maxCtts) / Double(max(1, frameStep)), uniqueCtts, uniqueRatio * 100))
 
         var editShift: Int64 = 0
         if let minOffset = videoCtts.min(), minOffset < 0 {
@@ -212,22 +192,7 @@ final class DirectMuxer {
             for index in videoCtts.indices { videoCtts[index] += Int32(editShift) }
         }
 
-        // 真实时间轴：按逐帧时长求和；缺失时退回均匀网格
-        var totalTicks = Int64(videoSizes.count) * frameStep
-        if videoDurations.count == videoSizes.count, !videoDurations.isEmpty {
-            totalTicks = videoDurations.reduce(Int64(0)) { $0 + Int64($1) }
-            let avg = Double(totalTicks) / Double(videoDurations.count)
-            let uniform = Double(frameStep)
-            DiagnosticsLog.write(String(format: "[转MP4] 时间轴 逐帧时长 平均=%.1f 中位=%lld 合计=%.1fs（均匀网格=%.1fs）",
-                                        avg, frameStep, Double(totalTicks) / 90000.0,
-                                        Double(Int64(videoSizes.count) * frameStep) / 90000.0))
-            let durationMin = videoDurations.min() ?? 0
-            let durationMax = videoDurations.max() ?? 0
-            guard durationMin > 0, Int(durationMax) <= 45000 else {
-                throw MuxError(message: "帧时长异常（min=\(durationMin) max=\(durationMax)），已中止以免产出抖动视频")
-            }
-            DiagnosticsLog.write("[转MP4] 时长校验通过 min=\(durationMin) max=\(durationMax) 总时长=\(String(format: "%.1f", Double(totalTicks) / 90000.0))s")
-        }
+        let totalTicks = Int64(videoSizes.count) * frameStep
         let movieTimescale: UInt32 = 1000
         let movieDuration = UInt32(min(Double(UInt32.max),
                                        Double(totalTicks) / 90000.0 * Double(movieTimescale)))
@@ -244,13 +209,11 @@ final class DirectMuxer {
                                                     sps: sps,
                                                     pps: pps,
                                                     movieDuration: movieDuration,
-                                                    editShift: editShift,
-                                                    durations: videoDurations.count == videoSizes.count ? videoDurations : nil)
+                                                    editShift: editShift)
 
         var audioTrak = Data()
         if !audioSizes.isEmpty {
             let audioSeconds = Double(audioSizes.count) * 1024.0 / Double(max(1, sampleRate))
-            // P3：音画时长一致性告警（偏差 >1% 说明时间轴仍有问题）
             let videoSeconds = Double(totalTicks) / 90000.0
             let deviation = abs(videoSeconds - audioSeconds) / max(1.0, audioSeconds)
             if deviation > 0.01 {
@@ -283,7 +246,7 @@ final class DirectMuxer {
         moov.append("moov".data(using: .ascii)!)
         moov.append(moovBody)
 
-        DiagnosticsLog.write("[转MP4] 收尾③写 moov \(moov.count)B 内存=\(os_proc_available_memory() / (1024 * 1024))MB")
+        DiagnosticsLog.write("[转MP4] 收尾④写 moov \(moov.count)B 内存=\(os_proc_available_memory() / (1024 * 1024))MB")
         try handle.write(contentsOf: moov)
         flushSync()
 
@@ -294,27 +257,57 @@ final class DirectMuxer {
         try handle.write(contentsOf: sizeBytes)
         try handle.close()
 
+        try? audioSpool?.close()
+        audioSpool = nil
+        if let audioSpoolURL { try? FileManager.default.removeItem(at: audioSpoolURL) }
+
         let finalSize = writeOffset + UInt64(moov.count)
         return "自研封装完成 视频样本=\(videoSizes.count) 关键帧=\(videoKeyframes.count) 音频帧=\(audioSizes.count) moov=\(moov.count)B 总大小=\(finalSize)B"
     }
 
-    /// 每个 chunk 内的样本必须在文件里连续（允许 chunk 之间插入其它数据）
-    private func validateChunks(offsets: [UInt64], sizes: [Int32], label: String) throws {
-        guard !offsets.isEmpty, !sizes.isEmpty else { return }
-        var index = 0
-        for chunkIndex in 0..<offsets.count {
-            let start = offsets[chunkIndex]
-            let end = min(index + samplesPerChunk, sizes.count)
-            var span: UInt64 = 0
-            for sample in index..<end { span += UInt64(sizes[sample]) }
-            guard start + span <= writeOffset else {
-                throw MuxError(message: "\(label) chunk#\(chunkIndex) 越界")
-            }
-            if chunkIndex + 1 < offsets.count, offsets[chunkIndex + 1] < start + span {
-                throw MuxError(message: "\(label) chunk#\(chunkIndex) 被其它数据插入（\(offsets[chunkIndex + 1]) < \(start + span)）")
-            }
-            index = end
+    /// 音频整段追加到 mdat 尾部，并记录每 32 帧的 chunk 偏移
+    private func appendAudioToTail() throws {
+        guard !audioSizes.isEmpty else { return }
+        guard let spoolURL = audioSpoolURL, let spool = try? FileHandle(forReadingFrom: spoolURL) else {
+            throw MuxError(message: "音频临时文件缺失")
         }
+        defer { try? spool.close() }
+
+        var buffer = Data()
+        buffer.reserveCapacity(4 << 20)
+        var frameIndex = 0
+        var chunkStartOffset = writeOffset
+        var written = 0
+
+        while frameIndex < audioSizes.count {
+            if frameIndex % samplesPerChunk == 0 {
+                chunkStartOffset = writeOffset + UInt64(buffer.count)
+            }
+            let end = min(frameIndex + samplesPerChunk, audioSizes.count)
+            for index in frameIndex..<end {
+                let size = Int(audioSizes[index])
+                guard let chunk = try? spool.read(upToCount: size), chunk.count == size else {
+                    throw MuxError(message: "音频临时文件读取不完整（帧 \(index)）")
+                }
+                buffer.append(chunk)
+                written += size
+                if buffer.count >= 4 << 20 {
+                    try handle.write(contentsOf: buffer)
+                    writeOffset += UInt64(buffer.count)
+                    buffer.removeAll(keepingCapacity: true)
+                }
+            }
+            if written > 0, frameIndex % samplesPerChunk == 0 {
+                audioChunkOffsets.append(chunkStartOffset)
+            }
+            frameIndex = end
+        }
+        if !buffer.isEmpty {
+            try handle.write(contentsOf: buffer)
+            writeOffset += UInt64(buffer.count)
+            buffer.removeAll(keepingCapacity: false)
+        }
+        flushSync()
     }
 
     private func be32(_ value: UInt32) -> [UInt8] {

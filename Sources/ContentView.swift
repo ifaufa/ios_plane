@@ -9,6 +9,9 @@ struct ContentView: View {
     @ObservedObject private var playback = PlaybackStore.shared
     @AppStorage(LibrarySortMode.storageKey) private var sortModeRaw = LibrarySortMode.timeDesc.rawValue
     @State private var pendingRemoval: DownloadTaskInfo?
+    @State private var pendingSegmentDelete: VideoItem?
+    @State private var pendingMP4Delete: VideoItem?
+    @State private var pendingCleanupAllSegments = false
     @State private var toastText: String?
     @State private var pendingToast: String?
     @State private var showAdd = false
@@ -72,6 +75,12 @@ struct ContentView: View {
                         .swipeActions {
                             Button("删除", role: .destructive) {
                                 library.remove(item)
+                            }
+                            if library.hasSegments(item) {
+                                Button("删分片", role: .destructive) {
+                                    pendingSegmentDelete = item
+                                }
+                                .tint(.orange)
                             }
                         }
                         .swipeActions(edge: .leading) {
@@ -139,6 +148,8 @@ struct ContentView: View {
                                     Text(mode.title)
                                 }
                             }
+                        Divider()
+                        Button("清理所有分片") { pendingCleanupAllSegments = true }
                         }
                     } label: {
                         Image(systemName: "arrow.up.arrow.down")
@@ -248,6 +259,7 @@ struct ContentView: View {
                 Text(info.message)
             }
             .modifier(DownloadRemovalAlert(pending: $pendingRemoval) { downloads.remove($0) })
+            .modifier(SegmentCleanupAlerts(pendingSegmentDelete: $pendingSegmentDelete, pendingCleanupAll: $pendingCleanupAllSegments) { item in library.deleteSegments(for: item) } onCleanupAll: { library.cleanupAllSegments() })
             .overlay(alignment: .top) { toastBanner }
             .onChange(of: segmentRunner.excludedNotice) { newValue in
                 guard let text = newValue else { return }
@@ -357,8 +369,9 @@ struct ContentView: View {
                 let result = try await MediaConverter.convertToMP4(item: item) { value in
                     Task { @MainActor in conversionProgress = value }
                 }
-                library.replace(item, fileName: result.fileName, duration: result.duration, fileSize: result.fileSize)
-                backup.alert = .init(title: "转换完成", message: "已转为 MP4 并校验通过，原分片已删除。")
+                  library.replace(item, fileName: result.fileName, duration: result.duration, fileSize: result.fileSize, segmentDirName: result.segmentDirName)
+                  let keptSegments = result.segmentDirName != nil
+                  backup.alert = .init(title: "转换完成", message: keptSegments ? "已转为 MP4 并校验通过。原分片已保留（可再次转换），空间不足时可在该视频上「删分片」。" : "已转为 MP4 并校验通过，原分片已删除。")
             } catch {
                 backup.alert = .init(title: "转换失败", message: error.localizedDescription)
             }
@@ -470,6 +483,35 @@ private struct DownloadRemovalAlert: ViewModifier {
         } message: {
             Text("将删除该任务已下载的分片与任务记录，且不可恢复。视频库中已转换的成品不受影响。")
         }
+    }
+}
+
+private struct SegmentCleanupAlerts: ViewModifier {
+    @Binding var pendingSegmentDelete: VideoItem?
+    @Binding var pendingCleanupAll: Bool
+    let onDeleteSegments: (VideoItem) -> Void
+    let onCleanupAll: () -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .alert("删除分片？", isPresented: Binding(
+                get: { pendingSegmentDelete != nil },
+                set: { if !$0 { pendingSegmentDelete = nil } }
+            )) {
+                Button("取消", role: .cancel) { pendingSegmentDelete = nil }
+                Button("删除分片", role: .destructive) {
+                    if let item = pendingSegmentDelete { onDeleteSegments(item) }
+                    pendingSegmentDelete = nil
+                }
+            } message: {
+                Text("将删除该视频的原始分片，只保留 MP4。删除后无法再次转换。")
+            }
+            .alert("清理所有分片？", isPresented: $pendingCleanupAll) {
+                Button("取消", role: .cancel) {}
+                Button("清理", role: .destructive) { onCleanupAll() }
+            } message: {
+                Text("将删除所有已保留的原始分片，只保留 MP4。此操作不可恢复。")
+            }
     }
 }
 
@@ -663,6 +705,7 @@ struct EngineSettingsView: View {
     @State private var adFingerprint = UserDefaults.standard.bool(forKey: AdFilter.fingerprintKey)
     @State private var writeStss = (UserDefaults.standard.object(forKey: "mp4WriteStss") as? Bool) ?? true
     @State private var useDirectMuxer = (UserDefaults.standard.object(forKey: "mp4UseDirectMuxer") as? Bool) ?? true
+    @State private var keepSegments = (UserDefaults.standard.object(forKey: "mp4KeepSegments") as? Bool) ?? true
     @State private var completionSound = (UserDefaults.standard.object(forKey: CompletionFeedback.soundKey) as? Bool) ?? true
     @State private var completionNotice = (UserDefaults.standard.object(forKey: CompletionFeedback.noticeKey) as? Bool) ?? true
 
@@ -694,6 +737,7 @@ struct EngineSettingsView: View {
                     }
                     Section {
                         Toggle("使用自研封装（推荐）", isOn: $useDirectMuxer)
+                        Toggle("转换成功后保留原分片（可再次转换）", isOn: $keepSegments)
                         Toggle("转换时写入同步样本表(stss)", isOn: $writeStss)
                     } footer: {
                         Text("自研封装不经过系统 AVAssetWriter，可规避部分源写入被拒的问题；若遇到异常可关闭，改用系统封装。stss 开关影响续播/拖动/缩略图定位。")
@@ -745,6 +789,7 @@ struct EngineSettingsView: View {
                         UserDefaults.standard.set(adFingerprint, forKey: AdFilter.fingerprintKey)
                         UserDefaults.standard.set(writeStss, forKey: "mp4WriteStss")
                         UserDefaults.standard.set(useDirectMuxer, forKey: "mp4UseDirectMuxer")
+                        UserDefaults.standard.set(keepSegments, forKey: "mp4KeepSegments")
                         UserDefaults.standard.set(completionSound, forKey: CompletionFeedback.soundKey)
                         UserDefaults.standard.set(completionNotice, forKey: CompletionFeedback.noticeKey)
                         if completionNotice { CompletionFeedback.requestAuthorizationIfNeeded() }

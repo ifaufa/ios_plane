@@ -248,11 +248,18 @@ enum MediaConverter {
             throw ConversionError(message: "转换后校验失败（\(verify.detail)；\(trackInfo)）。原分片已保留，产物 \(outputName) 也在「文件」App 里，可导出到电脑用 VLC 验证\(bigFileHint)。")
         }
 
-        try? fm.removeItem(at: dir)
+        let segmentDirName = (item.fileName as NSString).deletingLastPathComponent
+        let keepSegments = (UserDefaults.standard.object(forKey: "mp4KeepSegments") as? Bool) ?? true
         let attrs = try? fm.attributesOfItem(atPath: outputURL.path)
         let size = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
-        DiagnosticsLog.write("[转MP4] 完成 时长=\(String(format: "%.1f", verify.duration))s 大小=\(size)B 已删除分片")
-        return (outputName, verify.duration, size)
+        if keepSegments {
+            DiagnosticsLog.write("[转MP4] 完成 时长=\(String(format: "%.1f", verify.duration))s 大小=\(size)B 已保留分片（约 \(dirSize / (1024 * 1024))MB）")
+            return (outputName, verify.duration, size, segmentDirName)
+        } else {
+            try? fm.removeItem(at: dir)
+            DiagnosticsLog.write("[转MP4] 完成 时长=\(String(format: "%.1f", verify.duration))s 大小=\(size)B 已删除分片")
+            return (outputName, verify.duration, size, nil)
+        }
     }
 
     // MARK: - 工具

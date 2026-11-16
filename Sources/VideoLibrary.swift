@@ -10,6 +10,8 @@ struct VideoItem: Identifiable, Codable, Equatable {
     var createdAt: Date
     /// 上次播放位置（秒）
     var lastPosition: Double?
+    /// 保留的分片目录（相对 assets 目录，nil 表示分片已删除）
+    var segmentDirName: String?
 }
 
 @MainActor
@@ -127,6 +129,86 @@ final class VideoLibrary: ObservableObject {
         quarantineStoreIfNeeded()
         items.insert(item, at: 0)
         save()
+    }
+
+    /// 仅删除台账条目；文件不存在时也能正常移除
+    // MARK: - 分片保留 / 清理
+
+    /// 该条目是否仍保留分片
+    func hasSegments(_ item: VideoItem) -> Bool {
+        guard let name = item.segmentDirName, !name.isEmpty else { return false }
+        let dir = Self.assetsDir.appendingPathComponent(name, isDirectory: true)
+        return FileManager.default.fileExists(atPath: dir.path)
+    }
+
+    /// 分片占用字节数
+    func segmentSize(_ item: VideoItem) -> Int64 {
+        guard let name = item.segmentDirName, !name.isEmpty else { return 0 }
+        let dir = Self.assetsDir.appendingPathComponent(name, isDirectory: true)
+        return Self.directorySize(dir)
+    }
+
+    /// 只删除分片（保留 MP4）
+    func deleteSegments(for item: VideoItem) {
+        guard var target = items.first(where: { $0.id == item.id }),
+              let name = target.segmentDirName, !name.isEmpty else { return }
+        quarantineStoreIfNeeded()
+        let dir = Self.assetsDir.appendingPathComponent(name, isDirectory: true)
+        let freed = Self.directorySize(dir)
+        try? FileManager.default.removeItem(at: dir)
+        target.segmentDirName = nil
+        if let index = items.firstIndex(where: { $0.id == item.id }) { items[index] = target }
+        save()
+        DiagnosticsLog.write("[清理] 删除分片 \(item.title) 释放 \(freed / (1024 * 1024))MB")
+    }
+
+    /// 只删除 MP4（保留分片，可再次转换）
+    func deleteMP4KeepingSegments(for item: VideoItem) {
+        guard var target = items.first(where: { $0.id == item.id }),
+              let name = target.segmentDirName, !name.isEmpty else { return }
+        quarantineStoreIfNeeded()
+        let mp4URL = localURL(for: target)
+        try? FileManager.default.removeItem(at: mp4URL)
+        target.fileName = name + "/index.m3u8"
+        target.fileSize = Self.directorySize(Self.assetsDir.appendingPathComponent(name, isDirectory: true))
+        if let index = items.firstIndex(where: { $0.id == item.id }) { items[index] = target }
+        save()
+        DiagnosticsLog.write("[清理] 删除 MP4 并保留分片 \(item.title)")
+    }
+
+    /// 批量清理所有保留的分片，返回释放字节数
+    @discardableResult
+    func cleanupAllSegments() -> Int64 {
+        quarantineStoreIfNeeded()
+        var freed: Int64 = 0
+        var count = 0
+        for index in items.indices {
+            guard let name = items[index].segmentDirName, !name.isEmpty else { continue }
+            let dir = Self.assetsDir.appendingPathComponent(name, isDirectory: true)
+            guard FileManager.default.fileExists(atPath: dir.path) else {
+                items[index].segmentDirName = nil
+                continue
+            }
+            freed += Self.directorySize(dir)
+            try? FileManager.default.removeItem(at: dir)
+            items[index].segmentDirName = nil
+            count += 1
+        }
+        if count > 0 {
+            save()
+            DiagnosticsLog.write("[清理] 批量清理分片 \(count) 个 释放 \(freed / (1024 * 1024))MB")
+        }
+        return freed
+    }
+
+    static func directorySize(_ url: URL) -> Int64 {
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(at: url, includingPropertiesForKeys: [.fileSizeKey]) else { return 0 }
+        var total: Int64 = 0
+        for case let file as URL in enumerator {
+            total += Int64((try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+        }
+        return total
     }
 
     /// 仅删除台账条目；文件不存在时也能正常移除

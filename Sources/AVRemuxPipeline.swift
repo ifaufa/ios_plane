@@ -192,17 +192,12 @@ enum AVRemuxPipeline {
             guard !gop.isEmpty else { return }
             gopCount += 1
             let count = gop.count
-            // 显示顺序：优先用真实 PTS 排序（PES 级 PTS 是绝对值），POC 作为交叉校验
+            // 显示顺序：以码流权威的 POC（图像顺序计数）为准（PES 级 PTS 系推算值，噪声大不可用于排序）
             var ptsByIndex = [Int64](repeating: 0, count: count)
             let pocs = gop.map { $0.poc }
-            let ptsList = gop.map { $0.pts }
-            let ptsDistinct = Set(ptsList).count
             var order: [Int]
             var orderSource = "原序"
-            if ptsDistinct >= max(2, count - count / 4) {
-                order = (0..<count).sorted { ptsList[$0] < ptsList[$1] }
-                orderSource = "PTS"
-            } else if pocs.allSatisfy({ $0 != nil }) {
+            if pocs.allSatisfy({ $0 != nil }) {
                 order = (0..<count).sorted { (pocs[$0] ?? 0) < (pocs[$1] ?? 0) }
                 orderSource = "POC"
             } else {
@@ -210,6 +205,9 @@ enum AVRemuxPipeline {
                 order = Array(0..<count)
             }
             for (rank, idx) in order.enumerated() { ptsByIndex[idx] = displayCursor + Int64(rank) }
+            if gopCount <= 3 || gopCount % 2000 == 0 {
+                DiagnosticsLog.write("[转MP4] 显示顺序来源=\(orderSource) GOP=\(gopCount) 帧数=\(count)")
+            }
             if orderSource == "PTS", pocs.allSatisfy({ $0 != nil }) {
                 let pocOrder = (0..<count).sorted { (pocs[$0] ?? 0) < (pocs[$1] ?? 0) }
                 if pocOrder != order && gopOrderMismatch < 3 {
