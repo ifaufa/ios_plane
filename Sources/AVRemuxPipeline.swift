@@ -161,6 +161,7 @@ enum AVRemuxPipeline {
 
         // 时间轴
         var frameStep: Int64 = 3750
+        var frameStepLocked = false
         var deltaSamples: [Int64] = []
         var lastRawDTS: Int64 = -1
         struct GopFrame { let data: Data; let isKey: Bool; let poc: Int?; let pts: Int64; let dts: Int64 }
@@ -600,11 +601,17 @@ enum AVRemuxPipeline {
             if lastRawDTS >= 0 {
                 let delta = dts - lastRawDTS
                 if delta > 0, delta < 90000 {
-                    deltaSamples.append(delta)
-                    if deltaSamples.count > 60 { deltaSamples.removeFirst() }
-                    let sorted = deltaSamples.sorted()
-                    frameStep = max(1, sorted[sorted.count / 2])
-                    // P1：统计真实帧间隔分布（判断是否 VFR）
+                    // 帧间隔锁定：前 60 帧取中位数后冻结，避免运行中位数漂移导致 pts/dts 与 stts 不一致（→抖动）
+                    if !frameStepLocked {
+                        deltaSamples.append(delta)
+                        if deltaSamples.count > 60 { deltaSamples.removeFirst() }
+                        if deltaSamples.count >= 60 {
+                            let sorted = deltaSamples.sorted()
+                            frameStep = max(1, sorted[sorted.count / 2])
+                            frameStepLocked = true
+                            DiagnosticsLog.write("[转MP4] 帧间隔已锁定 frameStep=" + String(frameStep) + " ticks（前60帧中位数）")
+                        }
+                    }
                     statsCount += 1
                     statsMin = min(statsMin, delta)
                     statsMax = max(statsMax, delta)
