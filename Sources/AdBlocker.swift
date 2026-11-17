@@ -1,8 +1,9 @@
 import Foundation
 import WebKit
+import Combine
 
 /// 内置浏览器广告拦截：网络规则 + DOM 遮罩识别 + 弹窗治理
-@MainActor
+/// 说明：所有调用点都在主线程（WebView/UI），内部异步回调统一切回主线程
 final class AdBlocker: ObservableObject {
     static let shared = AdBlocker()
 
