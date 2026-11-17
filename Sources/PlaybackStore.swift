@@ -34,7 +34,7 @@ final class PlaybackStore: ObservableObject {
     @Published private(set) var countdownNext: VideoItem?
     @Published private(set) var countdownRemaining = 0
     @Published private(set) var seriesTiming: PlaybackPrefs.SeriesTiming?
-    let countdownTotal = 3
+    let countdownTotal = 7
 
     private var endObserver: NSObjectProtocol?
     private var countdownTimer: Timer?
@@ -395,7 +395,7 @@ final class PlaybackStore: ObservableObject {
         return h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%02d:%02d", m, s)
     }
 
-    /// 进入 3 秒倒计时（可取消）
+    /// 进入倒计时（可取消）
     private func beginCountdown(reason: String) {
         guard countdownNext == nil, !skipThisEpisode else { return }
         guard PlaybackPrefs.shared.autoNext, let current = currentVideo else { return }

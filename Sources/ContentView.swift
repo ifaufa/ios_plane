@@ -999,7 +999,7 @@ private struct SeriesTimingEditor: View {
             } header: {
                 Text("片尾")
             } footer: {
-                Text("播放到这个时间点后进入 3 秒倒计时并切下一集。没有片尾的集数总时长短于该时间点，因此不会被误切。")
+                Text("播放到这个时间点后进入 7 秒倒计时（可取消）并切下一集。没有片尾的集数总时长短于该时间点，因此不会被误切。")
             }
 
             Section {
