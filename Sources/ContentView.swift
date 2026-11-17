@@ -788,17 +788,17 @@ struct EngineSettingsView: View {
                     Toggle("连播时跳过片头", isOn: $playPrefs.skipIntro)
                     Toggle("自动跳过片尾", isOn: $playPrefs.skipOutro)
                     ForEach(Array(playPrefs.configuredSeries.enumerated()), id: \.offset) { entry in
-                        HStack {
-                            Text(entry.element.key)
-                                .lineLimit(1)
-                            Spacer()
-                            Text(summaryText(entry.element.timing))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Button("重置") {
-                                playPrefs.clear(forTitle: entry.element.key)
+                        NavigationLink {
+                            SeriesTimingEditor(key: entry.element.key, prefs: playPrefs)
+                        } label: {
+                            HStack {
+                                Text(playPrefs.displayName(forKey: entry.element.key))
+                                    .lineLimit(1)
+                                Spacer()
+                                Text(summaryText(entry.element.timing))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
                             }
-                            .buttonStyle(.borderless)
                         }
                     }
                 } header: {
@@ -944,5 +944,72 @@ enum LibraryAction: Identifiable {
         case .cleanupMP4: return "删除 MP4"
         case .deleteDownload: return "删除"
         }
+    }
+}
+
+// MARK: - 系列片头片尾编辑
+
+private struct SeriesTimingEditor: View {
+    let key: String
+    @ObservedObject var prefs: PlaybackPrefs
+    @Environment(\.dismiss) private var dismiss
+
+    private var timing: PlaybackPrefs.SeriesTiming { prefs.timing(forKey: key) ?? PlaybackPrefs.SeriesTiming() }
+
+    var body: some View {
+        Form {
+            Section {
+                Stepper(value: Binding(
+                    get: { timing.intro },
+                    set: { prefs.setIntro(max(0, min($0, 7200)), forKey: key) }
+                ), in: 0...7200, step: 5) {
+                    HStack {
+                        Text("片头结束")
+                        Spacer()
+                        Text(timing.intro > 0 ? PlaybackStore.timeText(timing.intro) : "不跳过")
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                }
+                if timing.intro > 0 {
+                    Button("清除片头", role: .destructive) { prefs.setIntro(0, forKey: key) }
+                }
+            } header: {
+                Text("片头")
+            } footer: {
+                Text("连播切到下一集时，从这个时间点开始播放；手动点开某集不会跳。每次 ±5 秒。")
+            }
+
+            Section {
+                Stepper(value: Binding(
+                    get: { timing.outro },
+                    set: { prefs.setOutro(max(0, min($0, 7200)), forKey: key) }
+                ), in: 0...7200, step: 5) {
+                    HStack {
+                        Text("片尾开始")
+                        Spacer()
+                        Text(timing.outro > 0 ? PlaybackStore.timeText(timing.outro) : "无片尾")
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                }
+                if timing.outro > 0 {
+                    Button("设为无片尾", role: .destructive) { prefs.setOutro(0, forKey: key) }
+                }
+            } header: {
+                Text("片尾")
+            } footer: {
+                Text("播放到这个时间点后进入 3 秒倒计时并切下一集。没有片尾的集数总时长短于该时间点，因此不会被误切。")
+            }
+
+            Section {
+                Button("重置本系列", role: .destructive) {
+                    prefs.clear(key: key)
+                    dismiss()
+                }
+            }
+        }
+        .navigationTitle(prefs.displayName(forKey: key))
+        .navigationBarTitleDisplayMode(.inline)
     }
 }

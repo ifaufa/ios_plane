@@ -161,7 +161,7 @@ struct PlayerView: View {
     // MARK: - 片头片尾打点
 
     private var markingBar: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 10) {
             Button {
                 store.markIntroHere()
             } label: {
@@ -169,10 +169,9 @@ struct PlayerView: View {
             }
 
             if let intro = store.seriesTiming?.intro, intro > 0 {
-                Button { store.adjustIntro(by: -5) } label: { Image(systemName: "minus") }
                 Text(PlaybackStore.timeText(intro))
                     .font(.caption2.monospacedDigit())
-                Button { store.adjustIntro(by: 5) } label: { Image(systemName: "plus") }
+                    .opacity(0.85)
             }
 
             Divider().frame(height: 14).overlay(.white.opacity(0.3))
@@ -184,10 +183,9 @@ struct PlayerView: View {
             }
 
             if let outro = store.seriesTiming?.outro, outro > 0 {
-                Button { store.adjustOutro(by: -5) } label: { Image(systemName: "minus") }
                 Text(PlaybackStore.timeText(outro))
                     .font(.caption2.monospacedDigit())
-                Button { store.adjustOutro(by: 5) } label: { Image(systemName: "plus") }
+                    .opacity(0.85)
             } else if store.seriesTiming != nil {
                 Text("无片尾")
                     .font(.caption2)

@@ -11,6 +11,7 @@ final class PlaybackPrefs: ObservableObject {
     struct SeriesTiming: Codable, Equatable {
         var intro: Double = 0
         var outro: Double = 0
+        var name: String = ""
     }
 
     @Published var autoNext: Bool { didSet { saveFlags() } }
@@ -46,10 +47,16 @@ final class PlaybackPrefs: ObservableObject {
         series.map { ($0.key, $0.value) }.sorted { $0.key < $1.key }
     }
 
-    // MARK: - 修改
+    // MARK: - 按 key 访问（设置页用）
 
-    func setIntro(_ seconds: Double, forTitle title: String) {
-        let key = EpisodeIndex.parse(title).key
+    func timing(forKey key: String) -> SeriesTiming? { series[key] }
+
+    func displayName(forKey key: String) -> String {
+        let name = series[key]?.name ?? ""
+        return name.isEmpty ? key : name
+    }
+
+    func setIntro(_ seconds: Double, forKey key: String) {
         guard !key.isEmpty else { return }
         var timing = series[key] ?? SeriesTiming()
         timing.intro = max(0, seconds)
@@ -57,12 +64,38 @@ final class PlaybackPrefs: ObservableObject {
         saveSeries()
     }
 
-    func setOutro(_ seconds: Double, forTitle title: String) {
-        let key = EpisodeIndex.parse(title).key
+    func setOutro(_ seconds: Double, forKey key: String) {
         guard !key.isEmpty else { return }
         var timing = series[key] ?? SeriesTiming()
         timing.outro = max(0, seconds)
         series[key] = timing
+        saveSeries()
+    }
+
+    func clear(key: String) {
+        series.removeValue(forKey: key)
+        saveSeries()
+    }
+
+    // MARK: - 修改（按标题）
+
+    func setIntro(_ seconds: Double, forTitle title: String) {
+        let parsed = EpisodeIndex.parse(title)
+        guard !parsed.key.isEmpty else { return }
+        var timing = series[parsed.key] ?? SeriesTiming()
+        timing.intro = max(0, seconds)
+        timing.name = parsed.name
+        series[parsed.key] = timing
+        saveSeries()
+    }
+
+    func setOutro(_ seconds: Double, forTitle title: String) {
+        let parsed = EpisodeIndex.parse(title)
+        guard !parsed.key.isEmpty else { return }
+        var timing = series[parsed.key] ?? SeriesTiming()
+        timing.outro = max(0, seconds)
+        timing.name = parsed.name
+        series[parsed.key] = timing
         saveSeries()
     }
 

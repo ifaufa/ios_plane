@@ -473,22 +473,7 @@ final class PlaybackStore: ObservableObject {
         }
     }
 
-    func adjustIntro(by delta: Double) {
-        guard !title.isEmpty else { return }
-        let current = seriesTiming?.intro ?? 0
-        PlaybackPrefs.shared.setIntro(max(0, current + delta), forTitle: title)
-        seriesTiming = PlaybackPrefs.shared.timing(forTitle: title)
-    }
 
-    func adjustOutro(by delta: Double) {
-        guard !title.isEmpty else { return }
-        let current = seriesTiming?.outro ?? 0
-        guard current > 0 else { return }
-        let duration = player.currentItem?.duration.seconds ?? 0
-        let upper = duration.isFinite && duration > 6 ? duration - 3 : current + delta
-        PlaybackPrefs.shared.setOutro(min(upper, max(0, current + delta)), forTitle: title)
-        seriesTiming = PlaybackPrefs.shared.timing(forTitle: title)
-    }
 
     private func startHealthTimer() {
         stopHealthTimer()
