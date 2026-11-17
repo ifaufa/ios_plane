@@ -6,6 +6,8 @@ import Combine
 final class PlaybackPrefs: ObservableObject {
     static let shared = PlaybackPrefs()
 
+    /// intro = 片头结束的绝对时间点（秒）
+    /// outro = 片尾开始的绝对时间点（秒）；0 表示该系列没有片尾、不跳过
     struct SeriesTiming: Codable, Equatable {
         var intro: Double = 0
         var outro: Double = 0
@@ -22,7 +24,8 @@ final class PlaybackPrefs: ObservableObject {
         autoNext = (defaults.object(forKey: "pbAutoNext") as? Bool) ?? true
         skipIntro = (defaults.object(forKey: "pbSkipIntro") as? Bool) ?? true
         skipOutro = (defaults.object(forKey: "pbSkipOutro") as? Bool) ?? true
-        if let data = defaults.data(forKey: "pbSeriesTiming"),
+        // v2：outro 语义由「剩余时长」改为「绝对时间点」，旧数据不再沿用
+        if let data = defaults.data(forKey: "pbSeriesTimingV2"),
            let decoded = try? JSONDecoder().decode([String: SeriesTiming].self, from: data) {
             series = decoded
         }
@@ -78,7 +81,7 @@ final class PlaybackPrefs: ObservableObject {
 
     private func saveSeries() {
         if let data = try? JSONEncoder().encode(series) {
-            defaults.set(data, forKey: "pbSeriesTiming")
+            defaults.set(data, forKey: "pbSeriesTimingV2")
         }
     }
 }

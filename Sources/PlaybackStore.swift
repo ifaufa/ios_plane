@@ -115,7 +115,8 @@ final class PlaybackStore: ObservableObject {
             }
             return
         }
-        close(notify: false)
+        // 连播切集时保持全屏，不要退回悬浮窗
+        close(notify: false, keepFullscreen: true)
 
         videoID = video.id
         title = video.title
@@ -191,7 +192,7 @@ final class PlaybackStore: ObservableObject {
         }
     }
 
-    func close(notify: Bool = true) {
+    func close(notify: Bool = true, keepFullscreen: Bool = false) {
         cancelCountdown()
         currentVideo = nil
         seriesTiming = nil
@@ -210,7 +211,7 @@ final class PlaybackStore: ObservableObject {
         videoID = nil
         title = ""
         isPlaying = false
-        isFullscreen = false
+        if !keepFullscreen { isFullscreen = false }
         expectsPlaying = false
         if notify { onClose?() }
     }
@@ -370,22 +371,28 @@ final class PlaybackStore: ObservableObject {
 
     // MARK: - 连播 / 片头片尾
 
-    /// 片尾检测：剩余时间 ≤ outro 时进入倒计时
+    /// 片尾检测：outro 存的是「片尾开始的绝对时间点」
+    /// 这样"某些集没有片尾"时：该集总时长本来就不到 outro，条件永远不成立，自然不会误切正片
     private func checkOutro(at seconds: Double) {
         guard PlaybackPrefs.shared.skipOutro, !skipThisEpisode, !outroTriggered else { return }
         guard countdownNext == nil, expectsPlaying, !scrubbing else { return }
         guard let item = player.currentItem else { return }
         let duration = item.duration.seconds
         guard duration.isFinite, duration > 30 else { return }
-        let timing = seriesTiming
-        guard let outro = timing?.outro, outro > 0 else { return }
-        let intro = timing?.intro ?? 0
-        let clamped = min(outro, max(0, duration - intro - 5))
-        guard clamped > 0 else { return }
-        guard seconds > intro + 1 else { return }
-        if duration - seconds <= clamped {
-            beginCountdown(reason: "剩余 \(Int(max(0, duration - seconds)))s")
-        }
+        guard let outroStart = seriesTiming?.outro, outroStart > 0 else { return }
+        // 无片尾保护：时间点过于接近结尾 → 视为没有片尾，不做跳过
+        guard outroStart < duration - 3 else { return }
+        let introEnd = seriesTiming?.intro ?? 0
+        guard seconds >= max(outroStart, introEnd + 5) else { return }
+        beginCountdown(reason: "到达片尾 \(Self.timeText(outroStart))")
+    }
+
+    static func timeText(_ seconds: Double) -> String {
+        let total = Int(max(0, seconds))
+        let h = total / 3600
+        let m = (total % 3600) / 60
+        let s = total % 60
+        return h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%02d:%02d", m, s)
     }
 
     /// 进入 3 秒倒计时（可取消）
@@ -449,15 +456,21 @@ final class PlaybackStore: ObservableObject {
         DiagnosticsLog.write("[播放] 标记片头结束 \(Int(seconds))s")
     }
 
-    /// 标记片尾开始（剩余时间）
+    /// 标记片尾开始（记录「绝对时间点」，不是剩余时长）
     func markOutroHere() {
         let duration = player.currentItem?.duration.seconds ?? 0
         let seconds = player.currentTime().seconds
         guard duration.isFinite, duration > 0, seconds.isFinite, !title.isEmpty else { return }
-        let outro = max(0, duration - seconds)
-        PlaybackPrefs.shared.setOutro(outro, forTitle: title)
-        seriesTiming = PlaybackPrefs.shared.timing(forTitle: title)
-        DiagnosticsLog.write("[播放] 标记片尾开始 剩余 \(Int(outro))s")
+        if duration - seconds < 3 {
+            // 已在结尾：标记为"本系列没有片尾"，避免误切正片
+            PlaybackPrefs.shared.setOutro(0, forTitle: title)
+            seriesTiming = PlaybackPrefs.shared.timing(forTitle: title)
+            DiagnosticsLog.write("[播放] 标记为无片尾（不跳过任何内容）")
+        } else {
+            PlaybackPrefs.shared.setOutro(seconds, forTitle: title)
+            seriesTiming = PlaybackPrefs.shared.timing(forTitle: title)
+            DiagnosticsLog.write("[播放] 标记片尾开始于 \(Self.timeText(seconds))")
+        }
     }
 
     func adjustIntro(by delta: Double) {
@@ -470,7 +483,10 @@ final class PlaybackStore: ObservableObject {
     func adjustOutro(by delta: Double) {
         guard !title.isEmpty else { return }
         let current = seriesTiming?.outro ?? 0
-        PlaybackPrefs.shared.setOutro(max(0, current + delta), forTitle: title)
+        guard current > 0 else { return }
+        let duration = player.currentItem?.duration.seconds ?? 0
+        let upper = duration.isFinite && duration > 6 ? duration - 3 : current + delta
+        PlaybackPrefs.shared.setOutro(min(upper, max(0, current + delta)), forTitle: title)
         seriesTiming = PlaybackPrefs.shared.timing(forTitle: title)
     }
 

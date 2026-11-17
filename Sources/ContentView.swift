@@ -771,6 +771,12 @@ struct EngineSettingsView: View {
     @State private var completionNotice = (UserDefaults.standard.object(forKey: CompletionFeedback.noticeKey) as? Bool) ?? true
     @StateObject private var playPrefs = PlaybackPrefs.shared
 
+    private func summaryText(_ timing: PlaybackPrefs.SeriesTiming) -> String {
+        let intro = timing.intro > 0 ? "片头至 " + PlaybackStore.timeText(timing.intro) : "无片头"
+        let outro = timing.outro > 0 ? "片尾始于 " + PlaybackStore.timeText(timing.outro) : "无片尾"
+        return intro + " / " + outro
+    }
+
     var body: some View {
         NavigationStack {
             Form {
@@ -786,7 +792,7 @@ struct EngineSettingsView: View {
                             Text(entry.element.key)
                                 .lineLimit(1)
                             Spacer()
-                            Text("片头 \(Int(entry.element.timing.intro))s / 片尾 \(Int(entry.element.timing.outro))s")
+                            Text(summaryText(entry.element.timing))
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                             Button("重置") {
@@ -798,7 +804,7 @@ struct EngineSettingsView: View {
                 } header: {
                     Text("连播与片头片尾")
                 } footer: {
-                    Text("连播需要标题里含集数（如「第16集」）。片头片尾可在播放器控制条上用「标记片头结束 / 标记片尾开始」按系列记录；连播切集时才会自动跳过片头。")
+                    Text("连播需要标题里含集数（如「第16集」）。片头记录的是「片头结束时间点」，片尾记录的是「片尾开始时间点」——因此没有片尾的集数（总时长本就短于该时间点）不会被误切；若某系列确实没有片尾，可在结尾处点「片尾」记为无片尾。")
                 }
                 if segmentEnabled {
                     Section {
