@@ -145,9 +145,13 @@ final class BrowserModel: NSObject, ObservableObject {
                                               injectionTime: .atDocumentStart,
                                               forMainFrameOnly: false))
         config.userContentController = controller
+        // 广告拦截：DOM 脚本 + 网络规则（模块内部会按总开关决定是否安装）
+        AdBlocker.shared.installScript(on: controller)
         webView = WKWebView(frame: .zero, configuration: config)
         super.init()
 
+        AdBlocker.shared.installRules(on: controller)
+        controller.add(self, name: "adblock")
         controller.add(self, name: "sniff")
         webView.navigationDelegate = self
         webView.uiDelegate = self
@@ -533,14 +537,48 @@ extension BrowserModel: WKUIDelegate {
 }
 
 extension BrowserModel: WKNavigationDelegate {
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        applyAdBlockState(for: webView.url?.host)
+    }
+
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         DispatchQueue.main.async { self.currentURL = webView.url?.absoluteString ?? "" }
+        applyAdBlockState(for: webView.url?.host)
         pollResourceEntries()
+    }
+
+    /// 把「本站点是否拦截」的决定告知页面脚本，并在关闭时还原被处理过的元素
+    private func applyAdBlockState(for host: String?) {
+        let blocking = AdBlocker.shared.isBlocking(host: host)
+        let flag = blocking ? "false" : "true"
+        webView.evaluateJavaScript("window.__planeAdBlockOff = \(flag);", completionHandler: nil)
+        guard !blocking else { return }
+        webView.evaluateJavaScript("""
+        (function(){
+          try {
+            var nodes = document.querySelectorAll('[data-plane-ab]');
+            for (var i = 0; i < nodes.length; i++) {
+              var el = nodes[i];
+              el.style.pointerEvents = '';
+              if (el.style.display === 'none') { el.style.display = ''; }
+              el.removeAttribute('data-plane-ab');
+            }
+          } catch(e){}
+        })();
+        """, completionHandler: nil)
     }
 }
 
 extension BrowserModel: WKScriptMessageHandler {
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        if message.name == "adblock" {
+            let count = (message.body as? Int) ?? (message.body as? NSNumber)?.intValue ?? 0
+            let host = webView.url?.host ?? "-"
+            Task { @MainActor in
+                AdBlocker.shared.noteBlocked(count, host: host)
+            }
+            return
+        }
         guard message.name == "sniff", let url = message.body as? String else { return }
         DispatchQueue.main.async {
             self.addCandidates([LinkParser.Entry(title: nil, url: url)], source: .network, inspect: true)
@@ -565,6 +603,7 @@ struct WebSnifferBrowser: View {
     @EnvironmentObject private var downloads: DownloadManager
     @StateObject private var model = BrowserModel()
     @StateObject private var bookmarks = BookmarkStore.shared
+    @StateObject private var adBlocker = AdBlocker.shared
 
     @State private var address = ""
     @State private var showCandidates = false
@@ -607,6 +646,7 @@ struct WebSnifferBrowser: View {
                         Image(systemName: isBookmarked ? "star.fill" : "star")
                             .foregroundStyle(isBookmarked ? Color.yellow : Color.accentColor)
                     }
+                    adBlockMenu
                     Button { showBookmarks = true } label: {
                         Image(systemName: "book")
                     }
@@ -676,6 +716,27 @@ struct WebSnifferBrowser: View {
                 }
             }
             .onDisappear { model.teardown() }
+        }
+    }
+
+    private var adBlockMenu: some View {
+        Menu {
+            Toggle("广告拦截（实验）", isOn: Binding(
+                get: { adBlocker.isEnabled },
+                set: { on in
+                    adBlocker.isEnabled = on
+                    model.reload()
+                }
+            ))
+            if let host = model.webView.url?.host, !host.isEmpty {
+                Button(adBlocker.isBlocking(host: host) ? "本站点关闭拦截" : "本站点开启拦截") {
+                    adBlocker.setBlocking(!adBlocker.isBlocking(host: host), forHost: host)
+                    model.reload()
+                }
+            }
+            Button("刷新页面") { model.reload() }
+        } label: {
+            Image(systemName: adBlocker.isEnabled ? "shield.lefthalf.filled" : "shield.slash")
         }
     }
 

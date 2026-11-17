@@ -24,6 +24,24 @@ final class PlaybackStore: ObservableObject {
     var onProgress: ((UUID, Double) -> Void)?
     var onClose: (() -> Void)?
 
+    // MARK: - 连播
+
+    /// 由外部注入：取同系列下一集 / 打开指定条目
+    var nextEpisodeProvider: ((VideoItem) -> VideoItem?)?
+    var openEpisodeHandler: ((VideoItem) -> Void)?
+
+    @Published private(set) var currentVideo: VideoItem?
+    @Published private(set) var countdownNext: VideoItem?
+    @Published private(set) var countdownRemaining = 0
+    @Published private(set) var seriesTiming: PlaybackPrefs.SeriesTiming?
+    let countdownTotal = 3
+
+    private var endObserver: NSObjectProtocol?
+    private var countdownTimer: Timer?
+    private var pendingAutoNext = false
+    private var outroTriggered = false
+    private var skipThisEpisode = false
+
     private var timeObserver: Any?
     private var healthTimer: Timer?
     private var tickCount = 0
@@ -101,6 +119,8 @@ final class PlaybackStore: ObservableObject {
 
         videoID = video.id
         title = video.title
+        currentVideo = video
+        seriesTiming = PlaybackPrefs.shared.timing(forTitle: video.title)
         sourceURL = url
         isHLS = url.pathExtension.lowercased() == "m3u8"
         lastSaved = video.lastPosition ?? 0
@@ -109,11 +129,23 @@ final class PlaybackStore: ObservableObject {
         waitingTicks = 0
         pauseTicks = 0
         pauseRecoveries = 0
+        outroTriggered = false
+        skipThisEpisode = false
+        cancelCountdown()
 
         configureAudioSession()
 
         let resumePosition = video.lastPosition ?? 0
-        let startAt = resumePosition > 3 ? resumePosition : 0
+        var startAt = resumePosition > 3 ? resumePosition : 0
+        // 连播切集时跳过片头（手动打开某集不跳；续播位置优先）
+        if pendingAutoNext {
+            pendingAutoNext = false
+            if PlaybackPrefs.shared.skipIntro,
+               let intro = seriesTiming?.intro, intro > 3, startAt < intro {
+                startAt = intro
+                DiagnosticsLog.write("[播放] 跳过片头 \(Int(intro))s")
+            }
+        }
         intendedStart = startAt
         didMuteProbe = false
         didFallbackToZero = false
@@ -160,6 +192,9 @@ final class PlaybackStore: ObservableObject {
     }
 
     func close(notify: Bool = true) {
+        cancelCountdown()
+        currentVideo = nil
+        seriesTiming = nil
         stopHealthTimer()
         detachObserver()
         let seconds = player.currentTime().seconds
@@ -294,6 +329,20 @@ final class PlaybackStore: ObservableObject {
     }
 
     private func attachObserver() {
+        if endObserver == nil {
+            endObserver = NotificationCenter.default.addObserver(
+                forName: .AVPlayerItemDidPlayToEndTime,
+                object: nil,
+                queue: .main
+            ) { [weak self] note in
+                Task { @MainActor in
+                    guard let self, self.isActive else { return }
+                    guard let ended = note.object as? AVPlayerItem,
+                          ended === self.player.currentItem else { return }
+                    self.beginCountdown(reason: "播放结束")
+                }
+            }
+        }
         guard timeObserver == nil else { return }
         let interval = CMTime(seconds: 0.5, preferredTimescale: 600)
         timeObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
@@ -304,6 +353,7 @@ final class PlaybackStore: ObservableObject {
                 if let id = self.videoID { self.onProgress?(id, seconds) }
             }
             self.isPlaying = self.player.rate > 0
+            if seconds.isFinite { self.checkOutro(at: seconds) }
         }
     }
 
@@ -312,6 +362,116 @@ final class PlaybackStore: ObservableObject {
             player.removeTimeObserver(timeObserver)
             self.timeObserver = nil
         }
+        if let endObserver {
+            NotificationCenter.default.removeObserver(endObserver)
+            self.endObserver = nil
+        }
+    }
+
+    // MARK: - 连播 / 片头片尾
+
+    /// 片尾检测：剩余时间 ≤ outro 时进入倒计时
+    private func checkOutro(at seconds: Double) {
+        guard PlaybackPrefs.shared.skipOutro, !skipThisEpisode, !outroTriggered else { return }
+        guard countdownNext == nil, expectsPlaying, !scrubbing else { return }
+        guard let item = player.currentItem else { return }
+        let duration = item.duration.seconds
+        guard duration.isFinite, duration > 30 else { return }
+        let timing = seriesTiming
+        guard let outro = timing?.outro, outro > 0 else { return }
+        let intro = timing?.intro ?? 0
+        let clamped = min(outro, max(0, duration - intro - 5))
+        guard clamped > 0 else { return }
+        guard seconds > intro + 1 else { return }
+        if duration - seconds <= clamped {
+            beginCountdown(reason: "剩余 \(Int(max(0, duration - seconds)))s")
+        }
+    }
+
+    /// 进入 3 秒倒计时（可取消）
+    private func beginCountdown(reason: String) {
+        guard countdownNext == nil, !skipThisEpisode else { return }
+        guard PlaybackPrefs.shared.autoNext, let current = currentVideo else { return }
+        guard let next = nextEpisodeProvider?(current) else {
+            DiagnosticsLog.write("[播放] 无下一集（\(reason)）")
+            return
+        }
+        outroTriggered = true
+        countdownNext = next
+        countdownRemaining = countdownTotal
+        DiagnosticsLog.write("[播放] \(reason) → \(countdownTotal) 秒后播放 \(next.title)")
+        countdownTimer?.invalidate()
+        countdownTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
+            Task { @MainActor in
+                guard let self else { timer.invalidate(); return }
+                self.countdownRemaining -= 1
+                if self.countdownRemaining <= 0 {
+                    timer.invalidate()
+                    self.countdownTimer = nil
+                    self.performNextEpisode()
+                }
+            }
+        }
+    }
+
+    private func performNextEpisode() {
+        guard let next = countdownNext else { return }
+        countdownNext = nil
+        countdownRemaining = 0
+        pendingAutoNext = true
+        DiagnosticsLog.write("[播放] 连播 → \(next.title)")
+        openEpisodeHandler?(next)
+    }
+
+    func cancelCountdown() {
+        guard countdownNext != nil || countdownTimer != nil else { return }
+        countdownTimer?.invalidate()
+        countdownTimer = nil
+        countdownNext = nil
+        countdownRemaining = 0
+        DiagnosticsLog.write("[播放] 连播已取消")
+    }
+
+    /// 本集不跳过（一次性）
+    func skipForThisEpisode() {
+        skipThisEpisode = true
+        outroTriggered = true
+        cancelCountdown()
+        DiagnosticsLog.write("[播放] 本集不跳过")
+    }
+
+    /// 标记片头结束（当前时间点）
+    func markIntroHere() {
+        let seconds = player.currentTime().seconds
+        guard seconds.isFinite, seconds > 0, !title.isEmpty else { return }
+        PlaybackPrefs.shared.setIntro(seconds, forTitle: title)
+        seriesTiming = PlaybackPrefs.shared.timing(forTitle: title)
+        DiagnosticsLog.write("[播放] 标记片头结束 \(Int(seconds))s")
+    }
+
+    /// 标记片尾开始（剩余时间）
+    func markOutroHere() {
+        let duration = player.currentItem?.duration.seconds ?? 0
+        let seconds = player.currentTime().seconds
+        guard duration.isFinite, duration > 0, seconds.isFinite, !title.isEmpty else { return }
+        let outro = max(0, duration - seconds)
+        PlaybackPrefs.shared.setOutro(outro, forTitle: title)
+        seriesTiming = PlaybackPrefs.shared.timing(forTitle: title)
+        DiagnosticsLog.write("[播放] 标记片尾开始 剩余 \(Int(outro))s")
+    }
+
+    func adjustIntro(by delta: Double) {
+        guard !title.isEmpty else { return }
+        let current = seriesTiming?.intro ?? 0
+        PlaybackPrefs.shared.setIntro(max(0, current + delta), forTitle: title)
+        seriesTiming = PlaybackPrefs.shared.timing(forTitle: title)
+    }
+
+    func adjustOutro(by delta: Double) {
+        guard !title.isEmpty else { return }
+        let current = seriesTiming?.outro ?? 0
+        PlaybackPrefs.shared.setOutro(max(0, current + delta), forTitle: title)
+        seriesTiming = PlaybackPrefs.shared.timing(forTitle: title)
     }
 
     private func startHealthTimer() {

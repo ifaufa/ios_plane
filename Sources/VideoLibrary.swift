@@ -123,6 +123,31 @@ final class VideoLibrary: ObservableObject {
 
     var missingItems: [VideoItem] { items.filter { isMissing($0) } }
 
+    // MARK: - 连播
+
+    /// 同系列的下一集（集数严格大于当前；文件不存在则继续往后找）
+    func nextEpisode(after item: VideoItem) -> VideoItem? {
+        let current = EpisodeIndex.parse(item.title)
+        guard let currentEpisode = current.episode, !current.key.isEmpty else { return nil }
+
+        let candidates: [(item: VideoItem, episode: Int)] = items.compactMap { candidate in
+            guard candidate.id != item.id else { return nil }
+            let parsed = EpisodeIndex.parse(candidate.title)
+            guard parsed.key == current.key, let episode = parsed.episode, episode > currentEpisode else { return nil }
+            return (candidate, episode)
+        }.sorted { $0.episode < $1.episode }
+
+        for candidate in candidates {
+            if !isMissing(candidate.item) { return candidate.item }
+        }
+        return nil
+    }
+
+    /// 该条目是否还有同系列下一集
+    func hasNextEpisode(after item: VideoItem) -> Bool {
+        nextEpisode(after: item) != nil
+    }
+
     // MARK: - 修改
 
     func add(_ item: VideoItem) {

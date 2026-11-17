@@ -403,6 +403,12 @@ struct ContentView: View {
                 playback.onProgress = { id, seconds in
                     library.updateProgress(id: id, seconds: seconds)
                 }
+                playback.nextEpisodeProvider = { item in
+                    library.nextEpisode(after: item)
+                }
+                playback.openEpisodeHandler = { item in
+                    openPlayer(item)
+                }
             }
             .task {
                 library.cleanStaleMergeFiles()
@@ -763,12 +769,36 @@ struct EngineSettingsView: View {
     @State private var keepSegments = (UserDefaults.standard.object(forKey: "mp4KeepSegments") as? Bool) ?? true
     @State private var completionSound = (UserDefaults.standard.object(forKey: CompletionFeedback.soundKey) as? Bool) ?? true
     @State private var completionNotice = (UserDefaults.standard.object(forKey: CompletionFeedback.noticeKey) as? Bool) ?? true
+    @StateObject private var playPrefs = PlaybackPrefs.shared
 
     var body: some View {
         NavigationStack {
             Form {
                 Section("下载引擎") {
                     Toggle("分片引擎（可断点续传）", isOn: $segmentEnabled)
+                }
+                Section {
+                    Toggle("自动连播同系列下一集", isOn: $playPrefs.autoNext)
+                    Toggle("连播时跳过片头", isOn: $playPrefs.skipIntro)
+                    Toggle("自动跳过片尾", isOn: $playPrefs.skipOutro)
+                    ForEach(Array(playPrefs.configuredSeries.enumerated()), id: \.offset) { entry in
+                        HStack {
+                            Text(entry.element.key)
+                                .lineLimit(1)
+                            Spacer()
+                            Text("片头 \(Int(entry.element.timing.intro))s / 片尾 \(Int(entry.element.timing.outro))s")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Button("重置") {
+                                playPrefs.clear(forTitle: entry.element.key)
+                            }
+                            .buttonStyle(.borderless)
+                        }
+                    }
+                } header: {
+                    Text("连播与片头片尾")
+                } footer: {
+                    Text("连播需要标题里含集数（如「第16集」）。片头片尾可在播放器控制条上用「标记片头结束 / 标记片尾开始」按系列记录；连播切集时才会自动跳过片头。")
                 }
                 if segmentEnabled {
                     Section {

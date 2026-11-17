@@ -34,6 +34,10 @@ struct PlayerView: View {
             if gestures.chromeVisible {
                 chrome
             }
+
+            if let next = store.countdownNext {
+                countdownCard(next: next)
+            }
         }
         .statusBarHidden(immersive)
         .persistentSystemOverlays(immersive ? .hidden : .automatic)
@@ -116,6 +120,8 @@ struct PlayerView: View {
                 Spacer()
             }
 
+            markingBar
+
             Slider(
                 value: Binding(
                     get: { isScrubbing ? scrubTime : currentTime },
@@ -150,6 +156,75 @@ struct PlayerView: View {
 
     private var displayedTime: Double {
         isScrubbing ? scrubTime : currentTime
+    }
+
+    // MARK: - 片头片尾打点
+
+    private var markingBar: some View {
+        HStack(spacing: 8) {
+            Button {
+                store.markIntroHere()
+            } label: {
+                Label("片头", systemImage: "text.insert")
+            }
+
+            if let timing = store.seriesTiming, timing.intro > 0 || timing.outro > 0 {
+                Button { store.adjustIntro(by: -5) } label: { Image(systemName: "minus") }
+                Text("片头 \(Int(store.seriesTiming?.intro ?? 0))s")
+                    .font(.caption2.monospacedDigit())
+                Button { store.adjustIntro(by: 5) } label: { Image(systemName: "plus") }
+            }
+
+            Button {
+                store.markOutroHere()
+            } label: {
+                Label("片尾", systemImage: "text.append")
+            }
+
+            if let outro = store.seriesTiming?.outro, outro > 0 {
+                Text("片尾 \(Int(outro))s")
+                    .font(.caption2.monospacedDigit())
+            }
+
+            Spacer(minLength: 0)
+
+            Button {
+                store.skipForThisEpisode()
+            } label: {
+                Text("本集不跳过")
+            }
+        }
+        .font(.caption2.weight(.medium))
+        .foregroundStyle(.white.opacity(0.92))
+        .labelStyle(.titleAndIcon)
+    }
+
+    private func countdownCard(next: VideoItem) -> some View {
+        VStack(spacing: 10) {
+            Text("\(store.countdownRemaining) 秒后播放下一集")
+                .font(.subheadline.weight(.semibold))
+            Text(next.title)
+                .font(.caption)
+                .opacity(0.85)
+                .lineLimit(2)
+                .multilineTextAlignment(.center)
+            Button {
+                store.cancelCountdown()
+            } label: {
+                Text("取消")
+                    .font(.caption.weight(.medium))
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 6)
+                    .background(.white.opacity(0.18), in: Capsule())
+            }
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 22)
+        .padding(.vertical, 16)
+        .background(.black.opacity(0.78), in: RoundedRectangle(cornerRadius: 16))
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+        .padding(.trailing, 28)
+        .padding(.bottom, 120)
     }
 
     // MARK: - 播放控制
