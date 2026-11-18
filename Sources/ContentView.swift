@@ -16,6 +16,7 @@ struct ContentView: View {
     @State private var showBrowser = false
     @State private var showHeaders = false
     @State private var showImporter = false
+    @State private var showOrphanSheet = false
     @State private var restoreExpectation: String?
     @State private var selectionMode = false
     @State private var selected: Set<UUID> = []
@@ -284,10 +285,16 @@ struct ContentView: View {
                         Button { rebuildLibrary() } label: {
                             Label("扫描本地文件重建台账", systemImage: "wand.and.stars")
                         }
+                        Button { showOrphanSheet = true } label: {
+                            Label("清理孤立文件…", systemImage: "trash.slash")
+                        }
                     } label: {
                         Image(systemName: "ellipsis.circle")
                     }
                 }
+            }
+            .sheet(isPresented: $showOrphanSheet) {
+                OrphanCleanupSheet(library: library)
             }
             .fileImporter(isPresented: $showImporter, allowedContentTypes: [.data]) { result in
                 switch result {

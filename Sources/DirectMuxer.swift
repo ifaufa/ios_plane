@@ -410,7 +410,13 @@ final class DirectMuxer {
         guard let out = try? FileHandle(forWritingTo: tempURL) else {
             throw MuxError(message: "无法创建 faststart 临时文件")
         }
-        defer { try? out.close() }
+        defer {
+            try? out.close()
+            // 未成功替换目标文件时，务必删掉临时文件，避免 Assets 里堆积 faststart-*.mp4
+            if FileManager.default.fileExists(atPath: tempURL.path) {
+                try? FileManager.default.removeItem(at: tempURL)
+            }
+        }
 
         try out.write(contentsOf: ftypData)
         try out.write(contentsOf: moov)

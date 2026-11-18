@@ -61,6 +61,16 @@ enum MediaConverter {
             try? fm.removeItem(at: outputURL)
         }
 
+        // 只有真正交付成功（返回给调用方并写入台账）才保留产物；
+        // 任何中途抛错都自动清理，避免 Assets 里堆积"无列表的 mp4"
+        var delivered = false
+        defer {
+            if !delivered {
+                try? fm.removeItem(at: outputURL)
+                DiagnosticsLog.write("[转MP4] 转换未完成，已清理临时产物 \(outputName)")
+            }
+        }
+
         var produced = false
         ThumbnailService.isPaused = true
         defer { ThumbnailService.isPaused = false }
@@ -263,10 +273,12 @@ enum MediaConverter {
         let size = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
         if keepSegments {
             DiagnosticsLog.write("[转MP4] 完成 时长=\(String(format: "%.1f", verify.duration))s 大小=\(size)B 已保留分片（约 \(dirSize / (1024 * 1024))MB）")
+            delivered = true
             return (outputName, verify.duration, size, segmentDirName)
         } else {
             try? fm.removeItem(at: dir)
             DiagnosticsLog.write("[转MP4] 完成 时长=\(String(format: "%.1f", verify.duration))s 大小=\(size)B 已删除分片")
+            delivered = true
             return (outputName, verify.duration, size, nil)
         }
     }

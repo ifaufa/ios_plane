@@ -275,13 +275,29 @@ final class VideoLibrary: ObservableObject {
             let url = localURL(for: item)
             if item.fileName.lowercased().hasSuffix(".m3u8") {
                 // 分片态：删除整个工作目录（否则只删 index.m3u8，分片仍占空间）
-                try? fm.removeItem(at: url.deletingLastPathComponent())
+                let folder = (item.fileName as NSString).deletingLastPathComponent
+                if !folder.isEmpty, !isFolderReferenced(folder, excluding: item.id) {
+                    try? fm.removeItem(at: Self.assetsDir.appendingPathComponent(folder, isDirectory: true))
+                }
             } else {
                 try? fm.removeItem(at: url)
+            }
+            // 关键修复：处于「MP4 + 保留分片」状态的条目，fileName 与分片目录不同名，
+            // 上面只删掉了 mp4，这里必须把保留的分片目录一并删除，否则每次删除都会残留一个目录
+            if let name = item.segmentDirName, !name.isEmpty,
+               !isFolderReferenced(name, excluding: item.id) {
+                try? fm.removeItem(at: Self.assetsDir.appendingPathComponent(name, isDirectory: true))
             }
         }
         items.removeAll { ids.contains($0.id) }
         save()
+    }
+
+    /// 该分片目录是否仍被其它条目引用（防止误删共享目录）
+    private func isFolderReferenced(_ name: String, excluding id: UUID) -> Bool {
+        items.contains { other in
+            other.id != id && (other.segmentDirName == name || other.fileName.hasPrefix(name + "/"))
+        }
     }
 
     /// 转 MP4 成功后更新条目
@@ -316,32 +332,199 @@ final class VideoLibrary: ObservableObject {
         save()
     }
 
+    // MARK: - 孤立文件扫描 / 清理
+
+    struct OrphanEntry: Identifiable {
+        let url: URL
+        let name: String
+        let isDirectory: Bool
+        let size: Int64
+        let modified: Date
+
+        var id: String { url.path }
+        /// 10 分钟内修改过 → 视为可能正在写入，默认不清理
+        var isRecent: Bool { Date().timeIntervalSince(modified) < 600 }
+    }
+
+    struct OrphanScan {
+        var entries: [OrphanEntry]
+        var totalBytes: Int64
+        var recentCount: Int
+        var removableCount: Int
+        var removableBytes: Int64
+
+        static let empty = OrphanScan(entries: [], totalBytes: 0, recentCount: 0, removableCount: 0, removableBytes: 0)
+        var isEmpty: Bool { entries.isEmpty }
+    }
+
+    /// 扫描 Assets 顶层，找出「没有任何台账条目引用」的目录/文件
+    func scanOrphans() -> OrphanScan {
+        let fm = FileManager.default
+        var referenced = Set<String>()
+        for item in items {
+            if item.fileName.lowercased().hasSuffix(".m3u8") {
+                let folder = (item.fileName as NSString).deletingLastPathComponent
+                if !folder.isEmpty { referenced.insert(folder) }
+            } else {
+                referenced.insert(item.fileName)
+            }
+            if let name = item.segmentDirName, !name.isEmpty { referenced.insert(name) }
+        }
+
+        let keys: Set<URLResourceKey> = [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey]
+        guard let list = try? fm.contentsOfDirectory(at: Self.assetsDir,
+                                                     includingPropertiesForKeys: Array(keys),
+                                                     options: [.skipsHiddenFiles]) else {
+            return .empty
+        }
+
+        var entries: [OrphanEntry] = []
+        var total: Int64 = 0
+        var recent = 0
+        var removableCount = 0
+        var removableBytes: Int64 = 0
+        for url in list {
+            let name = url.lastPathComponent
+            guard !referenced.contains(name) else { continue }
+            let values = try? url.resourceValues(forKeys: keys)
+            let isDirectory = values?.isDirectory ?? false
+            let size = isDirectory ? Self.directorySize(url) : Int64(values?.fileSize ?? 0)
+            let modified = values?.contentModificationDate ?? .distantPast
+            let entry = OrphanEntry(url: url, name: name, isDirectory: isDirectory, size: size, modified: modified)
+            entries.append(entry)
+            total += size
+            if entry.isRecent {
+                recent += 1
+            } else {
+                removableCount += 1
+                removableBytes += size
+            }
+        }
+        entries.sort { $0.size > $1.size }
+        return OrphanScan(entries: entries, totalBytes: total, recentCount: recent,
+                          removableCount: removableCount, removableBytes: removableBytes)
+    }
+
+    /// 清理孤立文件；默认跳过 10 分钟内修改过的项
+    @discardableResult
+    func cleanOrphans(includeRecent: Bool = false) -> (count: Int, freed: Int64) {
+        let scan = scanOrphans()
+        guard !scan.entries.isEmpty else { return (0, 0) }
+        let fm = FileManager.default
+        var count = 0
+        var freed: Int64 = 0
+        for entry in scan.entries {
+            if entry.isRecent, !includeRecent { continue }
+            if (try? fm.removeItem(at: entry.url)) != nil {
+                count += 1
+                freed += entry.size
+            }
+        }
+        if count > 0 {
+            DiagnosticsLog.write("[清理] 清理孤立文件 \(count) 个，释放 \(freed / (1024 * 1024))MB")
+        }
+        return (count, freed)
+    }
+
     /// 台账彻底丢失时，扫描 Assets 目录把存在的视频重新登记
     @discardableResult
     func rebuildFromAssets() -> Int {
         quarantineStoreIfNeeded()
         let fm = FileManager.default
+        let keys: Set<URLResourceKey> = [.isDirectoryKey, .contentModificationDateKey, .fileSizeKey]
         let entries = (try? fm.contentsOfDirectory(at: Self.assetsDir,
-                                                   includingPropertiesForKeys: [.contentModificationDateKey],
+                                                   includingPropertiesForKeys: Array(keys),
                                                    options: [.skipsHiddenFiles])) ?? []
-        let existing = Set(items.map { $0.fileName })
-        var added = 0
-        for entry in entries where entry.pathExtension == "movpkg" {
+
+        // 识别当前结构：<UUID>/index.m3u8（分片）、<UUID>.mp4（成品）、旧 .movpkg
+        var folders: [String: URL] = [:]
+        var mp4s: [String: URL] = [:]
+        var legacy: [URL] = []
+        for entry in entries {
             let name = entry.lastPathComponent
-            guard !existing.contains(name) else { continue }
-            let created = (try? entry.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date()
+            let isDirectory = (try? entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+            if isDirectory {
+                if fm.fileExists(atPath: entry.appendingPathComponent("index.m3u8").path) {
+                    folders[name] = entry
+                }
+            } else if name.lowercased().hasSuffix(".mp4") {
+                guard !name.lowercased().hasPrefix("faststart-") else { continue }
+                // 只登记结构完整的 mp4（含 moov），避免把失败残留当成视频
+                guard Self.hasMoovBox(entry) else { continue }
+                mp4s[name] = entry
+            } else if entry.pathExtension == "movpkg" {
+                legacy.append(entry)
+            }
+        }
+
+        var known = Set(items.map { $0.fileName })
+        var added = 0
+        func createdAt(_ url: URL) -> Date {
+            (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date()
+        }
+
+        // ① 成品 mp4（同名分片目录作为「保留分片」挂回）
+        var consumedBases = Set<String>()
+        for (name, url) in mp4s.sorted(by: { $0.key < $1.key }) {
+            guard !known.contains(name) else { continue }
+            let base = (name as NSString).deletingPathExtension
+            let hasSegments = folders[base] != nil
+            let size = Int64((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+            items.append(VideoItem(
+                id: UUID(),
+                title: base,
+                sourceURL: "",
+                fileName: name,
+                duration: 0,
+                fileSize: size,
+                createdAt: createdAt(url),
+                lastPosition: nil,
+                segmentDirName: hasSegments ? base : nil
+            ))
+            known.insert(name)
+            if hasSegments { consumedBases.insert(base) }
+            added += 1
+        }
+
+        // ② 仅剩分片目录（没有对应成品）
+        for (name, url) in folders.sorted(by: { $0.key < $1.key }) {
+            guard !consumedBases.contains(name) else { continue }
+            let fileName = name + "/index.m3u8"
+            guard !known.contains(fileName) else { continue }
+            items.append(VideoItem(
+                id: UUID(),
+                title: name,
+                sourceURL: "",
+                fileName: fileName,
+                duration: 0,
+                fileSize: Self.directorySize(at: url),
+                createdAt: createdAt(url),
+                lastPosition: nil,
+                segmentDirName: name
+            ))
+            known.insert(fileName)
+            added += 1
+        }
+
+        // ③ 旧格式 movpkg
+        for url in legacy {
+            let name = url.lastPathComponent
+            guard !known.contains(name) else { continue }
             items.append(VideoItem(
                 id: UUID(),
                 title: name.replacingOccurrences(of: ".movpkg", with: ""),
                 sourceURL: "",
                 fileName: name,
                 duration: 0,
-                fileSize: Self.directorySize(at: entry),
-                createdAt: created,
-                lastPosition: nil
+                fileSize: Self.directorySize(at: url),
+                createdAt: createdAt(url),
+                lastPosition: nil,
+                segmentDirName: nil
             ))
+            known.insert(name)
             added += 1
         }
+
         items.sort { $0.createdAt > $1.createdAt }
         save()
         return added
@@ -372,8 +555,17 @@ final class VideoLibrary: ObservableObject {
         for url in items where url.pathExtension.lowercased() == "mp4" {
             let isDir = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
             guard !isDir else { continue }
-            guard !Self.hasMoovBox(url) else { continue }
             let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+
+            let isFastStartTemp = url.lastPathComponent.lowercased().hasPrefix("faststart-")
+            if isFastStartTemp {
+                // faststart 临时文件：超过 10 分钟仍存在，说明上次转换中断，可安全清理
+                let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                guard Date().timeIntervalSince(modified) > 600 else { continue }
+            } else {
+                // 普通 mp4：只有缺 moov（无法播放）才删
+                guard !Self.hasMoovBox(url) else { continue }
+            }
             if (try? fm.removeItem(at: url)) != nil {
                 removed += 1
                 freed += Int64(size)
