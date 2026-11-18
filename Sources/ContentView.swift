@@ -120,6 +120,13 @@ struct ContentView: View {
                             }
                         }
                         .contextMenu {
+                            if !library.isMissing(item) {
+                                Button {
+                                    openPlayer(item, fromBeginning: true)
+                                } label: {
+                                    Label("从头播放", systemImage: "backward.end.fill")
+                                }
+                            }
                             if library.hasSegments(item), !item.fileName.lowercased().hasSuffix(".m3u8") {
                                 Button {
                                     let target = item
@@ -536,15 +543,15 @@ struct ContentView: View {
         }
     }
 
-    private func openPlayer(_ item: VideoItem) {
+    private func openPlayer(_ item: VideoItem, fromBeginning: Bool = false) {
         let url = library.localURL(for: item)
         let exists = FileManager.default.fileExists(atPath: url.path)
-        DiagnosticsLog.write("[播放] 点击 \(item.title) 文件=\(item.fileName) 存在=\(exists)")
+        DiagnosticsLog.write("[播放] 点击 \(item.title) 文件=\(item.fileName) 存在=\(exists) 从头=\(fromBeginning)")
         guard exists else {
             showToast("文件不存在：\(item.fileName)")
             return
         }
-        playback.open(video: item, url: url)
+        playback.open(video: item, url: url, fromBeginning: fromBeginning)
     }
 
     private func exportTS(_ item: VideoItem) {
@@ -772,9 +779,10 @@ struct EngineSettingsView: View {
     @StateObject private var playPrefs = PlaybackPrefs.shared
 
     private func summaryText(_ timing: PlaybackPrefs.SeriesTiming) -> String {
-        let intro = timing.intro > 0 ? "片头至 " + PlaybackStore.timeText(timing.intro) : "无片头"
-        let outro = timing.outro > 0 ? "片尾始于 " + PlaybackStore.timeText(timing.outro) : "无片尾"
-        return intro + " / " + outro
+        let intro = timing.introLength > 0 ? "片头 " + PlaybackStore.timeText(timing.introLength) : "无片头"
+        let outro = timing.outroLength > 0 ? "片尾 " + PlaybackStore.timeText(timing.outroLength) : "无片尾"
+        let ref = timing.refDuration > 0 ? "（参考 " + PlaybackStore.timeText(timing.refDuration) + "）" : ""
+        return intro + " / " + outro + ref
     }
 
     var body: some View {
@@ -785,8 +793,9 @@ struct EngineSettingsView: View {
                 }
                 Section {
                     Toggle("自动连播同系列下一集", isOn: $playPrefs.autoNext)
-                    Toggle("连播时跳过片头", isOn: $playPrefs.skipIntro)
+                    Toggle("自动跳过片头（含手动打开）", isOn: $playPrefs.skipIntro)
                     Toggle("自动跳过片尾", isOn: $playPrefs.skipOutro)
+                    Toggle("无片尾保护（按参考总时长）", isOn: $playPrefs.protectNoOutro)
                     ForEach(Array(playPrefs.configuredSeries.enumerated()), id: \.offset) { entry in
                         NavigationLink {
                             SeriesTimingEditor(key: entry.element.key, prefs: playPrefs)
@@ -804,7 +813,7 @@ struct EngineSettingsView: View {
                 } header: {
                     Text("连播与片头片尾")
                 } footer: {
-                    Text("连播需要标题里含集数（如「第16集」）。片头记录的是「片头结束时间点」，片尾记录的是「片尾开始时间点」——因此没有片尾的集数（总时长本就短于该时间点）不会被误切；若某系列确实没有片尾，可在结尾处点「片尾」记为无片尾。")
+                    Text("连播需要标题里含集数（如「第16集」）。片头/片尾都以「时长」为准：片头时长决定从哪开始播；片尾时长决定「剩余多长时」开始跳过（因此正片长短变化不影响）。无片尾保护：本集总时长比参考总长短出一个片尾及以上时，判定这集没有片尾，不自动跳。")
                 }
                 if segmentEnabled {
                     Section {
@@ -960,46 +969,67 @@ private struct SeriesTimingEditor: View {
         Form {
             Section {
                 Stepper(value: Binding(
-                    get: { timing.intro },
-                    set: { prefs.setIntro(max(0, min($0, 7200)), forKey: key) }
+                    get: { timing.introLength },
+                    set: { prefs.setIntroLength(max(0, min($0, 7200)), forKey: key) }
                 ), in: 0...7200, step: 5) {
                     HStack {
-                        Text("片头结束")
+                        Text("片头时长")
                         Spacer()
-                        Text(timing.intro > 0 ? PlaybackStore.timeText(timing.intro) : "不跳过")
+                        Text(timing.introLength > 0 ? PlaybackStore.timeText(timing.introLength) : "不跳过")
                             .foregroundStyle(.secondary)
                             .monospacedDigit()
                     }
                 }
-                if timing.intro > 0 {
-                    Button("清除片头", role: .destructive) { prefs.setIntro(0, forKey: key) }
+                if timing.introLength > 0 {
+                    Button("清除片头", role: .destructive) { prefs.clearIntro(forKey: key) }
                 }
             } header: {
                 Text("片头")
             } footer: {
-                Text("连播切到下一集时，从这个时间点开始播放；手动点开某集不会跳。每次 ±5 秒。")
+                Text("打开该系列任意一集（含手动点开）时，从这个时长位置开始播放；有续播位置时以续播位置优先。每次 ±5 秒。")
             }
 
             Section {
                 Stepper(value: Binding(
-                    get: { timing.outro },
-                    set: { prefs.setOutro(max(0, min($0, 7200)), forKey: key) }
+                    get: { timing.outroLength },
+                    set: { prefs.setOutroLength(max(0, min($0, 7200)), forKey: key) }
                 ), in: 0...7200, step: 5) {
                     HStack {
-                        Text("片尾开始")
+                        Text("片尾时长")
                         Spacer()
-                        Text(timing.outro > 0 ? PlaybackStore.timeText(timing.outro) : "无片尾")
+                        Text(timing.outroLength > 0 ? PlaybackStore.timeText(timing.outroLength) : "无片尾")
                             .foregroundStyle(.secondary)
                             .monospacedDigit()
                     }
                 }
-                if timing.outro > 0 {
-                    Button("设为无片尾", role: .destructive) { prefs.setOutro(0, forKey: key) }
+                if timing.outroLength > 0 {
+                    Button("清除片尾", role: .destructive) { prefs.clearOutro(forKey: key) }
                 }
             } header: {
                 Text("片尾")
             } footer: {
-                Text("播放到这个时间点后进入 7 秒倒计时（可取消）并切下一集。没有片尾的集数总时长短于该时间点，因此不会被误切。")
+                Text("当「剩余时长 ≤ 片尾时长」时进入 7 秒倒计时（可取消）。因为按剩余时长判定，正片长短变化也能准确跳过片尾。")
+            }
+
+            if timing.refDuration > 0 {
+                Section {
+                    HStack {
+                        Text("参考总时长")
+                        Spacer()
+                        Text(PlaybackStore.timeText(timing.refDuration))
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                    if prefs.isConflicting(timing) {
+                        Text("片头 + 片尾 已吃掉全部时长，跳过不会生效，请调整。")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+                } header: {
+                    Text("参考")
+                } footer: {
+                    Text("打点片尾时记录的那一集总时长，用于判定「本集是否更短（可能没有片尾）」。")
+                }
             }
 
             Section {

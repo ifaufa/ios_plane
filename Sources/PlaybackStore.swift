@@ -39,8 +39,12 @@ final class PlaybackStore: ObservableObject {
     private var endObserver: NSObjectProtocol?
     private var countdownTimer: Timer?
     private var pendingAutoNext = false
+    /// 本集是否已触发过片尾倒计时（防重复）
     private var outroTriggered = false
-    private var skipThisEpisode = false
+    /// 本集不再跳片尾（取消 / 本集不跳过 / 从头播放）
+    private var outroSuppressed = false
+    /// 拖动/暂停后的冷却截止时间
+    private var outroCooldownUntil = Date.distantPast
 
     private var timeObserver: Any?
     private var healthTimer: Timer?
@@ -101,8 +105,18 @@ final class PlaybackStore: ObservableObject {
 
     // MARK: - 打开 / 关闭
 
-    func open(video: VideoItem, url: URL) {
+    func open(video: VideoItem, url: URL, fromBeginning: Bool = false) {
         if videoID == video.id {
+            if fromBeginning {
+                // 从头播放：同一条目也强制重载到 0
+                recoveryAttempts = 0
+                configureAudioSession()
+                resetEpisodeSkipState(fromBeginning: true)
+                loadItem(startAt: 0)
+                play()
+                DiagnosticsLog.write("[播放] 从头播放：本集不跳片头/片尾")
+                return
+            }
             let needsReload = player.currentItem == nil || player.currentItem?.status == .failed
             if needsReload {
                 DiagnosticsLog.write("[播放] 同一条目重新加载（状态=\(player.currentItem?.status.rawValue ?? -1)）")
@@ -130,22 +144,30 @@ final class PlaybackStore: ObservableObject {
         waitingTicks = 0
         pauseTicks = 0
         pauseRecoveries = 0
-        outroTriggered = false
-        skipThisEpisode = false
         cancelCountdown()
+        resetEpisodeSkipState(fromBeginning: fromBeginning)
 
         configureAudioSession()
 
-        let resumePosition = video.lastPosition ?? 0
+        // 起始定位：续播优先；否则按「片头时长」跳过片头（手动打开与连播一致）
+        let resumePosition = fromBeginning ? 0 : (video.lastPosition ?? 0)
+        let introLength = seriesTiming?.introLength ?? 0
         var startAt = resumePosition > 3 ? resumePosition : 0
-        // 连播切集时跳过片头（手动打开某集不跳；续播位置优先）
-        if pendingAutoNext {
-            pendingAutoNext = false
-            if PlaybackPrefs.shared.skipIntro,
-               let intro = seriesTiming?.intro, intro > 3, startAt < intro {
-                startAt = intro
-                DiagnosticsLog.write("[播放] 跳过片头 \(Int(intro))s")
-            }
+        var introSkipped = false
+        if fromBeginning {
+            startAt = 0
+        } else if PlaybackPrefs.shared.skipIntro,
+                  introLength > 3,
+                  startAt < introLength - 0.5 {
+            startAt = introLength
+            introSkipped = true
+        }
+        if introSkipped {
+            DiagnosticsLog.write("[播放] 跳过片头 " + Self.timeText(introLength) + "（来源=" + (pendingAutoNext ? "连播" : "手动") + "）")
+        }
+        pendingAutoNext = false
+        if fromBeginning {
+            DiagnosticsLog.write("[播放] 从头播放：本集不跳片头/片尾")
         }
         intendedStart = startAt
         didMuteProbe = false
@@ -229,6 +251,7 @@ final class PlaybackStore: ObservableObject {
         pauseTicks = 0
         player.pause()
         isPlaying = false
+        dismissCountdownTemporarily("暂停")
     }
 
     func togglePlay() {
@@ -240,6 +263,7 @@ final class PlaybackStore: ObservableObject {
         guard !scrubbing else { return }
         expectsPlayingBeforeScrub = expectsPlaying
         DiagnosticsLog.write("[播放] 开始拖动 原意图=\(expectsPlaying)")
+        dismissCountdownTemporarily("拖动")
         expectPauseTemporarily()
     }
 
@@ -340,7 +364,7 @@ final class PlaybackStore: ObservableObject {
                     guard let self, self.isActive else { return }
                     guard let ended = note.object as? AVPlayerItem,
                           ended === self.player.currentItem else { return }
-                    self.beginCountdown(reason: "播放结束")
+                    self.beginCountdown(reason: "播放结束", ignoreOutroSuppressed: true)
                 }
             }
         }
@@ -371,20 +395,46 @@ final class PlaybackStore: ObservableObject {
 
     // MARK: - 连播 / 片头片尾
 
-    /// 片尾检测：outro 存的是「片尾开始的绝对时间点」
-    /// 这样"某些集没有片尾"时：该集总时长本来就不到 outro，条件永远不成立，自然不会误切正片
+    /// 每集重置跳过状态（打开新一集时调用）
+    private func resetEpisodeSkipState(fromBeginning: Bool) {
+        outroTriggered = false
+        outroSuppressed = fromBeginning
+        outroCooldownUntil = .distantPast
+    }
+
+    /// 片尾检测：按「剩余时长 ≤ 片尾时长」判定（片尾贴着结尾，能适配正片长短不一）
     private func checkOutro(at seconds: Double) {
-        guard PlaybackPrefs.shared.skipOutro, !skipThisEpisode, !outroTriggered else { return }
+        guard PlaybackPrefs.shared.skipOutro, !outroSuppressed, !outroTriggered else { return }
+        guard Date() >= outroCooldownUntil else { return }
         guard countdownNext == nil, expectsPlaying, !scrubbing else { return }
         guard let item = player.currentItem else { return }
         let duration = item.duration.seconds
         guard duration.isFinite, duration > 30 else { return }
-        guard let outroStart = seriesTiming?.outro, outroStart > 0 else { return }
-        // 无片尾保护：时间点过于接近结尾 → 视为没有片尾，不做跳过
-        guard outroStart < duration - 3 else { return }
-        let introEnd = seriesTiming?.intro ?? 0
-        guard seconds >= max(outroStart, introEnd + 5) else { return }
-        beginCountdown(reason: "到达片尾 \(Self.timeText(outroStart))")
+        guard let timing = seriesTiming else { return }
+        let introLength = timing.introLength
+        let outroLength = timing.outroLength
+        guard outroLength > 0 else { return }
+
+        // 保护 1：配置吃掉了全部时长 → 不跳
+        guard introLength + outroLength < duration - 5 else {
+            return
+        }
+        // 保护 2：本集比参考总时长短出一个片尾及以上 → 判定「本集没有片尾」
+        if PlaybackPrefs.shared.protectNoOutro, timing.refDuration > 0,
+           timing.refDuration - duration >= outroLength {
+            if !outroTriggered {
+                outroSuppressed = true
+                let short = Self.timeText(timing.refDuration - duration)
+                DiagnosticsLog.write("[播放] 本集比参考短 " + short + "（≥ 片尾 " + Self.timeText(outroLength) + "），判定无片尾，不自动跳")
+            }
+            return
+        }
+        // 保护 3：还没走出片头就不判定
+        guard seconds > introLength + 1 else { return }
+
+        let remaining = duration - seconds
+        guard remaining <= outroLength else { return }
+        beginCountdown(reason: "剩余 " + Self.timeText(max(0, remaining)) + " ≤ 片尾 " + Self.timeText(outroLength))
     }
 
     static func timeText(_ seconds: Double) -> String {
@@ -396,8 +446,10 @@ final class PlaybackStore: ObservableObject {
     }
 
     /// 进入倒计时（可取消）
-    private func beginCountdown(reason: String) {
-        guard countdownNext == nil, !skipThisEpisode else { return }
+    /// - Parameter ignoreOutroSuppressed: 播完自然结束时仍要切下一集，不受"取消跳片尾"影响
+    private func beginCountdown(reason: String, ignoreOutroSuppressed: Bool = false) {
+        guard countdownNext == nil else { return }
+        guard ignoreOutroSuppressed || !outroSuppressed else { return }
         guard PlaybackPrefs.shared.autoNext, let current = currentVideo else { return }
         guard let next = nextEpisodeProvider?(current) else {
             DiagnosticsLog.write("[播放] 无下一集（\(reason)）")
@@ -430,47 +482,64 @@ final class PlaybackStore: ObservableObject {
         openEpisodeHandler?(next)
     }
 
+    /// 用户点「取消」：本集不再跳片尾（仍然会在播完后自动切下一集）
     func cancelCountdown() {
         guard countdownNext != nil || countdownTimer != nil else { return }
         countdownTimer?.invalidate()
         countdownTimer = nil
         countdownNext = nil
         countdownRemaining = 0
-        DiagnosticsLog.write("[播放] 连播已取消")
+        outroSuppressed = true
+        DiagnosticsLog.write("[播放] 已取消跳片尾（仅本集），播完后仍会自动切下一集")
     }
 
-    /// 本集不跳过（一次性）
+    /// 拖动 / 暂停导致的关闭：只关本次 + 10 秒冷却，稍后仍可再次触发
+    private func dismissCountdownTemporarily(_ reason: String) {
+        guard countdownNext != nil || countdownTimer != nil else { return }
+        countdownTimer?.invalidate()
+        countdownTimer = nil
+        countdownNext = nil
+        countdownRemaining = 0
+        outroTriggered = false
+        outroCooldownUntil = Date().addingTimeInterval(10)
+        DiagnosticsLog.write("[播放] " + reason + " → 关闭倒计时，10 秒冷却")
+    }
+
+    /// 本集不跳过（一次性，只影响本集）
     func skipForThisEpisode() {
-        skipThisEpisode = true
+        outroSuppressed = true
         outroTriggered = true
-        cancelCountdown()
-        DiagnosticsLog.write("[播放] 本集不跳过")
+        if countdownNext != nil || countdownTimer != nil {
+            countdownTimer?.invalidate()
+            countdownTimer = nil
+            countdownNext = nil
+            countdownRemaining = 0
+        }
+        DiagnosticsLog.write("[播放] 本集不跳过片尾（播完仍会自动切下一集）")
     }
 
-    /// 标记片头结束（当前时间点）
+    /// 标记片头：记录「片头时长」= 当前播放位置
     func markIntroHere() {
         let seconds = player.currentTime().seconds
         guard seconds.isFinite, seconds > 0, !title.isEmpty else { return }
-        PlaybackPrefs.shared.setIntro(seconds, forTitle: title)
+        PlaybackPrefs.shared.setIntroLength(seconds, forTitle: title)
         seriesTiming = PlaybackPrefs.shared.timing(forTitle: title)
-        DiagnosticsLog.write("[播放] 标记片头结束 \(Int(seconds))s")
+        DiagnosticsLog.write("[播放] 标记片头时长 " + Self.timeText(seconds))
     }
 
-    /// 标记片尾开始（记录「绝对时间点」，不是剩余时长）
+    /// 标记片尾：记录「片尾时长」= 本集总时长 − 当前播放位置，并记录参考总时长
     func markOutroHere() {
         let duration = player.currentItem?.duration.seconds ?? 0
         let seconds = player.currentTime().seconds
         guard duration.isFinite, duration > 0, seconds.isFinite, !title.isEmpty else { return }
-        if duration - seconds < 3 {
-            // 已在结尾：标记为"本系列没有片尾"，避免误切正片
-            PlaybackPrefs.shared.setOutro(0, forTitle: title)
-            seriesTiming = PlaybackPrefs.shared.timing(forTitle: title)
-            DiagnosticsLog.write("[播放] 标记为无片尾（不跳过任何内容）")
-        } else {
-            PlaybackPrefs.shared.setOutro(seconds, forTitle: title)
-            seriesTiming = PlaybackPrefs.shared.timing(forTitle: title)
-            DiagnosticsLog.write("[播放] 标记片尾开始于 \(Self.timeText(seconds))")
+        let outroLength = max(0, duration - seconds)
+        guard outroLength >= 3 else {
+            DiagnosticsLog.write("[播放] 片尾过短（<3s），未记录")
+            return
         }
+        PlaybackPrefs.shared.setOutroLength(outroLength, forTitle: title, refDuration: duration)
+        seriesTiming = PlaybackPrefs.shared.timing(forTitle: title)
+        DiagnosticsLog.write("[播放] 标记片尾时长 " + Self.timeText(outroLength) + "（参考总长 " + Self.timeText(duration) + "）")
     }
 
 

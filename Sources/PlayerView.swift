@@ -168,7 +168,7 @@ struct PlayerView: View {
                 Label("片头", systemImage: "text.insert")
             }
 
-            if let intro = store.seriesTiming?.intro, intro > 0 {
+            if let intro = store.seriesTiming?.introLength, intro > 0 {
                 Text(PlaybackStore.timeText(intro))
                     .font(.caption2.monospacedDigit())
                     .opacity(0.85)
@@ -182,7 +182,7 @@ struct PlayerView: View {
                 Label("片尾", systemImage: "text.append")
             }
 
-            if let outro = store.seriesTiming?.outro, outro > 0 {
+            if let outro = store.seriesTiming?.outroLength, outro > 0 {
                 Text(PlaybackStore.timeText(outro))
                     .font(.caption2.monospacedDigit())
                     .opacity(0.85)
