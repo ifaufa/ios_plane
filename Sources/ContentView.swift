@@ -199,14 +199,6 @@ struct ContentView: View {
                                     Text(mode.title)
                                 }
                             }
-                        Divider()
-                        Button("清理所有分片") {
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { pendingLibraryAction = .cleanupSegments }
-                        }
-                        Button("删除所有 MP4（保留分片）") {
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { pendingLibraryAction = .cleanupMP4 }
-                        }
-                        }
                     } label: {
                         Image(systemName: "arrow.up.arrow.down")
                     }
@@ -285,8 +277,23 @@ struct ContentView: View {
                         Button { rebuildLibrary() } label: {
                             Label("扫描本地文件重建台账", systemImage: "wand.and.stars")
                         }
-                        Button { showOrphanSheet = true } label: {
-                            Label("清理孤立文件…", systemImage: "trash.slash")
+                        Divider()
+                        Menu {
+                            Button {
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { pendingLibraryAction = .cleanupSegments }
+                            } label: {
+                                Label("清理所有分片", systemImage: "scissors")
+                            }
+                            Button {
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { pendingLibraryAction = .cleanupMP4 }
+                            } label: {
+                                Label("删除所有 MP4（保留分片）", systemImage: "film")
+                            }
+                            Button { showOrphanSheet = true } label: {
+                                Label("清理孤立文件…", systemImage: "trash.slash")
+                            }
+                        } label: {
+                            Label("存储清理", systemImage: "externaldrive.badge.minus")
                         }
                     } label: {
                         Image(systemName: "ellipsis.circle")

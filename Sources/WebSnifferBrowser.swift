@@ -1225,9 +1225,36 @@ struct QueueOverviewSheet: View {
                 if downloads.tasks.isEmpty {
                     Text("当前没有下载任务")
                         .foregroundStyle(.secondary)
+                } else {
+                    Text("长按任务可置顶 / 上移 / 下移；点「编辑」可拖动排序。顺序只影响排队中的任务。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
                 ForEach(downloads.tasks) { task in
                     DownloadRow(task: task)
+                        .contextMenu {
+                            Button {
+                                downloads.moveTaskToTop(task.id)
+                            } label: {
+                                Label("置顶", systemImage: "arrow.up.to.line")
+                            }
+                            .disabled(!downloads.canMoveUp(task.id))
+                            Button {
+                                downloads.moveTaskUp(task.id)
+                            } label: {
+                                Label("上移", systemImage: "arrow.up")
+                            }
+                            .disabled(!downloads.canMoveUp(task.id))
+                            Button {
+                                downloads.moveTaskDown(task.id)
+                            } label: {
+                                Label("下移", systemImage: "arrow.down")
+                            }
+                            .disabled(!downloads.canMoveDown(task.id))
+                        }
+                }
+                .onMove { source, destination in
+                    downloads.moveTasks(from: source, to: destination)
                 }
             }
             .navigationTitle("下载队列")
@@ -1235,6 +1262,10 @@ struct QueueOverviewSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("关闭") { dismiss() }
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    EditButton()
+                        .disabled(downloads.tasks.count < 2)
                 }
             }
         }

@@ -307,6 +307,57 @@ final class DownloadManager: NSObject, ObservableObject {
         persistNow()
     }
 
+    // MARK: - 顺序调整
+
+    /// 拖动排序（List 的 onMove）
+    func moveTasks(from source: IndexSet, to destination: Int) {
+        tasks.move(fromOffsets: source, toOffset: destination)
+        reorderPendingQueues()
+        persistNow()
+    }
+
+    /// 置顶
+    func moveTaskToTop(_ id: String) {
+        guard let index = tasks.firstIndex(where: { $0.id == id }), index > 0 else { return }
+        let task = tasks.remove(at: index)
+        tasks.insert(task, at: 0)
+        reorderPendingQueues()
+        persistNow()
+    }
+
+    /// 上移一位
+    func moveTaskUp(_ id: String) {
+        guard let index = tasks.firstIndex(where: { $0.id == id }), index > 0 else { return }
+        tasks.swapAt(index, index - 1)
+        reorderPendingQueues()
+        persistNow()
+    }
+
+    /// 下移一位
+    func moveTaskDown(_ id: String) {
+        guard let index = tasks.firstIndex(where: { $0.id == id }), index + 1 < tasks.count else { return }
+        tasks.swapAt(index, index + 1)
+        reorderPendingQueues()
+        persistNow()
+    }
+
+    func canMoveUp(_ id: String) -> Bool {
+        (tasks.firstIndex { $0.id == id } ?? 0) > 0
+    }
+
+    func canMoveDown(_ id: String) -> Bool {
+        guard let index = tasks.firstIndex(where: { $0.id == id }) else { return false }
+        return index + 1 < tasks.count
+    }
+
+    /// 展示顺序变了以后，必须把两个「待启动队列」按同样顺序重排，
+    /// 否则界面顺序与实际启动顺序不一致
+    private func reorderPendingQueues() {
+        let order = Dictionary(uniqueKeysWithValues: tasks.enumerated().map { ($1.id, $0) })
+        pending.sort { (order[$0.url.absoluteString] ?? Int.max) < (order[$1.url.absoluteString] ?? Int.max) }
+        pendingSegmentResume.sort { (order[$0] ?? Int.max) < (order[$1] ?? Int.max) }
+    }
+
     /// 彻底移除任务（不写入视频库）
     func remove(_ info: DownloadTaskInfo) {
         SegmentRunner.shared.remove(info.id)
