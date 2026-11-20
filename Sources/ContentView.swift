@@ -199,6 +199,7 @@ struct ContentView: View {
                                     Text(mode.title)
                                 }
                             }
+                        }
                     } label: {
                         Image(systemName: "arrow.up.arrow.down")
                     }
