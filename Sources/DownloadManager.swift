@@ -68,32 +68,159 @@ final class DownloadManager: NSObject, ObservableObject {
         return AVAssetDownloadURLSession(configuration: config, assetDownloadDelegate: self, delegateQueue: .main)
     }()
 
+    // MARK: - 任务清单持久化（防止重启后任务丢失）
+
+    /// 重启后是否自动继续未完成的下载
+    static let autoResumeKey = "downloads.autoResume"
+
+    /// 任务清单落地文件（与视频库台账同级，便于备份）
+    private static var downloadsStoreURL: URL {
+        let base = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        return base.appendingPathComponent("downloads.json")
+    }
+
+    private struct PersistedTask: Codable {
+        var id: String
+        var url: String
+        var title: String
+        var status: String          // queued / downloading / paused / failed
+        var codecStatus: String?
+        var failure: String?
+        var addedAt: Date
+    }
+
+    /// 任务添加时间（用于恢复后排序）
+    private var addedAt: [String: Date] = [:]
+    private var persistWorkItem: DispatchWorkItem?
+
     override init() {
         super.init()
         wireSegmentEngine()
         Task { @MainActor in
-            for job in SegmentRunner.shared.restore() {
-                if !self.tasks.contains(where: { $0.id == job.id }), let url = URL(string: job.sourceURL) {
-                    self.tasks.append(DownloadTaskInfo(
-                        id: job.id,
-                        url: url,
-                        title: job.title,
-                        progress: Double(job.completed.count) / Double(max(1, job.segmentURLs.count)),
-                        status: .paused
-                    ))
-                }
+            self.restoreTaskList()
+        }
+    }
+
+    /// 恢复：清单 → 分片引擎进度 → 系统引擎后台任务 → 自动续传
+    private func restoreTaskList() {
+        let persisted = Self.loadPersisted()
+        let autoResume = (UserDefaults.standard.object(forKey: Self.autoResumeKey) as? Bool) ?? true
+
+        // ① 先按清单恢复全部任务（保证数量不丢）
+        for p in persisted {
+            guard let url = URL(string: p.url),
+                  !tasks.contains(where: { $0.id == p.id }) else { continue }
+            addedAt[p.id] = p.addedAt
+            var status: DownloadTaskInfo.Status = .queued
+            switch p.status {
+            case "paused": status = .paused
+            case "failed": status = .failed(p.failure ?? "下载失败")
+            default: status = .queued      // queued / downloading → 待开始
             }
+            tasks.append(DownloadTaskInfo(id: p.id, url: url, title: p.title, progress: 0,
+                                          status: status, codecStatus: p.codecStatus))
+        }
+
+        // ② 分片引擎的真实进度
+        let jobs = SegmentRunner.shared.restore()
+        for job in jobs {
+            let progress = Double(job.completed.count) / Double(max(1, job.segmentURLs.count))
+            if let index = tasks.firstIndex(where: { $0.id == job.id }) {
+                tasks[index].progress = progress
+                if tasks[index].status != .paused, !isFailed(tasks[index].status) {
+                    tasks[index].status = .queued
+                }
+                if tasks[index].title.isEmpty { tasks[index].title = job.title }
+            } else if let url = URL(string: job.sourceURL) {
+                tasks.append(DownloadTaskInfo(id: job.id, url: url, title: job.title,
+                                              progress: progress, status: .queued))
+            }
+        }
+
+        // ③ 系统引擎仍在后台跑的任务
+        Task { @MainActor in
             let all = (try? await self.session.allTasks) ?? []
             for case let task as AVAssetDownloadTask in all {
                 guard let desc = task.taskDescription, let url = URL(string: desc) else { continue }
                 if !self.tasks.contains(where: { $0.id == desc }) {
-                    self.tasks.append(DownloadTaskInfo(id: desc, url: url, title: url.lastPathComponent, progress: 0, status: .downloading))
+                    self.tasks.append(DownloadTaskInfo(id: desc, url: url, title: url.lastPathComponent,
+                                                       progress: 0, status: .downloading))
                 }
             }
+
+            // ④ 自动续传：只续「原本在下载 / 排队中」的；用户主动暂停或失败的保持不变
+            if autoResume {
+                for task in self.tasks where task.status == .queued {
+                    if SegmentRunner.shared.state(of: task.id) != nil {
+                        if !self.pendingSegmentResume.contains(task.id) {
+                            self.pendingSegmentResume.append(task.id)
+                        }
+                    } else if !self.pending.contains(where: { $0.url.absoluteString == task.id }) {
+                        self.pending.append((task.url, task.title))
+                    }
+                }
+            } else {
+                // 关闭自动续传：把"待开始"还原成"已暂停"，让用户手动点继续
+                for index in self.tasks.indices where self.tasks[index].status == .queued {
+                    self.tasks[index].status = .paused
+                }
+            }
+
             self.startNextIfNeeded()
             self.startStallMonitor()
             self.startSpeedMonitor()
+            self.persistNow()
+            DiagnosticsLog.write("[下载] 恢复任务 清单=\(persisted.count) 分片=\(jobs.count) 系统=\(all.count) 当前=\(self.tasks.count) 自动续传=\(autoResume)")
         }
+    }
+
+    // MARK: - 清单读写
+
+    private static func loadPersisted() -> [PersistedTask] {
+        guard let data = try? Data(contentsOf: downloadsStoreURL) else { return [] }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return (try? decoder.decode([PersistedTask].self, from: data)) ?? []
+    }
+
+    /// 立即落盘（添加/删除等关键操作后调用）
+    private func persistNow() {
+        persistWorkItem?.cancel()
+        persistWorkItem = nil
+        var list: [PersistedTask] = []
+        list.reserveCapacity(tasks.count)
+        for task in tasks {
+            var statusText = "queued"
+            var failure: String?
+            switch task.status {
+            case .queued: statusText = "queued"
+            case .downloading: statusText = "downloading"
+            case .paused: statusText = "paused"
+            case .failed(let message): statusText = "failed"; failure = message
+            }
+            let at = addedAt[task.id] ?? Date()
+            list.append(PersistedTask(id: task.id, url: task.url.absoluteString, title: task.title,
+                                      status: statusText, codecStatus: task.codecStatus,
+                                      failure: failure, addedAt: at))
+        }
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        guard let data = try? encoder.encode(list) else { return }
+        try? data.write(to: Self.downloadsStoreURL, options: [.atomic])
+    }
+
+    /// 延迟落盘（状态/进度频繁变化时用，避免频繁写盘）
+    /// 已排队的写入不会被反复取消，保证"高频更新"下也能真正落盘一次
+    private func persistSoon() {
+        guard persistWorkItem == nil else { return }
+        let item = DispatchWorkItem { [weak self] in
+            Task { @MainActor in
+                self?.persistWorkItem = nil
+                self?.persistNow()
+            }
+        }
+        persistWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: item)
     }
 
     private func startSpeedMonitor() {
@@ -120,6 +247,7 @@ final class DownloadManager: NSObject, ObservableObject {
         let id = url.absoluteString
         guard !tasks.contains(where: { $0.id == id }) else { return }
 
+        addedAt[id] = Date()
         if activeCount < maxConcurrent {
             begin(url: url, title: title)
             update(id) { $0.codecStatus = codecStatus }
@@ -128,12 +256,15 @@ final class DownloadManager: NSObject, ObservableObject {
             tasks.append(DownloadTaskInfo(id: id, url: url, title: title, progress: 0,
                                           status: .queued, codecStatus: codecStatus))
         }
+        // 关键：添加即落盘，避免"加了任务还没开始就重启"导致任务消失
+        persistNow()
     }
 
     func pause(_ info: DownloadTaskInfo) {
         if SegmentRunner.shared.state(of: info.id) != nil {
             SegmentRunner.shared.pause(info.id)
             update(info.id) { $0.status = .paused; $0.stalled = false }
+            persistNow()
             startNextIfNeeded()
             return
         }
@@ -146,6 +277,7 @@ final class DownloadManager: NSObject, ObservableObject {
             update(info.id) { $0.status = .paused; $0.stalled = false }
             progressMarks.removeValue(forKey: info.id)
             cancelSessionTask(id: info.id)
+            persistNow()
             startNextIfNeeded()
         case .paused, .failed:
             break
@@ -172,6 +304,7 @@ final class DownloadManager: NSObject, ObservableObject {
         } else {
             pending.append((info.url, info.title))
         }
+        persistNow()
     }
 
     /// 彻底移除任务（不写入视频库）
@@ -183,7 +316,9 @@ final class DownloadManager: NSObject, ObservableObject {
         pendingTitles.removeValue(forKey: info.id)
         durations.removeValue(forKey: info.id)
         progressMarks.removeValue(forKey: info.id)
+        addedAt.removeValue(forKey: info.id)
         cancelSessionTask(id: info.id)
+        persistNow()
         startNextIfNeeded()
     }
 
@@ -347,6 +482,7 @@ final class DownloadManager: NSObject, ObservableObject {
         let id = url.absoluteString
         pendingTitles[id] = title
         progressMarks[id] = CACurrentMediaTime()
+        if addedAt[id] == nil { addedAt[id] = Date() }
 
         if let index = tasks.firstIndex(where: { $0.id == id }) {
             tasks[index].status = .downloading
@@ -461,6 +597,8 @@ final class DownloadManager: NSObject, ObservableObject {
         pendingTitles.removeValue(forKey: id)
         durations.removeValue(forKey: id)
         progressMarks.removeValue(forKey: id)
+        addedAt.removeValue(forKey: id)
+        persistNow()
         startNextIfNeeded()
     }
 }

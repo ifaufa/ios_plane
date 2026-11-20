@@ -25,6 +25,8 @@ struct SegmentJobState: Codable {
     var keyChanges: [Int]? = nil
     /// 被判定为插入内容而剔除的分片索引
     var excluded: [Int]? = nil
+    /// 占位状态：已创建目录但播放列表尚未解析完成（此时被杀，重启后应重新开始解析）
+    var pendingParse: Bool? = nil
 }
 
 /// 分片下载引擎：后台 URLSession + 全局 8 / 每任务 4 并发 + 断点续传
@@ -139,16 +141,44 @@ final class SegmentRunner: NSObject, ObservableObject {
         guard jobs[id] == nil else { return }
         Task { @MainActor in
             do {
-                DiagnosticsLog.write("[1 播放列表] 开始解析 \(url.absoluteString)")
-                let playlist = try await PlaylistParser.load(url)
-                DiagnosticsLog.write("[2 结构] 段数=\(playlist.segments.count) 时长=\(String(format: "%.1f", playlist.totalDuration))s 容器=\(playlist.initSegment != nil ? "mp4" : "ts") 有MAP=\(playlist.initSegment != nil) 加密=\(playlist.key != nil) keyURI=\(playlist.key?.uri.absoluteString ?? "-") IV=\(playlist.key?.iv.map { DiagnosticsLog.hexPrefix($0, count: 16) } ?? "-")")
-                guard !playlist.isDRM else { throw PlaylistError.drmProtected }
-
-                // 每次新建独立目录（带时间戳），避免复用旧目录导致分片混入
+                // 先建目录 + 落盘占位状态：
+                // 播放列表解析是网络请求，期间被杀会导致任务彻底消失，这里先把"任务存在"记下来
                 let dirName = Self.directoryName(for: id) + "-" + Self.stamp()
                 Self.cleanupOldDirectories(for: id)
                 let dir = Self.workRoot.appendingPathComponent(dirName, isDirectory: true)
                 try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+                let placeholder = SegmentJobState(
+                    id: id,
+                    title: title,
+                    sourceURL: url.absoluteString,
+                    container: "ts",
+                    segmentURLs: [],
+                    durations: [],
+                    completed: [],
+                    mediaSequence: 0,
+                    totalDuration: 0,
+                    createdAt: Date(),
+                    updatedAt: Date(),
+                    initURL: nil,
+                    keyURI: nil,
+                    keyIV: nil,
+                    paused: false,
+                    failure: nil,
+                    discontinuities: nil,
+                    keyChanges: nil,
+                    excluded: nil,
+                    pendingParse: true
+                )
+                jobs[id] = placeholder
+                dirs[id] = dir
+                hashToID[Self.directoryName(for: id)] = id
+                persist(id)
+
+                DiagnosticsLog.write("[1 播放列表] 开始解析 \(url.absoluteString)")
+                let playlist = try await PlaylistParser.load(url)
+                DiagnosticsLog.write("[2 结构] 段数=\(playlist.segments.count) 时长=\(String(format: "%.1f", playlist.totalDuration))s 容器=\(playlist.initSegment != nil ? "mp4" : "ts") 有MAP=\(playlist.initSegment != nil) 加密=\(playlist.key != nil) keyURI=\(playlist.key?.uri.absoluteString ?? "-") IV=\(playlist.key?.iv.map { DiagnosticsLog.hexPrefix($0, count: 16) } ?? "-")")
+                guard !playlist.isDRM else { throw PlaylistError.drmProtected }
 
                 var state = SegmentJobState(
                     id: id,
@@ -169,7 +199,8 @@ final class SegmentRunner: NSObject, ObservableObject {
                     failure: nil,
                     discontinuities: playlist.discontinuities,
                     keyChanges: playlist.keyChanges,
-                    excluded: nil
+                    excluded: nil,
+                    pendingParse: false
                 )
                 state.updatedAt = Date()
                 jobs[id] = state
@@ -186,6 +217,12 @@ final class SegmentRunner: NSObject, ObservableObject {
                 pump()
             } catch {
                 DiagnosticsLog.write("[1 播放列表] 失败：\(error.localizedDescription)")
+                // 清掉本次占位，允许用户重试（否则 jobs[id] 非空会直接 return）
+                jobs.removeValue(forKey: id)
+                if let dir = dirs.removeValue(forKey: id) {
+                    try? FileManager.default.removeItem(at: dir)
+                }
+                hashToID.removeValue(forKey: Self.directoryName(for: id))
                 onFailure?(id, error.localizedDescription)
             }
         }
@@ -243,6 +280,16 @@ final class SegmentRunner: NSObject, ObservableObject {
             // 注意：不能因为"分片已下满"就跳过——那通常意味着收尾失败，仍需恢复出来重新收尾
 
             let sourceDir = stateURL.deletingLastPathComponent()
+
+            // 占位状态（播放列表还没解析完就被杀）：清掉占位目录，
+            // 由上层按"待下载"重新开始解析，避免出现 0/0 的空任务
+            if state.pendingParse == true {
+                jobs.removeValue(forKey: state.id)
+                dirs.removeValue(forKey: state.id)
+                try? FileManager.default.removeItem(at: sourceDir)
+                DiagnosticsLog.write("[下载] 清理未完成解析的占位任务 \(state.title)")
+                continue
+            }
 
             var resumed = state
             resumed.paused = true

@@ -780,6 +780,7 @@ struct EngineSettingsView: View {
     @State private var writeStss = (UserDefaults.standard.object(forKey: "mp4WriteStss") as? Bool) ?? true
     @State private var useDirectMuxer = (UserDefaults.standard.object(forKey: "mp4UseDirectMuxer") as? Bool) ?? true
     @State private var fastStart = (UserDefaults.standard.object(forKey: "mp4FastStart") as? Bool) ?? false
+    @State private var autoResume = (UserDefaults.standard.object(forKey: DownloadManager.autoResumeKey) as? Bool) ?? true
     @State private var keepSegments = (UserDefaults.standard.object(forKey: "mp4KeepSegments") as? Bool) ?? true
     @State private var completionSound = (UserDefaults.standard.object(forKey: CompletionFeedback.soundKey) as? Bool) ?? true
     @State private var completionNotice = (UserDefaults.standard.object(forKey: CompletionFeedback.noticeKey) as? Bool) ?? true
@@ -797,6 +798,7 @@ struct EngineSettingsView: View {
             Form {
                 Section("下载引擎") {
                     Toggle("分片引擎（可断点续传）", isOn: $segmentEnabled)
+                    Toggle("重启后自动继续未完成的下载", isOn: $autoResume)
                 }
                 Section {
                     Toggle("自动连播同系列下一集", isOn: $playPrefs.autoNext)
@@ -898,6 +900,7 @@ struct EngineSettingsView: View {
                         UserDefaults.standard.set(writeStss, forKey: "mp4WriteStss")
                         UserDefaults.standard.set(useDirectMuxer, forKey: "mp4UseDirectMuxer")
                         UserDefaults.standard.set(fastStart, forKey: "mp4FastStart")
+                        UserDefaults.standard.set(autoResume, forKey: DownloadManager.autoResumeKey)
                         UserDefaults.standard.set(keepSegments, forKey: "mp4KeepSegments")
                         UserDefaults.standard.set(completionSound, forKey: CompletionFeedback.soundKey)
                         UserDefaults.standard.set(completionNotice, forKey: CompletionFeedback.noticeKey)
