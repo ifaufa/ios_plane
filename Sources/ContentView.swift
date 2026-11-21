@@ -23,6 +23,8 @@ struct ContentView: View {
     @State private var restoreExpectation: String?
     @State private var selectionMode = false
     @State private var selected: Set<UUID> = []
+    @State private var renameTarget: VideoItem?
+    @State private var renameText = ""
     @State private var convertingID: UUID?
     @State private var conversionProgress: Double = 0
     @State private var shareItem: ShareItem?
@@ -77,6 +79,21 @@ struct ContentView: View {
                         }
                     }
                 }
+            }
+            .alert("重命名", isPresented: Binding(
+                get: { renameTarget != nil },
+                set: { if !$0 { renameTarget = nil } }
+            )) {
+                TextField("标题", text: $renameText)
+                Button("取消", role: .cancel) { renameTarget = nil }
+                Button("保存") {
+                    if let target = renameTarget {
+                        library.rename(target, to: renameText)
+                    }
+                    renameTarget = nil
+                }
+            } message: {
+                Text("保留「第N集」才能继续按系列分组与自动连播")
             }
             .navigationTitle("PlaneM3U8")
             .toolbar {
@@ -503,6 +520,12 @@ struct ContentView: View {
             }
         }
         .contextMenu {
+            Button {
+                renameText = item.title
+                renameTarget = item
+            } label: {
+                Label("重命名…", systemImage: "pencil")
+            }
             if !library.isMissing(item) {
                 Button {
                     openPlayer(item, fromBeginning: true)

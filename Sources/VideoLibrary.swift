@@ -369,6 +369,18 @@ final class VideoLibrary: ObservableObject {
         save()
     }
 
+    /// 重命名（只改台账标题，不动磁盘文件）
+    func rename(_ item: VideoItem, to newTitle: String) {
+        let trimmed = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let index = items.firstIndex(where: { $0.id == item.id }) else { return }
+        guard items[index].title != trimmed else { return }
+        let old = items[index].title
+        items[index].title = trimmed
+        save()
+        DiagnosticsLog.write("[视频库] 重命名「" + old + "」→「" + trimmed + "」")
+    }
+
     /// 记录播放进度
     func updateProgress(id: UUID, seconds: Double) {
         guard seconds.isFinite, let idx = items.firstIndex(where: { $0.id == id }) else { return }
