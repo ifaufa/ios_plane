@@ -29,54 +29,11 @@ enum TitleOrdering {
         var episode: Int?
     }
 
+    /// 统一解析：与「自动连播」「按系列分组」共用 EpisodeIndex 这一套规则，
+    /// 避免出现"连播认得出同一系列、排序/分组却认不出"的不一致
     static func parse(_ title: String) -> Parsed {
-        let original = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !original.isEmpty else { return Parsed(series: "", episode: nil) }
-
-        // 1) 第N集 / 第N话 / 第N期 / 第N部
-        if let match = firstMatch(#"第\s*(\d+)\s*[集话話期部]"#, in: original),
-           let episode = Int(match.number) {
-            return Parsed(series: strip(match.range, from: original), episode: episode)
-        }
-
-        // 2) EP12 / Ep12 / E12
-        if let match = firstMatch(#"(?i)\b(?:EP|E)\s*(\d+)"#, in: original),
-           let episode = Int(match.number) {
-            return Parsed(series: strip(match.range, from: original), episode: episode)
-        }
-
-        // 3) 末尾独立数字（排除 1080x608 / 2024 这类分辨率与年份）
-        let hasResolution = original.range(of: #"\d+\s*[x×]\s*\d+"#, options: .regularExpression) != nil
-        if !hasResolution,
-           let match = firstMatch(#"(\d+)\s*$"#, in: original),
-           let episode = Int(match.number), episode < 10000 {
-            return Parsed(series: strip(match.range, from: original), episode: episode)
-        }
-
-        return Parsed(series: original, episode: nil)
-    }
-
-    private struct Match {
-        var number: String
-        var range: Range<String.Index>
-    }
-
-    private static func firstMatch(_ pattern: String, in text: String) -> Match? {
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
-        let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
-        guard let result = regex.firstMatch(in: text, range: nsRange),
-              result.numberOfRanges > 1,
-              let numberRange = Range(result.range(at: 1), in: text),
-              let fullRange = Range(result.range(at: 0), in: text) else { return nil }
-        return Match(number: String(text[numberRange]), range: fullRange)
-    }
-
-    private static func strip(_ range: Range<String.Index>, from text: String) -> String {
-        var result = text
-        result.removeSubrange(range)
-        let separators = CharacterSet(charactersIn: " .-_·[]()（）【】")
-        let cleaned = result.trimmingCharacters(in: separators)
-        return cleaned.isEmpty ? text : cleaned
+        let parsed = EpisodeIndex.parse(title)
+        return Parsed(series: parsed.name, episode: parsed.episode)
     }
 }
 

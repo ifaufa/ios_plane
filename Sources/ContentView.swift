@@ -8,6 +8,8 @@ struct ContentView: View {
     @ObservedObject private var segmentRunner = SegmentRunner.shared
     @ObservedObject private var playback = PlaybackStore.shared
     @AppStorage(LibrarySortMode.storageKey) private var sortModeRaw = LibrarySortMode.timeDesc.rawValue
+    @AppStorage(LibraryGrouping.groupPrefKey) private var groupBySeries = true
+    @AppStorage(LibraryGrouping.collapsedKey) private var collapsedRaw = ""
     @State private var pendingLibraryAction: LibraryAction?
     @State private var pendingLargeConvert: VideoItem?
     @State private var toastText: String?
@@ -54,109 +56,24 @@ struct ContentView: View {
                 }
                 downloadsSection
                 Section("视频库 (\(library.items.count))") {
-                    ForEach(sortedItems) { item in
-                        HStack(spacing: 12) {
-                            if selectionMode {
-                                Image(systemName: selected.contains(item.id) ? "checkmark.circle.fill" : "circle")
-                                    .foregroundStyle(selected.contains(item.id) ? Color.accentColor : .secondary)
-                            }
-                            LibraryRow(item: item, isMissing: library.isMissing(item), localURL: library.localURL(for: item))
-                        }
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            if selectionMode {
-                                toggleSelection(item)
-                            } else if !library.isMissing(item) {
-                                openPlayer(item)
+                    if groupBySeries {
+                        ForEach(groupedItems) { group in
+                            if group.isSeries {
+                                groupHeaderRow(group)
+                                if !collapsedGroups.contains(group.key) {
+                                    ForEach(group.items) { item in
+                                        libraryRow(item)
+                                    }
+                                }
                             } else {
-                                showToast("文件已丢失（重装 App 会清空本地数据），需重新下载")
+                                ForEach(group.items) { item in
+                                    libraryRow(item)
+                                }
                             }
                         }
-                        .swipeActions {
-                            Button("删除", role: .destructive) {
-                                let target = item
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                                    pendingLibraryAction = .deleteAll(target)
-                                }
-                            }
-                            if library.hasSegments(item), !item.fileName.lowercased().hasSuffix(".m3u8") {
-                                Button("删MP4", role: .destructive) {
-                                    let target = item
-                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                                        pendingLibraryAction = .deleteMP4(target)
-                                    }
-                                }
-                                .tint(.blue)
-                            }
-                            if library.hasSegments(item) {
-                                Button("删分片", role: .destructive) {
-                                    let target = item
-                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                                        pendingLibraryAction = .deleteSegments(target)
-                                    }
-                                }
-                                .tint(.orange)
-                            }
-                        }
-                        .swipeActions(edge: .leading) {
-                            if item.fileName.lowercased().hasSuffix(".m3u8") {
-                                Button {
-                                    convert(item)
-                                } label: {
-                                    Label("转 MP4", systemImage: "arrow.triangle.2.circlepath")
-                                }
-                                .tint(.blue)
-                                Button {
-                                    exportTS(item)
-                                } label: {
-                                    Label("导出 TS", systemImage: "doc.badge.arrow.up")
-                                }
-                                .tint(.orange)
-                            } else if !library.isMissing(item) {
-                                Button {
-                                    shareItem = ShareItem(url: library.localURL(for: item))
-                                } label: {
-                                    Label("导出", systemImage: "square.and.arrow.up")
-                                }
-                                .tint(.green)
-                            }
-                        }
-                        .contextMenu {
-                            if !library.isMissing(item) {
-                                Button {
-                                    openPlayer(item, fromBeginning: true)
-                                } label: {
-                                    Label("从头播放", systemImage: "backward.end.fill")
-                                }
-                            }
-                            if library.hasSegments(item), !item.fileName.lowercased().hasSuffix(".m3u8") {
-                                Button {
-                                    let target = item
-                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                                        pendingLibraryAction = .deleteMP4(target)
-                                    }
-                                } label: {
-                                    Label("删除 MP4（保留分片）", systemImage: "film")
-                                }
-                            }
-                            if library.hasSegments(item) {
-                                Button(role: .destructive) {
-                                    let target = item
-                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                                        pendingLibraryAction = .deleteSegments(target)
-                                    }
-                                } label: {
-                                    Label("删除分片（保留 MP4）", systemImage: "scissors")
-                                }
-                            }
-                            Button(role: .destructive) {
-                                let target = item
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                                    pendingLibraryAction = .deleteAll(target)
-                                }
-                            } label: {
-                                Label("全部删除", systemImage: "trash")
-                            }
+                    } else {
+                        ForEach(sortedItems) { item in
+                            libraryRow(item)
                         }
                     }
                 }
@@ -200,6 +117,11 @@ struct ContentView: View {
                                     Text(mode.title)
                                 }
                             }
+                        }
+                        if groupBySeries {
+                            Divider()
+                            Button("全部展开") { setAllCollapsed(false) }
+                            Button("全部折叠") { setAllCollapsed(true) }
                         }
                     } label: {
                         Image(systemName: "arrow.up.arrow.down")
@@ -509,6 +431,195 @@ struct ContentView: View {
                 if toastText == text { toastText = nil }
             }
         }
+    }
+
+    @ViewBuilder
+    /// 单条视频行（分组与平铺共用）
+    private func libraryRow(_ item: VideoItem) -> some View {
+        HStack(spacing: 12) {
+            if selectionMode {
+                Image(systemName: selected.contains(item.id) ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(selected.contains(item.id) ? Color.accentColor : .secondary)
+            }
+            LibraryRow(item: item, isMissing: library.isMissing(item), localURL: library.localURL(for: item))
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if selectionMode {
+                toggleSelection(item)
+            } else if !library.isMissing(item) {
+                openPlayer(item)
+            } else {
+                showToast("文件已丢失（重装 App 会清空本地数据），需重新下载")
+            }
+        }
+        .swipeActions {
+            Button("删除", role: .destructive) {
+                let target = item
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    pendingLibraryAction = .deleteAll(target)
+                }
+            }
+            if library.hasSegments(item), !item.fileName.lowercased().hasSuffix(".m3u8") {
+                Button("删MP4", role: .destructive) {
+                    let target = item
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        pendingLibraryAction = .deleteMP4(target)
+                    }
+                }
+                .tint(.blue)
+            }
+            if library.hasSegments(item) {
+                Button("删分片", role: .destructive) {
+                    let target = item
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        pendingLibraryAction = .deleteSegments(target)
+                    }
+                }
+                .tint(.orange)
+            }
+        }
+        .swipeActions(edge: .leading) {
+            if item.fileName.lowercased().hasSuffix(".m3u8") {
+                Button {
+                    convert(item)
+                } label: {
+                    Label("转 MP4", systemImage: "arrow.triangle.2.circlepath")
+                }
+                .tint(.blue)
+                Button {
+                    exportTS(item)
+                } label: {
+                    Label("导出 TS", systemImage: "doc.badge.arrow.up")
+                }
+                .tint(.orange)
+            } else if !library.isMissing(item) {
+                Button {
+                    shareItem = ShareItem(url: library.localURL(for: item))
+                } label: {
+                    Label("导出", systemImage: "square.and.arrow.up")
+                }
+                .tint(.green)
+            }
+        }
+        .contextMenu {
+            if !library.isMissing(item) {
+                Button {
+                    openPlayer(item, fromBeginning: true)
+                } label: {
+                    Label("从头播放", systemImage: "backward.end.fill")
+                }
+            }
+            if library.hasSegments(item), !item.fileName.lowercased().hasSuffix(".m3u8") {
+                Button {
+                    let target = item
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        pendingLibraryAction = .deleteMP4(target)
+                    }
+                } label: {
+                    Label("删除 MP4（保留分片）", systemImage: "film")
+                }
+            }
+            if library.hasSegments(item) {
+                Button(role: .destructive) {
+                    let target = item
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        pendingLibraryAction = .deleteSegments(target)
+                    }
+                } label: {
+                    Label("删除分片（保留 MP4）", systemImage: "scissors")
+                }
+            }
+            Button(role: .destructive) {
+                let target = item
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    pendingLibraryAction = .deleteAll(target)
+                }
+            } label: {
+                Label("全部删除", systemImage: "trash")
+            }
+        }
+    }
+
+    // MARK: - 按系列分组
+
+    private var sortMode: LibrarySortMode {
+        LibrarySortMode(rawValue: sortModeRaw) ?? .timeDesc
+    }
+
+    private var groupedItems: [VideoGroup] {
+        LibraryGrouping.make(from: library.items, mode: sortMode)
+    }
+
+    private var collapsedGroups: Set<String> {
+        Set(collapsedRaw.split(separator: "\n").map(String.init))
+    }
+
+    private func toggleCollapsed(_ key: String) {
+        var set = collapsedGroups
+        if set.contains(key) { set.remove(key) } else { set.insert(key) }
+        collapsedRaw = set.sorted().joined(separator: "\n")
+    }
+
+    private func setAllCollapsed(_ collapsed: Bool) {
+        if collapsed {
+            collapsedRaw = groupedItems.filter { $0.isSeries }.map { $0.key }.sorted().joined(separator: "\n")
+        } else {
+            collapsedRaw = ""
+        }
+    }
+
+    private func isAllSelected(_ group: VideoGroup) -> Bool {
+        !group.items.isEmpty && group.items.allSatisfy { selected.contains($0.id) }
+    }
+
+    @ViewBuilder
+    private func groupHeaderRow(_ group: VideoGroup) -> some View {
+        Button {
+            if selectionMode {
+                if isAllSelected(group) {
+                    group.items.forEach { selected.remove($0.id) }
+                } else {
+                    group.items.forEach { selected.insert($0.id) }
+                }
+            } else {
+                withAnimation(.easeInOut(duration: 0.18)) { toggleCollapsed(group.key) }
+            }
+        } label: {
+            HStack(spacing: 8) {
+                if selectionMode {
+                    Image(systemName: isAllSelected(group) ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle(isAllSelected(group) ? Color.accentColor : .secondary)
+                        .font(.caption)
+                } else {
+                    Image(systemName: collapsedGroups.contains(group.key) ? "chevron.right" : "chevron.down")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(.secondary)
+                }
+                Text(group.title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                Text("\(group.count) 集")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let range = group.episodeRange, range.low != range.high {
+                    Text("第\(range.low)–\(range.high)集")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+                let missing = group.items.filter { library.isMissing($0) }.count
+                if missing > 0 {
+                    Label("\(missing) 缺失", systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .labelStyle(.titleAndIcon)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private var sortedItems: [VideoItem] {
@@ -834,6 +945,7 @@ struct EngineSettingsView: View {
     @State private var completionSound = (UserDefaults.standard.object(forKey: CompletionFeedback.soundKey) as? Bool) ?? true
     @State private var completionNotice = (UserDefaults.standard.object(forKey: CompletionFeedback.noticeKey) as? Bool) ?? true
     @StateObject private var playPrefs = PlaybackPrefs.shared
+    @AppStorage(LibraryGrouping.groupPrefKey) private var groupBySeries = true
 
     private func summaryText(_ timing: PlaybackPrefs.SeriesTiming) -> String {
         let intro = timing.introLength > 0 ? "片头 " + PlaybackStore.timeText(timing.introLength) : "无片头"
@@ -872,6 +984,13 @@ struct EngineSettingsView: View {
                     Text("连播与片头片尾")
                 } footer: {
                     Text("连播需要标题里含集数（如「第16集」）。片头/片尾都以「时长」为准：片头时长决定从哪开始播；片尾时长决定「剩余多长时」开始跳过（因此正片长短变化不影响）。无片尾保护：本集总时长比参考总长短出一个片尾及以上时，判定这集没有片尾，不自动跳。")
+                }
+                Section {
+                    Toggle("按系列分组（可折叠）", isOn: $groupBySeries)
+                } header: {
+                    Text("视频库")
+                } footer: {
+                    Text("开启后，同一系列的集数会折叠成一组，单条视频仍平铺显示；折叠状态会被记住。与连播共用同一套标题解析（第N集 / EP16 / S01E16 等）。")
                 }
                 if segmentEnabled {
                     Section {
