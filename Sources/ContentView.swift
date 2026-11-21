@@ -17,6 +17,7 @@ struct ContentView: View {
     @State private var showHeaders = false
     @State private var showImporter = false
     @State private var showOrphanSheet = false
+    @State private var showQueueSheet = false
     @State private var restoreExpectation: String?
     @State private var selectionMode = false
     @State private var selected: Set<UUID> = []
@@ -304,6 +305,9 @@ struct ContentView: View {
             .sheet(isPresented: $showOrphanSheet) {
                 OrphanCleanupSheet(library: library)
             }
+            .sheet(isPresented: $showQueueSheet) {
+                QueueOverviewSheet()
+            }
             .fileImporter(isPresented: $showImporter, allowedContentTypes: [.data]) { result in
                 switch result {
                 case .success(let url):
@@ -526,11 +530,48 @@ struct ContentView: View {
                         }
                                     }
                                 }
+                                .contextMenu {
+                                    Button {
+                                        downloads.moveTaskToTop(task.id)
+                                    } label: {
+                                        Label("置顶", systemImage: "arrow.up.to.line")
+                                    }
+                                    .disabled(!downloads.canMoveUp(task.id))
+                                    Button {
+                                        downloads.moveTaskUp(task.id)
+                                    } label: {
+                                        Label("上移", systemImage: "arrow.up")
+                                    }
+                                    .disabled(!downloads.canMoveUp(task.id))
+                                    Button {
+                                        downloads.moveTaskDown(task.id)
+                                    } label: {
+                                        Label("下移", systemImage: "arrow.down")
+                                    }
+                                    .disabled(!downloads.canMoveDown(task.id))
+                                    Divider()
+                                    Button(role: .destructive) {
+                                        let target = task
+                                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                                            pendingLibraryAction = .deleteDownload(target)
+                                        }
+                                    } label: {
+                                        Label("删除任务", systemImage: "trash")
+                                    }
+                                }
                         }
                     } header: {
-                        Text("下载任务 (\(downloads.activeCount)/\(downloads.maxConcurrent))")
+                        HStack {
+                            Text("下载任务 (\(downloads.activeCount)/\(downloads.maxConcurrent))")
+                            Spacer()
+                            Button("查看全部") { showQueueSheet = true }
+                                .font(.caption)
+                                .textCase(nil)
+                                .buttonStyle(.borderless)
+                        }
                     } footer: {
-                        Text("左滑任务可删除").font(.caption2)
+                        Text("长按任务可置顶/上移/下移（仅影响排队中的任务）；左滑可删除；点「查看全部」可拖动排序")
+                            .font(.caption2)
                     }
                 }
     }
