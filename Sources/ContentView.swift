@@ -10,6 +10,7 @@ struct ContentView: View {
     @AppStorage(LibrarySortMode.storageKey) private var sortModeRaw = LibrarySortMode.timeDesc.rawValue
     @AppStorage(LibraryGrouping.groupPrefKey) private var groupBySeries = true
     @AppStorage(LibraryGrouping.collapsedKey) private var collapsedRaw = ""
+    @AppStorage(LibraryGrouping.ungroupedExpandedKey) private var ungroupedExpanded = false
     @State private var pendingLibraryAction: LibraryAction?
     @State private var pendingLargeConvert: VideoItem?
     @State private var toastText: String?
@@ -62,7 +63,7 @@ struct ContentView: View {
                         ForEach(groupedItems) { group in
                             if group.isSeries {
                                 groupHeaderRow(group)
-                                if !collapsedGroups.contains(group.key) {
+                                if !isCollapsed(group) {
                                     ForEach(group.items) { item in
                                         libraryRow(item)
                                     }
@@ -578,15 +579,27 @@ struct ContentView: View {
         Set(collapsedRaw.split(separator: "\n").map(String.init))
     }
 
-    private func toggleCollapsed(_ key: String) {
+    /// 是否折叠（「无系列」组默认折叠，单独用开关记录）
+    private func isCollapsed(_ group: VideoGroup) -> Bool {
+        if group.isUncategorized { return !ungroupedExpanded }
+        return collapsedGroups.contains(group.key)
+    }
+
+    private func toggleCollapsed(_ group: VideoGroup) {
+        if group.isUncategorized {
+            ungroupedExpanded.toggle()
+            return
+        }
         var set = collapsedGroups
-        if set.contains(key) { set.remove(key) } else { set.insert(key) }
+        if set.contains(group.key) { set.remove(group.key) } else { set.insert(group.key) }
         collapsedRaw = set.sorted().joined(separator: "\n")
     }
 
     private func setAllCollapsed(_ collapsed: Bool) {
+        ungroupedExpanded = !collapsed
         if collapsed {
-            collapsedRaw = groupedItems.filter { $0.isSeries }.map { $0.key }.sorted().joined(separator: "\n")
+            collapsedRaw = groupedItems.filter { $0.isSeries && !$0.isUncategorized }
+                .map { $0.key }.sorted().joined(separator: "\n")
         } else {
             collapsedRaw = ""
         }
@@ -598,6 +611,7 @@ struct ContentView: View {
 
     /// 组头统计文案：`6 集 · 第1–7集（缺 6）`
     private func groupStats(_ group: VideoGroup) -> String {
+        if group.isUncategorized { return "\(group.count) 个" }
         var text = "\(group.count) 集"
         if let range = group.episodeRange, range.low != range.high {
             text += " · 第\(range.low)–\(range.high)集"
@@ -637,7 +651,7 @@ struct ContentView: View {
                     group.items.forEach { selected.insert($0.id) }
                 }
             } else {
-                withAnimation(.easeInOut(duration: 0.18)) { toggleCollapsed(group.key) }
+                withAnimation(.easeInOut(duration: 0.18)) { toggleCollapsed(group) }
             }
         } label: {
             HStack(spacing: 8) {
@@ -646,7 +660,7 @@ struct ContentView: View {
                         .foregroundStyle(isAllSelected(group) ? Color.accentColor : .secondary)
                         .font(.caption)
                 } else {
-                    Image(systemName: collapsedGroups.contains(group.key) ? "chevron.right" : "chevron.down")
+                    Image(systemName: isCollapsed(group) ? "chevron.right" : "chevron.down")
                         .font(.caption2.weight(.bold))
                         .foregroundStyle(.secondary)
                 }
@@ -666,7 +680,7 @@ struct ContentView: View {
                 }
                 Spacer(minLength: 0)
                 // 仅在折叠时提示：展开后每行都有红字，无需重复
-                if collapsedGroups.contains(group.key) {
+                if isCollapsed(group) {
                     let unhealthy = group.items.filter { library.health($0) != .ok }.count
                     if unhealthy > 0 {
                         Label("\(unhealthy) 缺失", systemImage: "exclamationmark.triangle.fill")
