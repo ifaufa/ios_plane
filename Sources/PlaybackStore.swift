@@ -36,6 +36,16 @@ final class PlaybackStore: ObservableObject {
     @Published private(set) var seriesTiming: PlaybackPrefs.SeriesTiming?
     let countdownTotal = 7
 
+    // MARK: - A-B 循环
+
+    @Published private(set) var loopStart: Double?
+    @Published private(set) var loopEnd: Double?
+    @Published private(set) var isLooping = false
+    @Published var loopNotice: String?
+
+    private var loopObserver: Any?
+    private var isLoopSeeking = false
+
     private var endObserver: NSObjectProtocol?
     private var countdownTimer: Timer?
     private var pendingAutoNext = false
@@ -146,6 +156,10 @@ final class PlaybackStore: ObservableObject {
         pauseRecoveries = 0
         cancelCountdown()
         resetEpisodeSkipState(fromBeginning: fromBeginning)
+        // 循环区间不跨集
+        stopLooping()
+        loopStart = nil
+        loopEnd = nil
 
         configureAudioSession()
 
@@ -216,6 +230,11 @@ final class PlaybackStore: ObservableObject {
 
     func close(notify: Bool = true, keepFullscreen: Bool = false) {
         cancelCountdown()
+        removeLoopObserver()
+        isLooping = false
+        loopStart = nil
+        loopEnd = nil
+        loopNotice = nil
         currentVideo = nil
         seriesTiming = nil
         stopHealthTimer()
@@ -364,6 +383,7 @@ final class PlaybackStore: ObservableObject {
                     guard let self, self.isActive else { return }
                     guard let ended = note.object as? AVPlayerItem,
                           ended === self.player.currentItem else { return }
+                    guard !self.isLooping else { return }
                     self.beginCountdown(reason: "播放结束", ignoreOutroSuppressed: true)
                 }
             }
@@ -404,6 +424,8 @@ final class PlaybackStore: ObservableObject {
 
     /// 片尾检测：按「剩余时长 ≤ 片尾时长」判定（片尾贴着结尾，能适配正片长短不一）
     private func checkOutro(at seconds: Double) {
+        // 循环播放期间暂停片尾跳过与连播，结束循环后自动恢复
+        guard !isLooping else { return }
         guard PlaybackPrefs.shared.skipOutro, !outroSuppressed, !outroTriggered else { return }
         guard Date() >= outroCooldownUntil else { return }
         guard countdownNext == nil, expectsPlaying, !scrubbing else { return }
@@ -540,6 +562,175 @@ final class PlaybackStore: ObservableObject {
         PlaybackPrefs.shared.setOutroLength(outroLength, forTitle: title, refDuration: duration)
         seriesTiming = PlaybackPrefs.shared.timing(forTitle: title)
         DiagnosticsLog.write("[播放] 标记片尾时长 " + Self.timeText(outroLength) + "（参考总长 " + Self.timeText(duration) + "）")
+    }
+
+    // MARK: - A-B 循环
+
+    private var currentDuration: Double {
+        let value = player.currentItem?.duration.seconds ?? 0
+        return value.isFinite && value > 0 ? value : 0
+    }
+
+    private func notifyLoop(_ text: String) {
+        loopNotice = text
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            if self.loopNotice == text { self.loopNotice = nil }
+        }
+    }
+
+    /// 打点：第 1 次设 A；第 2 次设 B；A/B 都设好后再次点击 = 重新设 A（清空 B）
+    func markLoopPoint() {
+        let position = player.currentTime().seconds
+        guard position.isFinite, position >= 0 else { return }
+        let total = currentDuration
+
+        if loopStart == nil || loopEnd != nil {
+            if total > 1, total - position < 1 {
+                notifyLoop("太靠结尾，请往前一点再设 A")
+                return
+            }
+            stopLooping()
+            loopStart = position
+            loopEnd = nil
+            DiagnosticsLog.write("[播放] 循环起点 A=" + Self.timeText(position))
+        } else if let start = loopStart {
+            guard position - start >= 1 else {
+                notifyLoop("区间不足 1 秒，请往后一点再设 B")
+                return
+            }
+            loopEnd = position
+            DiagnosticsLog.write("[播放] 循环终点 B=" + Self.timeText(position)
+                                 + " 区间=" + String(format: "%.1f", position - start) + "s")
+        }
+    }
+
+    /// 清空 A/B 并结束循环
+    func clearLoopPoints() {
+        stopLooping()
+        loopStart = nil
+        loopEnd = nil
+        notifyLoop("已清空循环区间")
+        DiagnosticsLog.write("[播放] 已清空循环区间")
+    }
+
+    func setLoopStartToCurrent() {
+        let position = player.currentTime().seconds
+        guard position.isFinite, position >= 0 else { return }
+        let total = currentDuration
+        if total > 1, total - position < 1 {
+            notifyLoop("太靠结尾，无法设为起点")
+            return
+        }
+        var value = position
+        if let end = loopEnd { value = min(value, end - 1) }
+        loopStart = max(0, value)
+        rebuildLoopObserverIfNeeded()
+    }
+
+    func setLoopEndToCurrent() {
+        guard let start = loopStart else {
+            notifyLoop("请先设置起点 A")
+            return
+        }
+        let position = player.currentTime().seconds
+        guard position.isFinite, position - start >= 1 else {
+            notifyLoop("终点需比起点晚 1 秒以上")
+            return
+        }
+        var value = position
+        let total = currentDuration
+        if total > 0 { value = min(value, total - 0.05) }
+        loopEnd = value
+        rebuildLoopObserverIfNeeded()
+    }
+
+    func adjustLoopStart(by delta: Double) {
+        guard let current = loopStart else { return }
+        var value = max(0, current + delta)
+        if let end = loopEnd { value = min(value, end - 1) }
+        let total = currentDuration
+        if total > 1 { value = min(value, total - 1) }
+        loopStart = value
+        rebuildLoopObserverIfNeeded()
+    }
+
+    func adjustLoopEnd(by delta: Double) {
+        guard let current = loopEnd else { return }
+        var value = current + delta
+        if let start = loopStart { value = max(value, start + 1) }
+        let total = currentDuration
+        if total > 0 { value = min(value, total - 0.05) }
+        loopEnd = max(0, value)
+        rebuildLoopObserverIfNeeded()
+    }
+
+    /// 开启 / 结束循环
+    func toggleLooping() {
+        guard let start = loopStart, let end = loopEnd, end - start >= 1 else {
+            notifyLoop("请先设置起点 A 与终点 B")
+            return
+        }
+        if isLooping {
+            stopLooping()
+            return
+        }
+        isLooping = true
+        DiagnosticsLog.write("[播放] 开始循环 " + Self.timeText(start) + " ↔ " + Self.timeText(end)
+                             + "（循环期间暂停片尾跳过与连播）")
+        player.seek(to: CMTime(seconds: start, preferredTimescale: 600),
+                    toleranceBefore: .zero, toleranceAfter: .zero)
+        attachLoopObserver()
+    }
+
+    func stopLooping() {
+        guard isLooping || loopObserver != nil else { return }
+        isLooping = false
+        removeLoopObserver()
+        DiagnosticsLog.write("[播放] 循环已结束")
+    }
+
+    /// 用户拖动到循环区间之外 → 结束循环（保留 A/B）
+    func handleSeek(to seconds: Double) {
+        guard isLooping, let start = loopStart, let end = loopEnd else { return }
+        guard seconds.isFinite else { return }
+        if seconds < start - 0.5 || seconds > end + 0.5 {
+            stopLooping()
+            notifyLoop("已离开循环区间，循环结束")
+        }
+    }
+
+    private func rebuildLoopObserverIfNeeded() {
+        guard isLooping else { return }
+        attachLoopObserver()
+    }
+
+    private func attachLoopObserver() {
+        removeLoopObserver()
+        guard isLooping, let end = loopEnd else { return }
+        let time = CMTime(seconds: end, preferredTimescale: 600)
+        loopObserver = player.addBoundaryTimeObserver(forTimes: [NSValue(time: time)], queue: .main) { [weak self] in
+            guard let self else { return }
+            Task { @MainActor in
+                guard self.isLooping, !self.isLoopSeeking, let start = self.loopStart else { return }
+                self.isLoopSeeking = true
+                self.player.seek(to: CMTime(seconds: start, preferredTimescale: 600),
+                                 toleranceBefore: .zero, toleranceAfter: .zero) { _ in
+                    Task { @MainActor in
+                        self.isLoopSeeking = false
+                        if self.expectsPlaying { self.player.play() }
+                    }
+                }
+            }
+        }
+    }
+
+    private func removeLoopObserver() {
+        if let observer = loopObserver {
+            player.removeTimeObserver(observer)
+            loopObserver = nil
+        }
+        isLoopSeeking = false
     }
 
 

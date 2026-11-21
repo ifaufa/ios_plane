@@ -63,6 +63,7 @@ final class VideoLibrary: ObservableObject {
     }
 
     func reload() {
+        invalidateHealthCache()
         guard FileManager.default.fileExists(atPath: Self.storeURL.path) else {
             items = []
             errorMessage = nil
@@ -86,6 +87,7 @@ final class VideoLibrary: ObservableObject {
     }
 
     private func save() {
+        invalidateHealthCache()
         do {
             if FileManager.default.fileExists(atPath: Self.storeURL.path) {
                 // 把当前磁盘文件另存一份，作为下次损坏时的兜底
@@ -119,6 +121,63 @@ final class VideoLibrary: ObservableObject {
 
     func isMissing(_ item: VideoItem) -> Bool {
         !FileManager.default.fileExists(atPath: localURL(for: item).path)
+    }
+
+    // MARK: - 健康检查（仅用于组头角标；不参与播放拦截）
+
+    enum Health: Equatable {
+        case ok
+        case missing          // 主文件 / 播放列表不存在
+        case emptyFile        // 存在但为空（< 1KB / 无分片）
+        case brokenSegments   // 播放列表在，但最后一段分片缺失或为空
+    }
+
+    private var healthCache: [UUID: (Date, Health)] = [:]
+    private let healthCacheTTL: TimeInterval = 5
+
+    func invalidateHealthCache() {
+        healthCache.removeAll()
+    }
+
+    func health(_ item: VideoItem) -> Health {
+        if let cached = healthCache[item.id],
+           Date().timeIntervalSince(cached.0) < healthCacheTTL {
+            return cached.1
+        }
+        let value = computeHealth(item)
+        healthCache[item.id] = (Date(), value)
+        return value
+    }
+
+    private func computeHealth(_ item: VideoItem) -> Health {
+        let fm = FileManager.default
+        let url = localURL(for: item)
+
+        if item.fileName.lowercased().hasSuffix(".m3u8") {
+            guard let data = try? Data(contentsOf: url) else {
+                return fm.fileExists(atPath: url.path) ? .emptyFile : .missing
+            }
+            guard !data.isEmpty else { return .emptyFile }
+            let text = String(decoding: data, as: UTF8.self)
+            var segments: [String] = []
+            for line in text.split(separator: "\n") {
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                if trimmed.isEmpty || trimmed.hasPrefix("#") { continue }
+                segments.append(trimmed)
+            }
+            guard let last = segments.last else { return .emptyFile }
+            let name = last.removingPercentEncoding ?? last
+            let segURL = url.deletingLastPathComponent().appendingPathComponent(name)
+            guard let attrs = try? fm.attributesOfItem(atPath: segURL.path) else {
+                return .brokenSegments
+            }
+            let size = (attrs[.size] as? NSNumber)?.int64Value ?? 0
+            return size > 0 ? .ok : .brokenSegments
+        }
+
+        guard let attrs = try? fm.attributesOfItem(atPath: url.path) else { return .missing }
+        let size = (attrs[.size] as? NSNumber)?.int64Value ?? 0
+        return size > 1024 ? .ok : .emptyFile
     }
 
     var missingItems: [VideoItem] { items.filter { isMissing($0) } }

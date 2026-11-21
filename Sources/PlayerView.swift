@@ -18,6 +18,8 @@ struct PlayerView: View {
     @State private var scrubTime: Double = 0
     @State private var lastSavedTime: Double = 0
     @State private var initialBrightness: CGFloat = -1
+    @State private var showLoopPanel = false
+    @State private var lastLongPressAt = Date.distantPast
 
     var body: some View {
         ZStack {
@@ -38,8 +40,24 @@ struct PlayerView: View {
             if let next = store.countdownNext {
                 countdownCard(next: next)
             }
+
+            if let notice = store.loopNotice {
+                Text(notice)
+                    .font(.caption)
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(.black.opacity(0.75), in: Capsule())
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .padding(.top, 72)
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+            }
         }
         .statusBarHidden(immersive)
+        .sheet(isPresented: $showLoopPanel) {
+            LoopRangeSheet(store: store, duration: duration)
+        }
         .persistentSystemOverlays(immersive ? .hidden : .automatic)
         .onAppear { startPlayback() }
         .onDisappear { stopPlayback() }
@@ -118,6 +136,8 @@ struct PlayerView: View {
                     .frame(width: 30, height: 30)
 
                 Spacer()
+
+                loopControls
             }
 
             markingBar
@@ -140,6 +160,7 @@ struct PlayerView: View {
                                     toleranceAfter: .zero)
                         isScrubbing = false
                         store.endScrub()
+                        store.handleSeek(to: scrubTime)
                         gestures.isPlaying = store.isPlaying
                     }
                     gestures.pokeChrome()
@@ -159,6 +180,71 @@ struct PlayerView: View {
     }
 
     // MARK: - 片头片尾打点
+
+    // MARK: - A-B 循环控制条
+
+    private var loopMarkTitle: String {
+        if let start = store.loopStart, store.loopEnd != nil {
+            return "重设"
+        } else if store.loopStart != nil {
+            return "设 B"
+        }
+        return "设 A"
+    }
+
+    private var loopRangeTitle: String {
+        guard let start = store.loopStart else { return "" }
+        if let end = store.loopEnd {
+            return "A " + Self.formatTime(start) + " ↔ B " + Self.formatTime(end)
+        }
+        return "A " + Self.formatTime(start)
+    }
+
+    private var loopControls: some View {
+        HStack(spacing: 6) {
+            Text(loopMarkTitle)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 5)
+                .background(.white.opacity(0.16), in: Capsule())
+                .contentShape(Capsule())
+                .onTapGesture {
+                    if Date().timeIntervalSince(lastLongPressAt) < 0.6 { return }
+                    store.markLoopPoint()
+                }
+                .onLongPressGesture(minimumDuration: 0.6) {
+                    lastLongPressAt = Date()
+                    store.clearLoopPoints()
+                    store.stopLooping()
+                }
+
+            if store.loopStart != nil {
+                Button {
+                    showLoopPanel = true
+                } label: {
+                    Text(loopRangeTitle)
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(store.isLooping ? Color.cyan : .white.opacity(0.9))
+                        .underline()
+                }
+            }
+
+            Button {
+                store.toggleLooping()
+            } label: {
+                Text(store.isLooping ? "循环中" : "循环")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(store.isLooping ? Color.cyan.opacity(0.45) : Color.white.opacity(0.16),
+                                in: Capsule())
+            }
+            .disabled(store.loopStart == nil || store.loopEnd == nil)
+            .opacity((store.loopStart == nil || store.loopEnd == nil) ? 0.45 : 1)
+        }
+    }
 
     private var markingBar: some View {
         HStack(spacing: 10) {
@@ -306,4 +392,95 @@ struct AirPlayRouteButton: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: AVRoutePickerView, context: Context) {}
+}
+
+// MARK: - 循环区间微调面板
+
+private struct LoopRangeSheet: View {
+    @ObservedObject var store: PlaybackStore
+    let duration: Double
+    @Environment(\.dismiss) private var dismiss
+
+    private var rangeText: String {
+        guard let start = store.loopStart, let end = store.loopEnd else { return "未设置" }
+        return String(format: "%.1f 秒", max(0, end - start))
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    adjustRow(title: "起点 A", value: store.loopStart) { store.adjustLoopStart(by: $0) }
+                    Button("用当前时间设为 A") { store.setLoopStartToCurrent() }
+                } header: {
+                    Text("起点 A")
+                } footer: {
+                    Text("A 必须早于 B 至少 1 秒；调整后立即生效。")
+                }
+
+                Section {
+                    adjustRow(title: "终点 B", value: store.loopEnd) { store.adjustLoopEnd(by: $0) }
+                    Button("用当前时间设为 B") { store.setLoopEndToCurrent() }
+                        .disabled(store.loopStart == nil)
+                } header: {
+                    Text("终点 B")
+                }
+
+                Section {
+                    HStack {
+                        Text("区间长度")
+                        Spacer()
+                        Text(rangeText)
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
+                    HStack {
+                        Text("循环状态")
+                        Spacer()
+                        Text(store.isLooping ? "循环中" : "未开启")
+                            .foregroundStyle(store.isLooping ? Color.accentColor : .secondary)
+                    }
+                }
+
+                Section {
+                    Button("清空区间", role: .destructive) {
+                        store.clearLoopPoints()
+                        dismiss()
+                    }
+                }
+            }
+            .navigationTitle("循环区间")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("完成") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium])
+    }
+
+    @ViewBuilder
+    private func adjustRow(title: String,
+                           value: Double?,
+                           onAdjust: @escaping (Double) -> Void) -> some View {
+        VStack(spacing: 10) {
+            HStack {
+                Text(title)
+                Spacer()
+                Text(value.map { PlaybackStore.timeText($0) } ?? "未设置")
+                    .font(.body.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            HStack(spacing: 8) {
+                ForEach([(-5.0, "-5s"), (-1.0, "-1s"), (1.0, "+1s"), (5.0, "+5s")], id: \.0) { item in
+                    Button(item.1) { onAdjust(item.0) }
+                        .buttonStyle(.bordered)
+                        .frame(minWidth: 54, minHeight: 40)
+                        .disabled(value == nil)
+                }
+            }
+        }
+        .padding(.vertical, 4)
+    }
 }

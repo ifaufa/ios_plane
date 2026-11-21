@@ -573,6 +573,37 @@ struct ContentView: View {
         !group.items.isEmpty && group.items.allSatisfy { selected.contains($0.id) }
     }
 
+    /// 组头统计文案：`6 集 · 第1–7集（缺 6）`
+    private func groupStats(_ group: VideoGroup) -> String {
+        var text = "\(group.count) 集"
+        if let range = group.episodeRange, range.low != range.high {
+            text += " · 第\(range.low)–\(range.high)集"
+        }
+        if let gaps = missingEpisodeText(group) {
+            text += gaps
+        }
+        return text
+    }
+
+    /// 集数断档：≤3 个列出具体集数，>3 个显示「缺 N 集」
+    private func missingEpisodeText(_ group: VideoGroup) -> String? {
+        let episodes = group.items.compactMap { EpisodeIndex.parse($0.title).episode }
+        guard let low = episodes.min(), let high = episodes.max(), high > low else { return nil }
+        let existing = Set(episodes)
+        let gaps = (low...high).filter { !existing.contains($0) }
+        guard !gaps.isEmpty else { return nil }
+        if gaps.count <= 3 {
+            return "（缺 " + gaps.map(String.init).joined(separator: "、") + "）"
+        }
+        return "（缺 \(gaps.count) 集）"
+    }
+
+    /// 同一集数出现多次的次数（重复下载）
+    private func duplicateEpisodeCount(_ group: VideoGroup) -> Int {
+        let episodes = group.items.compactMap { EpisodeIndex.parse($0.title).episode }
+        return episodes.count - Set(episodes).count
+    }
+
     @ViewBuilder
     private func groupHeaderRow(_ group: VideoGroup) -> some View {
         Button {
@@ -600,21 +631,26 @@ struct ContentView: View {
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
-                Text("\(group.count) 集")
+                Text(groupStats(group))
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                if let range = group.episodeRange, range.low != range.high {
-                    Text("第\(range.low)–\(range.high)集")
+                    .lineLimit(1)
+                let duplicates = duplicateEpisodeCount(group)
+                if duplicates > 0 {
+                    Text("重复 \(duplicates)")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 0)
-                let missing = group.items.filter { library.isMissing($0) }.count
-                if missing > 0 {
-                    Label("\(missing) 缺失", systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption2)
-                        .foregroundStyle(.orange)
-                        .labelStyle(.titleAndIcon)
+                // 仅在折叠时提示：展开后每行都有红字，无需重复
+                if collapsedGroups.contains(group.key) {
+                    let unhealthy = group.items.filter { library.health($0) != .ok }.count
+                    if unhealthy > 0 {
+                        Label("\(unhealthy) 缺失", systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                            .labelStyle(.titleAndIcon)
+                    }
                 }
             }
             .contentShape(Rectangle())
