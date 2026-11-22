@@ -386,14 +386,7 @@ struct PlayerView: View {
             return
         }
         Task { @MainActor in
-            var displaySize = CGSize.zero
-            if let tracks = try? await item.asset.loadTracks(withMediaType: .video),
-               let track = tracks.first,
-               let natural = try? await track.load(.naturalSize),
-               let transform = try? await track.load(.preferredTransform) {
-                let rotated = natural.applying(transform)
-                displaySize = CGSize(width: abs(rotated.width), height: abs(rotated.height))
-            }
+            let displaySize = await Self.videoDisplaySize(item: item)
             guard !orientationUnlocked else { return }
             guard displaySize.width > 1, displaySize.height > 1 else {
                 DiagnosticsLog.write("[播放] 方向：尺寸未知，按横屏处理")
@@ -410,10 +403,24 @@ struct PlayerView: View {
             } else {
                 mask = .all; label = "近似方形 → 跟随设备"
             }
-            DiagnosticsLog.write("[播放] 方向：" + label
-                                 + "（" + String(Int(displaySize.width)) + "x" + String(Int(displaySize.height)) + "）")
+            let width = Int(displaySize.width)
+            let height = Int(displaySize.height)
+            let detail = "[播放] 方向：" + label + "（" + String(width) + "x" + String(height) + "）"
+            DiagnosticsLog.write(detail)
             OrientationLock.apply(mask)
         }
+    }
+
+    /// 视频的显示尺寸（已叠加旋转信息；竖拍视频常见 1920x1080 + 90° 变换）
+    private static func videoDisplaySize(item: AVPlayerItem) async -> CGSize {
+        guard let tracks = try? await item.asset.loadTracks(withMediaType: .video),
+              let track = tracks.first else { return .zero }
+        guard let natural = try? await track.load(.naturalSize) else { return .zero }
+        guard let transform = try? await track.load(.preferredTransform) else {
+            return natural
+        }
+        let rotated = natural.applying(transform)
+        return CGSize(width: abs(rotated.width), height: abs(rotated.height))
     }
 
     private func toggleOrientationUnlock() {
