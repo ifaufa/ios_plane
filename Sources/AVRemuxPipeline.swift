@@ -164,6 +164,24 @@ enum AVRemuxPipeline {
         var frameStepLocked = false
         var frameStepStable = 0
         var deltaSamples: [Int64] = []
+
+        // 先用「EXTINF 分片时长 ÷ 帧数」探测真实帧率并锁定：
+        // 有些源把视频时间戳整体压缩（例如 25 倍），PES 与 SPS 会"自洽地一起错"，
+        // 只有分片时长（HLS 播放器实际使用的时间基准）是可靠的。
+        var probedStep: Int64?
+        if let probe = TSDemuxer.probeFrameStep(dir: dir, state: state) {
+            probedStep = probe.step
+            // 仅作为初始值/兜底，不锁定：正常源仍以 SPS 为准，避免 EXTINF 不准时反而改坏
+            frameStep = probe.step
+            DiagnosticsLog.write("[转MP4] 帧率探测(EXTINF) fps="
+                                 + String(format: "%.2f", probe.fps)
+                                 + " 帧间隔=" + String(probe.step) + " ticks"
+                                 + "（段=" + String(min(3, state.segmentURLs.count))
+                                 + " 帧=" + String(probe.frames)
+                                 + " EXTINF=" + String(format: "%.1f", probe.seconds) + "s）")
+        } else {
+            DiagnosticsLog.write("[转MP4] 帧率探测(EXTINF) 未取得有效结果，回退 SPS/PES")
+        }
         var lastRawDTS: Int64 = -1
         struct GopFrame { let data: Data; let isKey: Bool; let poc: Int?; let pts: Int64; let dts: Int64 }
         var baseDTS: Int64 = -1
@@ -586,11 +604,36 @@ enum AVRemuxPipeline {
             }
         }
         demuxer.onInfo = { info, _ in
-            // 优先用 SPS VUI 的精确帧时长（CFR 源最可靠），并在收到时锁定，避免运行中位数漂移
-            if let info, info.frameTick > 0, !frameStepLocked {
-                frameStep = info.frameTick
-                frameStepLocked = true
-                DiagnosticsLog.write("[转MP4] 帧间隔已锁定（SPS VUI）frameStep=" + String(frameStep) + " ticks")
+            guard let info, info.frameTick > 0 else { return }
+            guard !frameStepLocked else { return }
+            let sps = info.frameTick
+            let spsPlausible = sps >= 1500 && sps <= 5400   // 10–60fps
+            if spsPlausible {
+                // 只有"SPS 与分片时长基准相差 4 倍以上"才认为源时间轴被改过
+                // （普通源的 EXTINF 偶有偏差，不能因此覆盖 SPS）
+                let ratio: Double = {
+                    guard let probe = probedStep, probe > 0 else { return 1 }
+                    return Double(max(sps, probe)) / Double(min(sps, probe))
+                }()
+                if let probe = probedStep, ratio >= 4 {
+                    frameStep = probe
+                    frameStepLocked = true
+                    DiagnosticsLog.write("[转MP4] 时间轴异常：SPS 帧间隔=" + String(sps)
+                                         + " 与 EXTINF 探测=" + String(probe) + " 相差 "
+                                         + String(format: "%.1f", ratio) + " 倍，采用探测值")
+                } else {
+                    frameStep = sps
+                    frameStepLocked = true
+                    DiagnosticsLog.write("[转MP4] 帧间隔已锁定（SPS VUI）frameStep=" + String(frameStep) + " ticks")
+                }
+            } else {
+                DiagnosticsLog.write("[转MP4] SPS 帧间隔异常 frameStep=" + String(sps)
+                                     + " ticks（≈" + String(format: "%.0f", 90000.0 / Double(max(1, sps))) + "fps），已忽略")
+                if let probe = probedStep {
+                    frameStep = probe
+                    frameStepLocked = true
+                    DiagnosticsLog.write("[转MP4] 改用 EXTINF 探测值 frameStep=" + String(probe) + " ticks")
+                }
             }
         }
 
@@ -783,6 +826,22 @@ enum AVRemuxPipeline {
         flushGop()
         videoQueue.finish()
         audioQueue.finish()
+
+        // 安全网：视频时间轴与分片总时长严重不符时，宁可失败也不产出错误文件
+        let videoSeconds = Double(videoFrames) * Double(frameStep) / 90000.0
+        if state.totalDuration > 60, videoSeconds > 0 {
+            let deviation = abs(videoSeconds - state.totalDuration) / state.totalDuration
+            if deviation > 0.20 {
+                DiagnosticsLog.write("[转MP4] 时间轴校验失败 视频="
+                                     + String(format: "%.1f", videoSeconds) + "s 参考="
+                                     + String(format: "%.1f", state.totalDuration) + "s 偏差="
+                                     + String(format: "%.1f", deviation * 100) + "%")
+                throw RemuxError(message: "该源时间轴异常：视频 "
+                                 + String(format: "%.0f", videoSeconds) + " 秒，分片总时长 "
+                                 + String(format: "%.0f", state.totalDuration)
+                                 + " 秒，偏差过大，已停止以免产出错误文件（原分片已保留）")
+            }
+        }
 
         if let writer {
             let waited = doneGroup.wait(timeout: .now() + 120)

@@ -87,6 +87,20 @@ final class DownloadManager: NSObject, ObservableObject {
         var codecStatus: String?
         var failure: String?
         var addedAt: Date
+        /// 是否由用户主动暂停（只有 true 才在重启后保持暂停）
+        var pausedByUser: Bool? = nil
+    }
+
+    /// 用户主动暂停的任务 id（重启后保持暂停，不被自动续传覆盖）
+    private var pausedByUserIDs: Set<String> = []
+
+    private static func statusText(_ status: DownloadTaskInfo.Status) -> String {
+        switch status {
+        case .queued: return "排队"
+        case .downloading: return "下载中"
+        case .paused: return "已暂停"
+        case .failed: return "失败"
+        }
     }
 
     /// 任务添加时间（用于恢复后排序）
@@ -107,18 +121,27 @@ final class DownloadManager: NSObject, ObservableObject {
         let autoResume = (UserDefaults.standard.object(forKey: Self.autoResumeKey) as? Bool) ?? true
 
         // ① 先按清单恢复全部任务（保证数量不丢）
+        //    关键：只有「用户主动暂停」才保持暂停，其余一律按待下载处理（由 autoResume 决定是否继续）
         for p in persisted {
             guard let url = URL(string: p.url),
                   !tasks.contains(where: { $0.id == p.id }) else { continue }
             addedAt[p.id] = p.addedAt
+            let userPaused = p.pausedByUser ?? (p.status == "paused")
             var status: DownloadTaskInfo.Status = .queued
-            switch p.status {
-            case "paused": status = .paused
-            case "failed": status = .failed(p.failure ?? "下载失败")
-            default: status = .queued      // queued / downloading → 待开始
+            if userPaused {
+                status = .paused
+                pausedByUserIDs.insert(p.id)
+            } else if p.status == "failed" {
+                status = .failed(p.failure ?? "下载失败")
+            } else {
+                status = .queued
             }
             tasks.append(DownloadTaskInfo(id: p.id, url: url, title: p.title, progress: 0,
                                           status: status, codecStatus: p.codecStatus))
+            DiagnosticsLog.write("[下载] 恢复 任务=" + p.title
+                                 + " 清单状态=" + p.status
+                                 + " 用户暂停=" + String(userPaused)
+                                 + " → 采用=" + Self.statusText(status))
         }
 
         // ② 分片引擎的真实进度
@@ -201,7 +224,8 @@ final class DownloadManager: NSObject, ObservableObject {
             let at = addedAt[task.id] ?? Date()
             list.append(PersistedTask(id: task.id, url: task.url.absoluteString, title: task.title,
                                       status: statusText, codecStatus: task.codecStatus,
-                                      failure: failure, addedAt: at))
+                                      failure: failure, addedAt: at,
+                                      pausedByUser: pausedByUserIDs.contains(task.id)))
         }
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
@@ -248,6 +272,7 @@ final class DownloadManager: NSObject, ObservableObject {
         guard !tasks.contains(where: { $0.id == id }) else { return }
 
         addedAt[id] = Date()
+        pausedByUserIDs.remove(id)
         if activeCount < maxConcurrent {
             begin(url: url, title: title)
             update(id) { $0.codecStatus = codecStatus }
@@ -261,6 +286,7 @@ final class DownloadManager: NSObject, ObservableObject {
     }
 
     func pause(_ info: DownloadTaskInfo) {
+        pausedByUserIDs.insert(info.id)
         if SegmentRunner.shared.state(of: info.id) != nil {
             SegmentRunner.shared.pause(info.id)
             update(info.id) { $0.status = .paused; $0.stalled = false }
@@ -286,6 +312,7 @@ final class DownloadManager: NSObject, ObservableObject {
 
     func resume(_ info: DownloadTaskInfo) {
         guard info.status == .paused || isFailed(info.status) else { return }
+        pausedByUserIDs.remove(info.id)
         resumeBaseline[info.id] = info.progress
         update(info.id) { $0.status = .queued; $0.stalled = false }
 
@@ -368,6 +395,7 @@ final class DownloadManager: NSObject, ObservableObject {
         durations.removeValue(forKey: info.id)
         progressMarks.removeValue(forKey: info.id)
         addedAt.removeValue(forKey: info.id)
+        pausedByUserIDs.remove(info.id)
         cancelSessionTask(id: info.id)
         persistNow()
         startNextIfNeeded()
@@ -531,6 +559,7 @@ final class DownloadManager: NSObject, ObservableObject {
 
     private func begin(url: URL, title: String) {
         let id = url.absoluteString
+        pausedByUserIDs.remove(id)
         pendingTitles[id] = title
         progressMarks[id] = CACurrentMediaTime()
         if addedAt[id] == nil { addedAt[id] = Date() }
@@ -544,6 +573,7 @@ final class DownloadManager: NSObject, ObservableObject {
 
         if useSegmentEngine {
             SegmentRunner.shared.start(id: id, title: title, url: url)
+            persistNow()   // 开始下载属于关键状态，立即落盘
             return
         }
 
@@ -649,6 +679,7 @@ final class DownloadManager: NSObject, ObservableObject {
         durations.removeValue(forKey: id)
         progressMarks.removeValue(forKey: id)
         addedAt.removeValue(forKey: id)
+        pausedByUserIDs.remove(id)
         persistNow()
         startNextIfNeeded()
     }

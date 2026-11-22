@@ -252,6 +252,41 @@ final class TSDemuxer {
 
     // MARK: - 视频
 
+    private var videoPESSeen = 0
+    /// 探测模式（只数帧、不打诊断日志）
+    var quiet = false
+
+    /// 用「EXTINF 分片时长 ÷ 该分片视频帧数」反推真实帧间隔（90kHz ticks）
+    /// HLS 播放器正是按 EXTINF 推进时间轴，所以它比 PES/SPS 里的时间戳更可信
+    static func probeFrameStep(dir: URL,
+                               state: SegmentJobState,
+                               maxSegments: Int = 3) -> (step: Int64, fps: Double, frames: Int, seconds: Double)? {
+        var frames = 0
+        var seconds = 0.0
+        var used = 0
+        for index in 0..<min(maxSegments, state.segmentURLs.count) {
+            let url = dir.appendingPathComponent(LocalHLS.fileName(index: index))
+            guard let data = try? Data(contentsOf: url), data.count > 1024 else { continue }
+            var count = 0
+            let probe = TSDemuxer()
+            probe.quiet = true
+            probe.onVideoFrame = { _, _, _, _, _, _ in count += 1 }
+            probe.consume(data)
+            probe.finish()
+            let extinf = index < state.durations.count ? state.durations[index] : 0
+            guard count > 0, extinf > 0.5 else { continue }
+            frames += count
+            seconds += extinf
+            used += 1
+        }
+        guard used > 0, frames > 0, seconds > 1 else { return nil }
+        let fps = Double(frames) / seconds
+        guard fps >= 5, fps <= 121 else { return nil }
+        let step = Int64((90000.0 / fps).rounded())
+        guard step >= 750, step <= 18000 else { return nil }
+        return (step, fps, frames, seconds)
+    }
+
     private func handleVideoPES(_ pes: Data, pts: Int64, dts: Int64) {
         guard !pes.isEmpty else { return }
         let nals = Self.splitNALUnits(pes)
@@ -325,9 +360,19 @@ final class TSDemuxer {
 
         if units.count > 1 {
             multiAUCount += units.count - 1
-            DiagnosticsLog.write("[转MP4] PES 含多帧（\(units.count) 帧，累计拆分 \(multiAUCount)）")
+            if !quiet {
+                DiagnosticsLog.write("[转MP4] PES 含多帧（\(units.count) 帧，累计拆分 \(multiAUCount)）")
+            }
         }
         lastPESUnits = units.count
+
+        // 诊断：前几个 PES 的原始时间戳与帧数（用于判断"源时间戳异常"还是"我们算错"）
+        videoPESSeen += 1
+        if videoPESSeen <= 3, !quiet {
+            DiagnosticsLog.write("[诊断] PES#" + String(videoPESSeen)
+                                 + " pts=" + String(pts) + " dts=" + String(dts)
+                                 + " 帧数=" + String(units.count) + " 当前帧间隔=" + String(frameStep))
+        }
 
         // 同一 PES 拆出的多帧：DTS/PTS 按已学习到的帧间隔递推
         for (index, unit) in units.enumerated() {
