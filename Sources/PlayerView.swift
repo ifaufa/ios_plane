@@ -3,6 +3,8 @@ import AVKit
 import UIKit
 
 struct PlayerView: View {
+    static let autoLandscapeKey = "playback.autoLandscape"
+
     @ObservedObject var store: PlaybackStore
 
     @Environment(\.dismiss) private var dismiss
@@ -20,6 +22,8 @@ struct PlayerView: View {
     @State private var initialBrightness: CGFloat = -1
     @State private var showLoopPanel = false
     @State private var lastLongPressAt = Date.distantPast
+    /// 手动解锁旋转后，本次播放不再自动锁定方向
+    @State private var orientationUnlocked = false
 
     var body: some View {
         ZStack {
@@ -134,6 +138,15 @@ struct PlayerView: View {
 
                 AirPlayRouteButton()
                     .frame(width: 30, height: 30)
+
+                Button {
+                    toggleOrientationUnlock()
+                } label: {
+                    Image(systemName: orientationUnlocked ? "lock.rotation.open" : "lock.rotation")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(orientationUnlocked ? 1 : 0.75))
+                        .frame(width: 28, height: 28)
+                }
 
                 Spacer()
 
@@ -330,7 +343,7 @@ struct PlayerView: View {
     private func startPlayback() {
         UIApplication.shared.isIdleTimerDisabled = true
         initialBrightness = ScreenBrightness.current
-        OrientationLock.apply(.landscape)
+        applyOrientationForCurrentVideo()
 
         if store.expectsPlaying, player.rate == 0 { player.play() }
         gestures.isPlaying = player.rate > 0
@@ -355,6 +368,65 @@ struct PlayerView: View {
             }
         }
     }
+    /// 按视频画幅决定播放方向：
+    /// 横视频 → 锁横屏（保持原有体验）；竖视频 → 锁竖屏；接近方形 → 跟随设备
+    /// 设置里关闭「播放时自动旋转为横屏」后，一律跟随设备
+    private func applyOrientationForCurrentVideo() {
+        guard !orientationUnlocked else {
+            OrientationLock.apply(.all)
+            return
+        }
+        let autoLandscape = (UserDefaults.standard.object(forKey: PlayerView.autoLandscapeKey) as? Bool) ?? true
+        guard autoLandscape else {
+            OrientationLock.apply(.all)
+            return
+        }
+        guard let item = player.currentItem else {
+            OrientationLock.apply(.landscape)
+            return
+        }
+        Task { @MainActor in
+            var displaySize = CGSize.zero
+            if let tracks = try? await item.asset.loadTracks(withMediaType: .video),
+               let track = tracks.first,
+               let natural = try? await track.load(.naturalSize),
+               let transform = try? await track.load(.preferredTransform) {
+                let rotated = natural.applying(transform)
+                displaySize = CGSize(width: abs(rotated.width), height: abs(rotated.height))
+            }
+            guard !orientationUnlocked else { return }
+            guard displaySize.width > 1, displaySize.height > 1 else {
+                DiagnosticsLog.write("[播放] 方向：尺寸未知，按横屏处理")
+                OrientationLock.apply(.landscape)
+                return
+            }
+            let ratio = displaySize.width / displaySize.height
+            let mask: UIInterfaceOrientationMask
+            let label: String
+            if ratio >= 1.2 {
+                mask = .landscape; label = "横视频 → 横屏"
+            } else if ratio <= 1 / 1.2 {
+                mask = .portrait; label = "竖视频 → 竖屏"
+            } else {
+                mask = .all; label = "近似方形 → 跟随设备"
+            }
+            DiagnosticsLog.write("[播放] 方向：" + label
+                                 + "（" + String(Int(displaySize.width)) + "x" + String(Int(displaySize.height)) + "）")
+            OrientationLock.apply(mask)
+        }
+    }
+
+    private func toggleOrientationUnlock() {
+        orientationUnlocked.toggle()
+        if orientationUnlocked {
+            OrientationLock.apply(.all)
+            DiagnosticsLog.write("[播放] 方向：已解锁，跟随设备旋转")
+        } else {
+            applyOrientationForCurrentVideo()
+            DiagnosticsLog.write("[播放] 方向：已恢复自动锁定")
+        }
+    }
+
     private func stopPlayback() {
         if let timeObserver {
             player.removeTimeObserver(timeObserver)

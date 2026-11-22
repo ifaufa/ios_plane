@@ -1019,6 +1019,7 @@ struct EngineSettingsView: View {
     @State private var completionNotice = (UserDefaults.standard.object(forKey: CompletionFeedback.noticeKey) as? Bool) ?? true
     @StateObject private var playPrefs = PlaybackPrefs.shared
     @AppStorage(LibraryGrouping.groupPrefKey) private var groupBySeries = true
+    @AppStorage(PlayerView.autoLandscapeKey) private var autoLandscape = true
 
     private func summaryText(_ timing: PlaybackPrefs.SeriesTiming) -> String {
         let intro = timing.introLength > 0 ? "片头 " + PlaybackStore.timeText(timing.introLength) : "无片头"
@@ -1064,6 +1065,13 @@ struct EngineSettingsView: View {
                     Text("视频库")
                 } footer: {
                     Text("开启后，同一系列的集数会折叠成一组，单条视频仍平铺显示；折叠状态会被记住。与连播共用同一套标题解析（第N集 / EP16 / S01E16 等）。")
+                }
+                Section {
+                    Toggle("播放时自动旋转为横屏", isOn: $autoLandscape)
+                } header: {
+                    Text("播放")
+                } footer: {
+                    Text("开启后：横视频自动横屏、竖视频自动竖屏、近似方形跟随设备；关闭则完全跟随设备方向。播放器上的锁形按钮可临时解锁旋转。")
                 }
                 if segmentEnabled {
                     Section {

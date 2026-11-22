@@ -52,13 +52,35 @@ struct Candidate: Identifiable, Equatable {
     var urlDraft: String
     /// 标题是否被用户手动改过（改过则地址变更时不覆盖标题）
     var titleEditedByUser = false
+    /// 首次发现时间（用于展示先后顺序）
+    var firstSeenAt: Date = Date()
+    /// 是否已加入下载队列（灰显，避免重复添加）
+    var addedToDownloads = false
 
-    init(id: String, url: URL, title: String? = nil, sources: Set<Source>) {
+    init(id: String, url: URL, title: String? = nil, sources: Set<Source>, firstSeenAt: Date = Date()) {
         self.id = id
         self.url = url
         self.title = title ?? LinkParser.defaultTitle(for: url)
         self.sources = sources
         self.urlDraft = url.absoluteString
+        self.firstSeenAt = firstSeenAt
+    }
+
+    /// 来源文案（按固定顺序拼接）
+    var sourcesText: String {
+        Source.allCases.filter { sources.contains($0) }.map { $0.rawValue }.joined(separator: "/")
+    }
+
+    /// 获取时间文案（当天只显示时分秒）
+    var seenTimeText: String {
+        let formatter = DateFormatter()
+        let calendar = Calendar.current
+        if calendar.isDateInToday(firstSeenAt) {
+            formatter.dateFormat = "HH:mm:ss"
+        } else {
+            formatter.dateFormat = "MM-dd HH:mm"
+        }
+        return formatter.string(from: firstSeenAt)
     }
 
     /// 校验编辑中的地址
@@ -110,6 +132,7 @@ struct Candidate: Identifiable, Equatable {
     }
 
     var isSelectable: Bool {
+        guard !addedToDownloads else { return false }
         if case .available = state { return true }
         return false
     }
@@ -324,6 +347,31 @@ final class BrowserModel: NSObject, ObservableObject {
         for index in candidates.indices { candidates[index].selected = false }
     }
 
+    /// 清空候选：传 nil 清空全部；传来源则只摘掉该来源（条目若还有其他来源则保留）
+    func clearCandidates(source: Candidate.Source? = nil) {
+        guard let source else {
+            DiagnosticsLog.write("[浏览器] 清空全部候选 \(candidates.count) 条")
+            candidates.removeAll()
+            return
+        }
+        let before = candidates.count
+        for index in candidates.indices {
+            candidates[index].sources.remove(source)
+            candidates[index].selected = false
+        }
+        candidates.removeAll { $0.sources.isEmpty }
+        DiagnosticsLog.write("[浏览器] 清空候选 来源=\(source.rawValue) \(before)→\(candidates.count) 条")
+    }
+
+    /// 标记已加入下载队列（灰显，避免重复添加）
+    func markAdded(urls: [String]) {
+        let set = Set(urls)
+        for index in candidates.indices where set.contains(candidates[index].id) {
+            candidates[index].addedToDownloads = true
+            candidates[index].selected = false
+        }
+    }
+
     var selectedCount: Int { candidates.filter { $0.selected }.count }
 
     var availableCount: Int { candidates.filter { $0.isSelectable }.count }
@@ -414,16 +462,12 @@ final class BrowserModel: NSObject, ObservableObject {
     // MARK: 私有
 
     private func sortCandidates() {
-        let order: (Candidate) -> Int = { candidate in
-            if candidate.isSelectable { return 0 }
-            if candidate.state == .checking { return 1 }
-            return 2
-        }
+        // 按「首次发现时间」排序（获取顺序，旧 → 新），时间相同再按标题
         candidates.sort { lhs, rhs in
-            let l = order(lhs), r = order(rhs)
-            return l == r ? lhs.title < rhs.title : l < r
+            if lhs.firstSeenAt == rhs.firstSeenAt { return lhs.title < rhs.title }
+            return lhs.firstSeenAt < rhs.firstSeenAt
         }
-    }
+        }
 
     private func startInspect(_ id: String) {
         guard let candidate = candidates.first(where: { $0.id == id }) else { return }
@@ -607,6 +651,8 @@ struct WebSnifferBrowser: View {
 
     @State private var address = ""
     @State private var showCandidates = false
+    @State private var showClearCandidatesConfirm = false
+    @State private var pendingClearSource: Candidate.Source?
     @State private var showHeaders = false
     @State private var showBookmarks = false
     @State private var showQueue = false
@@ -653,7 +699,36 @@ struct WebSnifferBrowser: View {
                     Button { showHeaders = true } label: {
                         Image(systemName: "slider.horizontal.3")
                     }
+                    Menu {
+                        Button("清空全部候选") {
+                            pendingClearSource = nil
+                            showClearCandidatesConfirm = true
+                        }
+                        Divider()
+                        ForEach(Candidate.Source.allCases, id: \.self) { source in
+                            Button("仅清空「\(source.rawValue)」") {
+                                pendingClearSource = source
+                                showClearCandidatesConfirm = true
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .disabled(model.candidates.isEmpty)
                 }
+            }
+            .confirmationDialog(pendingClearSource == nil
+                                ? "清空全部候选？"
+                                : "清空「\(pendingClearSource!.rawValue)」来源的候选？",
+                                isPresented: $showClearCandidatesConfirm,
+                                titleVisibility: .visible) {
+                Button("清空", role: .destructive) {
+                    model.clearCandidates(source: pendingClearSource)
+                    pendingClearSource = nil
+                }
+                Button("取消", role: .cancel) { pendingClearSource = nil }
+            } message: {
+                Text("清空后无法恢复；已加入下载队列的任务不受影响。")
             }
             .sheet(isPresented: $showBookmarks) {
                 BookmarksSheet(store: bookmarks) { url in
@@ -683,6 +758,7 @@ struct WebSnifferBrowser: View {
                         }
                     }
                     }
+                    model.markAdded(urls: items.map { $0.url.absoluteString })
                     model.clearSelection()
                     showCandidates = false
                     showToast("已加入下载队列 \(items.count) 个")
@@ -906,9 +982,25 @@ struct CandidateRow: View {
                     .font(.caption)
                     .foregroundStyle(candidate.isSelectable ? Color.secondary : Color.red)
 
-                Text("来源：" + candidate.sources.map { $0.rawValue }.sorted().joined(separator: " · "))
-                    .font(.caption2)
-                    .foregroundStyle(Color.secondary)
+                HStack(spacing: 6) {
+                    Text(candidate.seenTimeText)
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                    Text("·")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text(candidate.sourcesText)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    if candidate.addedToDownloads {
+                        Text("已加入")
+                            .font(.caption2.weight(.semibold))
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Color.green.opacity(0.18), in: Capsule())
+                            .foregroundStyle(.green)
+                    }
+                }
 
                 TextField("下载地址", text: $candidate.urlDraft, axis: .vertical)
                     .font(.caption2)
@@ -954,6 +1046,16 @@ private struct CandidateSheet: View {
     @ObservedObject var model: BrowserModel
     let onAdd: ([(url: URL, title: String)]) -> Void
 
+    @State private var pendingClearSource: Candidate.Source?
+    @State private var showClearConfirm = false
+
+    private var clearTitle: String {
+        if let source = pendingClearSource {
+            return "清空「\(source.rawValue)」来源的候选？"
+        }
+        return "清空全部候选？"
+    }
+
     var body: some View {
         NavigationStack {
             List {
@@ -969,9 +1071,38 @@ private struct CandidateSheet: View {
             }
             .navigationTitle("候选（\(model.selectedCount)/\(model.candidates.count)）")
             .navigationBarTitleDisplayMode(.inline)
+            .confirmationDialog(clearTitle,
+                                isPresented: $showClearConfirm,
+                                titleVisibility: .visible) {
+                Button("清空", role: .destructive) {
+                    model.clearCandidates(source: pendingClearSource)
+                    pendingClearSource = nil
+                }
+                Button("取消", role: .cancel) { pendingClearSource = nil }
+            } message: {
+                Text("清空后无法恢复；已加入下载队列的任务不受影响。")
+            }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("关闭") { dismiss() }
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Menu {
+                        Button("清空全部") {
+                            pendingClearSource = nil
+                            showClearConfirm = true
+                        }
+                        Divider()
+                        ForEach(Candidate.Source.allCases, id: \.self) { source in
+                            Button("仅清空「\(source.rawValue)」") {
+                                pendingClearSource = source
+                                showClearConfirm = true
+                            }
+                        }
+                    } label: {
+                        Label("清空", systemImage: "trash")
+                    }
+                    .disabled(model.candidates.isEmpty)
                 }
                 ToolbarItem(placement: .bottomBar) {
                     HStack {
