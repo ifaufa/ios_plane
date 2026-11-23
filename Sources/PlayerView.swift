@@ -24,6 +24,7 @@ struct PlayerView: View {
     @State private var lastLongPressAt = Date.distantPast
     /// 手动解锁旋转后，本次播放不再自动锁定方向
     @State private var orientationUnlocked = false
+    @State private var showEditor = false
 
     var body: some View {
         ZStack {
@@ -61,6 +62,9 @@ struct PlayerView: View {
         .statusBarHidden(immersive)
         .sheet(isPresented: $showLoopPanel) {
             LoopRangeSheet(store: store, duration: duration)
+        }
+        .sheet(isPresented: $showEditor) {
+            SegmentEditSheet(playback: store)
         }
         .persistentSystemOverlays(immersive ? .hidden : .automatic)
         .onAppear { startPlayback() }
@@ -145,6 +149,15 @@ struct PlayerView: View {
                     Image(systemName: orientationUnlocked ? "lock.rotation.open" : "lock.rotation")
                         .font(.caption)
                         .foregroundStyle(.white.opacity(orientationUnlocked ? 1 : 0.75))
+                        .frame(width: 28, height: 28)
+                }
+
+                Button {
+                    showEditor = true
+                } label: {
+                    Image(systemName: "scissors")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.8))
                         .frame(width: 28, height: 28)
                 }
 
@@ -561,5 +574,119 @@ private struct LoopRangeSheet: View {
             }
         }
         .padding(.vertical, 4)
+    }
+}
+
+// MARK: - 分片剪辑面板
+
+private struct SegmentEditSheet: View {
+    @ObservedObject var playback: PlaybackStore
+    @ObservedObject var editor = SegmentEditStore.shared
+    @Environment(\.dismiss) private var dismiss
+
+    private var totalDuration: Double {
+        let value = playback.player.currentItem?.duration.seconds ?? 0
+        return value.isFinite && value > 0 ? value : 0
+    }
+
+    private var selectionStart: Double? { playback.loopStart }
+    private var selectionEnd: Double? { playback.loopEnd }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    if let a = selectionStart, let b = selectionEnd, b > a {
+                        HStack {
+                            Text("选区")
+                            Spacer()
+                            Text(Self.rangeText(a, b))
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                        }
+                        Button("剪掉这一段（保留其余）") {
+                            editor.cutOut(start: a, end: b, duration: totalDuration)
+                        }
+                        Button("只保留这一段") {
+                            editor.keepOnly(start: a, end: b)
+                        }
+                    } else {
+                        Text("请先用播放器上的「设 A / 设 B」选出区间")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                } header: {
+                    Text("选区")
+                } footer: {
+                    Text("切点会自动吸附到最近的关键帧（误差通常 ≤1 秒），不重新编码、无画质损失。原片不会被修改。")
+                }
+
+                Section {
+                    if editor.ranges.isEmpty {
+                        Text("暂无区间")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(editor.ranges) { range in
+                            HStack {
+                                Text(Self.rangeText(range.start, range.end))
+                                    .monospacedDigit()
+                                Spacer()
+                                Text(PlaybackStore.timeText(max(0, range.end - range.start)))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Button {
+                                    editor.remove(range.id)
+                                } label: {
+                                    Image(systemName: "trash")
+                                        .foregroundStyle(.red)
+                                }
+                                .buttonStyle(.borderless)
+                            }
+                        }
+                        Button("清空清单", role: .destructive) { editor.clear() }
+                    }
+                } header: {
+                    Text("剪辑清单（\(editor.ranges.count) 段 · 共 \(PlaybackStore.timeText(editor.totalDuration))）")
+                }
+
+                Section {
+                    Button {
+                        Task { await editor.export(source: playback.currentVideo) }
+                    } label: {
+                        HStack {
+                            Text(editor.isExporting ? "导出中…" : "导出为新的分片视频")
+                            Spacer()
+                            if editor.isExporting { ProgressView() }
+                        }
+                    }
+                    .disabled(editor.ranges.isEmpty || editor.isExporting)
+
+                    if editor.isExporting {
+                        ProgressView(value: editor.progress)
+                    }
+                } footer: {
+                    Text("导出后会在视频库顶部生成一个新条目（原片保留，可自行删除）。")
+                }
+            }
+            .navigationTitle("剪辑")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("关闭") { dismiss() }
+                }
+            }
+            .alert("剪辑", isPresented: Binding(
+                get: { editor.notice != nil },
+                set: { if !$0 { editor.notice = nil } }
+            )) {
+                Button("好") { editor.notice = nil }
+            } message: {
+                Text(editor.notice ?? "")
+            }
+        }
+    }
+
+    private static func rangeText(_ start: Double, _ end: Double) -> String {
+        PlaybackStore.timeText(start) + " – " + PlaybackStore.timeText(end)
     }
 }

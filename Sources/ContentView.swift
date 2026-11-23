@@ -97,6 +97,7 @@ struct ContentView: View {
                 Text("保留「第N集」才能继续按系列分组与自动连播")
             }
             .navigationTitle("PlaneM3U8")
+            .onAppear { SegmentEditStore.shared.library = library }
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button(selectionMode ? "取消" : "选择") {
