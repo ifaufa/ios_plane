@@ -193,6 +193,18 @@ enum HLSEditor {
         return nil
     }
 
+    /// 脏时间戳修正：取 PTS 上相邻的"正常帧"的相对时间作为替代
+    /// （valid 必须按 pts 升序；找不到前一个就用第一个）
+    private static func nearestRelative(_ pts: Int64,
+                                        among valid: [(pts: Int64, rel: Int64, offset: Int)]) -> Int64? {
+        guard !valid.isEmpty else { return nil }
+        var previous: Int64?
+        for item in valid {
+            if item.pts <= pts { previous = item.rel } else { break }
+        }
+        return previous ?? valid.first?.rel
+    }
+
     private static func readTimestamp(_ bytes: [UInt8], _ offset: Int) -> Int64 {
         let b0 = Int64(bytes[offset] & 0x0E)
         let b1 = Int64(bytes[offset + 1])
@@ -318,63 +330,101 @@ enum HLSEditor {
                         videoStamps = stamps
                     }
                     if !stamps.isEmpty {
-                        // 不再依赖源 PTS 的数值，改为「按帧序重建时间轴」：
-                        //   视频 PTS = 显示顺序 × 每帧时长（用 PTS 排序得到显示顺序，抗脏值）
-                        //   视频 DTS = 解码顺序 × 每帧时长（单调、保证 ≤ PTS）
-                        //   音频 PTS = 包顺序 × 每包时长
-                        // 这样片段的 PTS 跨度精确等于目标时长，个别异常时间戳不再影响整体。
+                        // v3：**保留源 PTS 的相对间距**（平滑度来源），只做整体平移 + 统一缩放；
+                        // 个别脏时间戳用相邻正常帧插值修正，不做边界钳制。
                         var bytes = [UInt8](piece)
-                        let videoByPTS = videoStamps.sorted { $0.pts < $1.pts }
-                        var displayRank: [Int: Int] = [:]
-                        for (rank, stamp) in videoByPTS.enumerated() {
-                            displayRank[stamp.packetOffset] = rank
-                        }
-                        let videoByPacket = videoStamps.sorted { $0.packetOffset < $1.packetOffset }
-                        var decodeRank: [Int: Int] = [:]
-                        for (rank, stamp) in videoByPacket.enumerated() {
-                            decodeRank[stamp.packetOffset] = rank
-                        }
-                        let audioStamps = stamps.filter { $0.pid != scanResult.videoPID }
-                            .sorted { $0.packetOffset < $1.packetOffset }
-                        var audioRank: [Int: Int] = [:]
-                        for (rank, stamp) in audioStamps.enumerated() {
-                            audioRank[stamp.packetOffset] = rank
+                        let videoPID = scanResult.videoPID
+                        var videoList = stamps.filter { $0.pid == videoPID }
+                        if videoList.isEmpty { videoList = stamps }
+                        let audioList = stamps.filter { $0.pid != videoPID }
+
+                        func estimateSpan(_ list: [PESStamp]) -> Int64 {
+                            guard list.count > 1 else { return 0 }
+                            let sorted = list.sorted { $0.pts < $1.pts }
+                            var deltas: [Int64] = []
+                            deltas.reserveCapacity(sorted.count)
+                            for i in 1..<sorted.count {
+                                let delta = sorted[i].pts - sorted[i - 1].pts
+                                if delta > 0, delta < 90000 { deltas.append(delta) }
+                            }
+                            guard !deltas.isEmpty else { return 0 }
+                            deltas.sort()
+                            let median = deltas[deltas.count / 2]
+                            return median * Int64(max(1, sorted.count - 1))
                         }
 
-                        let videoStep = videoStamps.count > 1
-                            ? Double(targetTicks) / Double(videoStamps.count - 1)
-                            : Double(targetTicks)
-                        let audioStep = audioStamps.count > 1
-                            ? Double(targetTicks) / Double(audioStamps.count - 1)
-                            : 0
+                        let videoSpan = estimateSpan(videoList)
+                        let audioSpan = estimateSpan(audioList)
+                        let referenceSpan = videoSpan > 0 ? videoSpan : audioSpan
+                        let scale: Double = referenceSpan > 0
+                            ? Double(targetTicks) / Double(referenceSpan)
+                            : 1.0
+                        let firstPTS = videoList.min(by: { $0.pts < $1.pts })?.pts
+                            ?? stamps.min(by: { $0.pts < $1.pts })?.pts ?? 0
+                        let spanLimit = referenceSpan > 0 ? referenceSpan : targetTicks
 
+                        // 建立"正常帧"索引（按 PTS 升序），用于脏值插值
+                        var validVideo: [(pts: Int64, rel: Int64, offset: Int)] = []
+                        for stamp in videoList.sorted(by: { $0.pts < $1.pts }) {
+                            let rel = stamp.pts - firstPTS
+                            if rel >= -180000, rel <= spanLimit + spanLimit {   // -2s ~ 2 倍跨度 视为有效
+                                validVideo.append((stamp.pts, rel, stamp.packetOffset))
+                            }
+                        }
+                        var validAudio: [Int: Int64] = [:]
+                        var validAudioList: [(pts: Int64, rel: Int64, offset: Int)] = []
+                        for stamp in audioList.sorted(by: { $0.pts < $1.pts }) {
+                            let rel = stamp.pts - firstPTS
+                            if rel >= -180000, rel <= spanLimit + spanLimit {
+                                validAudio[stamp.packetOffset] = rel
+                                validAudioList.append((stamp.pts, rel, stamp.packetOffset))
+                            }
+                        }
+                        let videoValidMap = Dictionary(uniqueKeysWithValues: validVideo.map { ($0.offset, $0.rel) })
+
+                        var interpolated = 0
                         for stamp in stamps {
                             let ptsLocal = stamp.ptsOffset - startOffset + headerBytes
                             guard ptsLocal + 5 <= bytes.count else { continue }
-                            var offsetTicks: Int64
-                            if let rank = displayRank[stamp.packetOffset] {
-                                offsetTicks = Int64((Double(rank) * videoStep).rounded())
-                            } else if let rank = audioRank[stamp.packetOffset] {
-                                offsetTicks = Int64((Double(rank) * audioStep).rounded())
+                            let isVideo = (stamp.pid == videoPID)
+                            var relative: Int64
+                            if isVideo {
+                                if let rel = videoValidMap[stamp.packetOffset] {
+                                    relative = rel
+                                } else {
+                                    // 脏值：取 PTS 上相邻的正常帧作为替代，避免出现 26 小时跳变
+                                    relative = Self.nearestRelative(stamp.pts, among: validVideo) ?? 0
+                                    interpolated += 1
+                                }
                             } else {
-                                continue
+                                if let rel = validAudio[stamp.packetOffset] {
+                                    relative = rel
+                                } else {
+                                    relative = Self.nearestRelative(stamp.pts, among: validAudioList) ?? 0
+                                    interpolated += 1
+                                }
                             }
-                            let newPTS = outputCursorTicks + offsetTicks
+                            let newPTS = outputCursorTicks + Int64((Double(relative) * scale).rounded())
                             writeTimestamp(&bytes, ptsLocal, newPTS)
                             if stamp.dtsOffset >= 0 {
                                 let dtsLocal = stamp.dtsOffset - startOffset + headerBytes
                                 if dtsLocal + 5 <= bytes.count {
-                                    let dtsTicks: Int64
-                                    if let rank = decodeRank[stamp.packetOffset] {
-                                        dtsTicks = Int64((Double(rank) * videoStep).rounded())
-                                    } else {
-                                        dtsTicks = offsetTicks
-                                    }
-                                    writeTimestamp(&bytes, dtsLocal, outputCursorTicks + min(dtsTicks, offsetTicks + 0))
+                                    // 保持原有 PTS−DTS 差值（B 帧重排结构不变）
+                                    let reorder = max(0, stamp.pts - stamp.dts)
+                                    let newDTS = max(0, newPTS - reorder)
+                                    writeTimestamp(&bytes, dtsLocal, newDTS)
                                 }
                             }
                             if firstWrittenPTS < 0 { firstWrittenPTS = newPTS }
                             if newPTS > lastWrittenPTS { lastWrittenPTS = newPTS }
+                        }
+                        if writtenURI.count < 3 || interpolated > 0 {
+                            DiagnosticsLog.write("[剪辑] 片段#" + String(writtenURI.count + 1)
+                                                 + " 帧=" + String(videoList.count)
+                                                 + " 跨度=" + String(format: "%.2f", Double(referenceSpan) / 90000) + "s"
+                                                 + " 目标=" + String(format: "%.2f", pieceDuration) + "s"
+                                                 + " 缩放=" + String(format: "%.3f", scale)
+                                                 + (interpolated > 0 ? " 插值修正 " + String(interpolated) + " 帧" : ""))
                         }
                         piece = Data(bytes)
                     }
