@@ -346,21 +346,32 @@ enum HLSEditor {
                                                  + " 缩放=" + String(format: "%.3f", scale))
                         }
                         var bytes = [UInt8](piece)
+                        var clampedCount = 0
+                        let minRelative: Int64 = -90000          // -1 秒（允许编码器前置延迟）
+                        let maxRelative: Int64 = max(span, 1)
                         for stamp in stamps {
                             let ptsLocal = stamp.ptsOffset - startOffset + headerBytes
                             guard ptsLocal + 5 <= bytes.count else { continue }
-                            let relative = stamp.pts - first.pts
+                            let rawRelative = stamp.pts - first.pts
+                            let relative = min(max(rawRelative, minRelative), maxRelative)
+                            if relative != rawRelative { clampedCount += 1 }
                             let newPTS = outputCursorTicks + Int64((Double(relative) * scale).rounded())
                             writeTimestamp(&bytes, ptsLocal, newPTS)
                             if stamp.dtsOffset >= 0 {
                                 let dtsLocal = stamp.dtsOffset - startOffset + headerBytes
                                 if dtsLocal + 5 <= bytes.count {
-                                    let newDTS = outputCursorTicks + Int64((Double(stamp.dts - first.pts) * scale).rounded())
+                                    let rawDTS = stamp.dts - first.pts
+                                    let clampedDTS = min(max(rawDTS, minRelative), maxRelative)
+                                    let newDTS = outputCursorTicks + Int64((Double(clampedDTS) * scale).rounded())
                                     writeTimestamp(&bytes, dtsLocal, newDTS)
                                 }
                             }
                             if firstWrittenPTS < 0 { firstWrittenPTS = newPTS }
                             if newPTS > lastWrittenPTS { lastWrittenPTS = newPTS }
+                        }
+                        if clampedCount > 0 {
+                            DiagnosticsLog.write("[剪辑] 片段#" + String(writtenURI.count + 1)
+                                                 + " 修正异常时间戳 " + String(clampedCount) + " 处")
                         }
                         piece = Data(bytes)
                     }
