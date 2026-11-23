@@ -317,61 +317,64 @@ enum HLSEditor {
                     } else {
                         videoStamps = stamps
                     }
-                    if let first = videoStamps.min(by: { $0.pts < $1.pts }) {
-                        // 跨度用「相邻 PTS 增量中位数 × (帧数-1)」估算：
-                        // 个别异常时间戳（跳变）不会把整体缩放带偏
-                        let sortedByPTS = videoStamps.sorted { $0.pts < $1.pts }
-                        var deltas: [Int64] = []
-                        if sortedByPTS.count > 1 {
-                            for i in 1..<sortedByPTS.count {
-                                let delta = sortedByPTS[i].pts - sortedByPTS[i - 1].pts
-                                if delta > 0, delta < 90000 { deltas.append(delta) }
-                            }
-                        }
-                        var span: Int64 = targetTicks
-                        if !deltas.isEmpty {
-                            deltas.sort()
-                            let median = deltas[deltas.count / 2]
-                            span = median * Int64(max(1, sortedByPTS.count - 1))
-                        }
-                        // 只有「原始跨度与目标时长明显不符」才缩放（例如源 PTS 被压缩 25 倍）；
-                        // 差异在 ±25% 内视为估算误差，保持 1:1，避免把正常源改坏
-                        let ratio = span > 0 ? Double(targetTicks) / Double(span) : 1.0
-                        let scale: Double = (ratio < 0.75 || ratio > 1.3) ? ratio : 1.0
-                        if writtenURI.count < 3 {
-                            DiagnosticsLog.write("[剪辑] 片段#" + String(writtenURI.count + 1)
-                                                 + " 帧=" + String(videoStamps.count)
-                                                 + " 原始跨度=" + String(format: "%.2f", Double(span) / 90000) + "s"
-                                                 + " 目标=" + String(format: "%.2f", pieceDuration) + "s"
-                                                 + " 缩放=" + String(format: "%.3f", scale))
-                        }
+                    if !stamps.isEmpty {
+                        // 不再依赖源 PTS 的数值，改为「按帧序重建时间轴」：
+                        //   视频 PTS = 显示顺序 × 每帧时长（用 PTS 排序得到显示顺序，抗脏值）
+                        //   视频 DTS = 解码顺序 × 每帧时长（单调、保证 ≤ PTS）
+                        //   音频 PTS = 包顺序 × 每包时长
+                        // 这样片段的 PTS 跨度精确等于目标时长，个别异常时间戳不再影响整体。
                         var bytes = [UInt8](piece)
-                        var clampedCount = 0
-                        let minRelative: Int64 = -90000          // -1 秒（允许编码器前置延迟）
-                        let maxRelative: Int64 = max(span, 1)
+                        let videoByPTS = videoStamps.sorted { $0.pts < $1.pts }
+                        var displayRank: [Int: Int] = [:]
+                        for (rank, stamp) in videoByPTS.enumerated() {
+                            displayRank[stamp.packetOffset] = rank
+                        }
+                        let videoByPacket = videoStamps.sorted { $0.packetOffset < $1.packetOffset }
+                        var decodeRank: [Int: Int] = [:]
+                        for (rank, stamp) in videoByPacket.enumerated() {
+                            decodeRank[stamp.packetOffset] = rank
+                        }
+                        let audioStamps = stamps.filter { $0.pid != scanResult.videoPID }
+                            .sorted { $0.packetOffset < $1.packetOffset }
+                        var audioRank: [Int: Int] = [:]
+                        for (rank, stamp) in audioStamps.enumerated() {
+                            audioRank[stamp.packetOffset] = rank
+                        }
+
+                        let videoStep = videoStamps.count > 1
+                            ? Double(targetTicks) / Double(videoStamps.count - 1)
+                            : Double(targetTicks)
+                        let audioStep = audioStamps.count > 1
+                            ? Double(targetTicks) / Double(audioStamps.count - 1)
+                            : 0
+
                         for stamp in stamps {
                             let ptsLocal = stamp.ptsOffset - startOffset + headerBytes
                             guard ptsLocal + 5 <= bytes.count else { continue }
-                            let rawRelative = stamp.pts - first.pts
-                            let relative = min(max(rawRelative, minRelative), maxRelative)
-                            if relative != rawRelative { clampedCount += 1 }
-                            let newPTS = outputCursorTicks + Int64((Double(relative) * scale).rounded())
+                            var offsetTicks: Int64
+                            if let rank = displayRank[stamp.packetOffset] {
+                                offsetTicks = Int64((Double(rank) * videoStep).rounded())
+                            } else if let rank = audioRank[stamp.packetOffset] {
+                                offsetTicks = Int64((Double(rank) * audioStep).rounded())
+                            } else {
+                                continue
+                            }
+                            let newPTS = outputCursorTicks + offsetTicks
                             writeTimestamp(&bytes, ptsLocal, newPTS)
                             if stamp.dtsOffset >= 0 {
                                 let dtsLocal = stamp.dtsOffset - startOffset + headerBytes
                                 if dtsLocal + 5 <= bytes.count {
-                                    let rawDTS = stamp.dts - first.pts
-                                    let clampedDTS = min(max(rawDTS, minRelative), maxRelative)
-                                    let newDTS = outputCursorTicks + Int64((Double(clampedDTS) * scale).rounded())
-                                    writeTimestamp(&bytes, dtsLocal, newDTS)
+                                    let dtsTicks: Int64
+                                    if let rank = decodeRank[stamp.packetOffset] {
+                                        dtsTicks = Int64((Double(rank) * videoStep).rounded())
+                                    } else {
+                                        dtsTicks = offsetTicks
+                                    }
+                                    writeTimestamp(&bytes, dtsLocal, outputCursorTicks + min(dtsTicks, offsetTicks + 0))
                                 }
                             }
                             if firstWrittenPTS < 0 { firstWrittenPTS = newPTS }
                             if newPTS > lastWrittenPTS { lastWrittenPTS = newPTS }
-                        }
-                        if clampedCount > 0 {
-                            DiagnosticsLog.write("[剪辑] 片段#" + String(writtenURI.count + 1)
-                                                 + " 修正异常时间戳 " + String(clampedCount) + " 处")
                         }
                         piece = Data(bytes)
                     }
