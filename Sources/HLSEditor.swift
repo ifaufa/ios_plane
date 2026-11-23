@@ -17,6 +17,7 @@ enum HLSEditor {
 
     struct PESStamp {
         let packetOffset: Int   // TS 包起始
+        let pid: Int
         let ptsOffset: Int      // PTS 字段（5 字节）绝对偏移
         let dtsOffset: Int      // DTS 字段绝对偏移（-1 表示没有）
         let pts: Int64
@@ -24,6 +25,8 @@ enum HLSEditor {
     }
 
     struct ScanResult {
+        var videoPID: Int?
+        var audioPID: Int?
         var psHeaders: [Data] = []
         var units: [UnitPointer] = []
         var stamps: [PESStamp] = []
@@ -147,6 +150,7 @@ enum HLSEditor {
                     let pts = readTimestamp(bytes, ptsOffset)
                     let dts = dtsOffset >= 0 && dtsOffset + 5 <= base + 188 ? readTimestamp(bytes, dtsOffset) : pts
                     result.stamps.append(PESStamp(packetOffset: base,
+                                                  pid: pid,
                                                   ptsOffset: ptsOffset,
                                                   dtsOffset: dtsOffset,
                                                   pts: pts,
@@ -168,6 +172,8 @@ enum HLSEditor {
             result.units.append(UnitPointer(offset: base, isIDR: isIDR))
         }
 
+        result.videoPID = videoPID
+        result.audioPID = audioPID
         if let pat = patPacket { result.psHeaders.append(pat) }
         if let pmt = pmtPacket { result.psHeaders.append(pmt) }
         return result
@@ -305,10 +311,40 @@ enum HLSEditor {
 
                     // 重写 PES 时间戳（视频 + 音频）
                     let stamps = scanResult.stamps.filter { $0.packetOffset >= startOffset && $0.packetOffset < endOffset }
-                    if let first = stamps.min(by: { $0.pts < $1.pts }),
-                       let last = stamps.max(by: { $0.pts < $1.pts }) {
-                        let span = last.pts - first.pts
-                        let scale = span > 0 ? Double(targetTicks) / Double(span) : 1.0
+                    let videoStamps: [PESStamp]
+                    if let videoPID = scanResult.videoPID {
+                        videoStamps = stamps.filter { $0.pid == videoPID }
+                    } else {
+                        videoStamps = stamps
+                    }
+                    if let first = videoStamps.min(by: { $0.pts < $1.pts }) {
+                        // 跨度用「相邻 PTS 增量中位数 × (帧数-1)」估算：
+                        // 个别异常时间戳（跳变）不会把整体缩放带偏
+                        let sortedByPTS = videoStamps.sorted { $0.pts < $1.pts }
+                        var deltas: [Int64] = []
+                        if sortedByPTS.count > 1 {
+                            for i in 1..<sortedByPTS.count {
+                                let delta = sortedByPTS[i].pts - sortedByPTS[i - 1].pts
+                                if delta > 0, delta < 90000 { deltas.append(delta) }
+                            }
+                        }
+                        var span: Int64 = targetTicks
+                        if !deltas.isEmpty {
+                            deltas.sort()
+                            let median = deltas[deltas.count / 2]
+                            span = median * Int64(max(1, sortedByPTS.count - 1))
+                        }
+                        // 只有「原始跨度与目标时长明显不符」才缩放（例如源 PTS 被压缩 25 倍）；
+                        // 差异在 ±25% 内视为估算误差，保持 1:1，避免把正常源改坏
+                        let ratio = span > 0 ? Double(targetTicks) / Double(span) : 1.0
+                        let scale: Double = (ratio < 0.75 || ratio > 1.3) ? ratio : 1.0
+                        if writtenURI.count < 3 {
+                            DiagnosticsLog.write("[剪辑] 片段#" + String(writtenURI.count + 1)
+                                                 + " 帧=" + String(videoStamps.count)
+                                                 + " 原始跨度=" + String(format: "%.2f", Double(span) / 90000) + "s"
+                                                 + " 目标=" + String(format: "%.2f", pieceDuration) + "s"
+                                                 + " 缩放=" + String(format: "%.3f", scale))
+                        }
                         var bytes = [UInt8](piece)
                         for stamp in stamps {
                             let ptsLocal = stamp.ptsOffset - startOffset + headerBytes
