@@ -38,6 +38,54 @@ enum HLSEditor {
         var duration: Double
         var fileSize: Int64
         var segmentCount: Int
+        var mixedParams: Bool
+    }
+
+    /// 一个待输出的片段（可来自不同源）
+    struct ExportClip {
+        let indexURL: URL
+        let start: Double
+        let end: Double
+        /// 编码参数指纹（用于判断是否需要 DISCONTINUITY）
+        let signatureKey: String
+    }
+
+    /// 源参数指纹（分辨率 / profile / 音频采样率与声道）
+    struct StreamSignature: Equatable {
+        let width: Int
+        let height: Int
+        let profile: Int
+        let sampleRate: Int
+        let channels: Int
+
+        var key: String { "\(width)x\(height)-p\(profile)-\(sampleRate)hz-\(channels)ch" }
+
+        var label: String {
+            var parts: [String] = []
+            if width > 0, height > 0 { parts.append("\(width)×\(height)") }
+            if sampleRate > 0 { parts.append("\(sampleRate)Hz") }
+            if channels > 0 { parts.append("\(channels)声道") }
+            return parts.isEmpty ? "未知参数" : parts.joined(separator: " ")
+        }
+    }
+
+    /// 读取首个分片，得到该源的编码参数
+    static func probeSignature(playlistURL: URL) -> StreamSignature? {
+        guard let entries = parsePlaylist(playlistURL), let first = entries.first else { return nil }
+        let url = playlistURL.deletingLastPathComponent().appendingPathComponent(first.uri)
+        guard let data = try? Data(contentsOf: url), data.count > 1024 else { return nil }
+        let demuxer = TSDemuxer()
+        demuxer.quiet = true
+        demuxer.consume(data)
+        demuxer.finish()
+        let video = demuxer.videoInfo()
+        let audio = demuxer.audioInfo()
+        guard video != nil || audio != nil else { return nil }
+        return StreamSignature(width: video?.width ?? 0,
+                               height: video?.height ?? 0,
+                               profile: Int(video?.profileLevel.0 ?? 0),
+                               sampleRate: audio?.sampleRate ?? 0,
+                               channels: audio?.channels ?? 0)
     }
 
     enum EditorError: LocalizedError {
@@ -225,27 +273,11 @@ enum HLSEditor {
 
     // MARK: - 导出
 
-    static func export(sourceTitle: String,
-                       indexURL: URL,
+    static func export(clips: [ExportClip],
+                       title: String,
                        outputRoot: URL,
-                       ranges: [(start: Double, end: Double)],
                        progress: ((Double) -> Void)? = nil) throws -> ExportResult {
-        guard let entries = parsePlaylist(indexURL) else { throw EditorError.playlistUnreadable }
-        let baseDir = indexURL.deletingLastPathComponent()
-
-        var cumulative: [Double] = []
-        var total = 0.0
-        for entry in entries {
-            cumulative.append(total)
-            total += entry.duration
-        }
-        guard total > 0.5 else { throw EditorError.emptyResult }
-
-        let cleaned = ranges
-            .map { (max(0, min($0.start, total)), max(0, min($0.end, total))) }
-            .filter { $0.1 - $0.0 >= 0.2 }
-            .sorted { $0.0 < $1.0 }
-        guard !cleaned.isEmpty else { throw EditorError.emptyResult }
+        guard !clips.isEmpty else { throw EditorError.emptyResult }
 
         let uuid = UUID().uuidString
         let outputDir = outputRoot.appendingPathComponent(uuid, isDirectory: true)
@@ -253,10 +285,16 @@ enum HLSEditor {
 
         var writtenURI: [String] = []
         var writtenDurations: [Double] = []
+        var discontinuityFlags: [Bool] = []
         var sourceCache: [String: Data] = [:]
         var outputCursorTicks: Int64 = 0
         var lastWrittenPTS: Int64 = -1
         var firstWrittenPTS: Int64 = -1
+        var lastSignatureKey: String?
+        var signatureSet: Set<String> = []
+        var baseDir = outputRoot
+        var entries: [Entry] = []
+        var cumulative: [Double] = []
 
         func loadSegment(_ uri: String) throws -> Data {
             if let cached = sourceCache[uri] { return cached }
@@ -267,7 +305,32 @@ enum HLSEditor {
         }
 
         do {
-            for range in cleaned {
+            for (clipIndex, clip) in clips.enumerated() {
+                guard let parsed = parsePlaylist(clip.indexURL) else { throw EditorError.playlistUnreadable }
+                entries = parsed
+                baseDir = clip.indexURL.deletingLastPathComponent()
+                sourceCache.removeAll(keepingCapacity: true)
+                cumulative = []
+                var total = 0.0
+                for entry in entries {
+                    cumulative.append(total)
+                    total += entry.duration
+                }
+                guard total > 0.5 else { continue }
+
+                // 参数变化 → 在该片段之前插入 DISCONTINUITY（RFC 8216 要求）
+                var needsDiscontinuity = false
+                if let last = lastSignatureKey, last != clip.signatureKey {
+                    needsDiscontinuity = true
+                    DiagnosticsLog.write("[剪辑] 参数变化 段#" + String(clipIndex + 1)
+                                         + "：" + last + " → " + clip.signatureKey + "，插入 DISCONTINUITY")
+                }
+                lastSignatureKey = clip.signatureKey
+                signatureSet.insert(clip.signatureKey)
+
+                let range = (max(0, min(clip.start, total)), max(0, min(clip.end, total)))
+                guard range.1 - range.0 >= 0.2 else { continue }
+
                 var index = 0
                 while index < entries.count {
                     let segStart = cumulative[index]
@@ -433,8 +496,10 @@ enum HLSEditor {
                     try piece.write(to: outputDir.appendingPathComponent(uri), options: .atomic)
                     writtenURI.append(uri)
                     writtenDurations.append(pieceDuration)
+                    discontinuityFlags.append(needsDiscontinuity)
+                    needsDiscontinuity = false
                     outputCursorTicks += targetTicks
-                    progress?(Double(writtenURI.count) / Double(max(1, cleaned.count * 4)))
+                    progress?(Double(writtenURI.count) / Double(max(1, clips.count * 4)))
                 }
             }
         } catch {
@@ -451,6 +516,9 @@ enum HLSEditor {
         var playlist = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-PLAYLIST-TYPE:VOD\n"
         playlist += "#EXT-X-TARGETDURATION:\(targetDuration)\n#EXT-X-MEDIA-SEQUENCE:0\n"
         for (offset, uri) in writtenURI.enumerated() {
+            if offset < discontinuityFlags.count, discontinuityFlags[offset] {
+                playlist += "#EXT-X-DISCONTINUITY\n"
+            }
             playlist += "#EXTINF:" + String(format: "%.3f", writtenDurations[offset]) + ",\n"
             playlist += uri + "\n"
         }
@@ -459,8 +527,9 @@ enum HLSEditor {
 
         let sumDuration = writtenDurations.reduce(0, +)
         // 写入状态文件，保证后续"转 MP4"可用
+        let isMixed = signatureSet.count > 1
         let state = SegmentJobState(id: uuid,
-                                    title: sourceTitle,
+                                    title: title,
                                     sourceURL: "edit://" + uuid,
                                     container: "ts",
                                     segmentURLs: writtenURI,
@@ -478,7 +547,8 @@ enum HLSEditor {
                                     discontinuities: nil,
                                     keyChanges: nil,
                                     excluded: nil,
-                                    pendingParse: false)
+                                    pendingParse: false,
+                                    mixedParams: isMixed)
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         if let data = try? encoder.encode(state) {
@@ -496,7 +566,7 @@ enum HLSEditor {
 
         let size = directorySize(outputDir)
         progress?(1.0)
-        DiagnosticsLog.write("[剪辑] 导出完成 源=" + sourceTitle
+        DiagnosticsLog.write("[剪辑] 导出完成 源=" + title
                              + " 段=" + String(writtenURI.count)
                              + " 时长=" + String(format: "%.1f", sumDuration) + "s"
                              + " 大小=" + ByteCountFormatter.string(fromByteCount: size, countStyle: .file))

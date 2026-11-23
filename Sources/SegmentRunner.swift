@@ -27,6 +27,8 @@ struct SegmentJobState: Codable {
     var excluded: [Int]? = nil
     /// 占位状态：已创建目录但播放列表尚未解析完成（此时被杀，重启后应重新开始解析）
     var pendingParse: Bool? = nil
+    /// 该产物由「不同编码参数」的片段合并而成（播放可尝试，但不能转 MP4）
+    var mixedParams: Bool? = nil
 }
 
 /// 分片下载引擎：后台 URLSession + 全局 8 / 每任务 4 并发 + 断点续传

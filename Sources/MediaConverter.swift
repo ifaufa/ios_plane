@@ -18,6 +18,9 @@ enum MediaConverter {
         guard let state = loadState(dir: dir) else {
             throw ConversionError(message: "缺少分片状态文件，无法转换")
         }
+        if state.mixedParams == true {
+            throw ConversionError(message: "该条目由「不同编码参数」的片段合并而成，无法转 MP4（播放可以，但转封装会产出坏文件）")
+        }
 
         cleanStaleTemps(in: dir)
 
