@@ -17,6 +17,14 @@ final class SegmentEditStore: ObservableObject {
         }
     }
 
+    /// 编辑功能总开关（关闭后，所有编辑相关入口与操作一律不可用）
+    static let enabledKey = "edit.featureEnabled"
+
+    /// 当前是否启用编辑功能（集中判断，后续新增的编辑能力都走这里）
+    static var isEnabled: Bool {
+        (UserDefaults.standard.object(forKey: enabledKey) as? Bool) ?? true
+    }
+
     weak var library: VideoLibrary?
 
     @Published var ranges: [Range] = []
@@ -70,6 +78,10 @@ final class SegmentEditStore: ObservableObject {
     }
 
     func export(source: VideoItem?) async {
+        guard Self.isEnabled else {
+            notice = "编辑功能已在「设置 → 编辑」中关闭"
+            return
+        }
         guard !isExporting else { return }
         guard let source else {
             notice = "当前没有正在播放的视频"

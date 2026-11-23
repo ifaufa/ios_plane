@@ -25,6 +25,7 @@ struct PlayerView: View {
     /// 手动解锁旋转后，本次播放不再自动锁定方向
     @State private var orientationUnlocked = false
     @State private var showEditor = false
+    @AppStorage(SegmentEditStore.enabledKey) private var editEnabled = true
 
     var body: some View {
         ZStack {
@@ -152,13 +153,15 @@ struct PlayerView: View {
                         .frame(width: 28, height: 28)
                 }
 
-                Button {
-                    showEditor = true
-                } label: {
-                    Image(systemName: "scissors")
-                        .font(.caption)
-                        .foregroundStyle(.white.opacity(0.8))
-                        .frame(width: 28, height: 28)
+                if editEnabled {
+                    Button {
+                        showEditor = true
+                    } label: {
+                        Image(systemName: "scissors")
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.8))
+                            .frame(width: 28, height: 28)
+                    }
                 }
 
                 Spacer()
@@ -582,6 +585,7 @@ private struct LoopRangeSheet: View {
 private struct SegmentEditSheet: View {
     @ObservedObject var playback: PlaybackStore
     @ObservedObject var editor = SegmentEditStore.shared
+    @AppStorage(SegmentEditStore.enabledKey) private var editEnabled = true
     @Environment(\.dismiss) private var dismiss
 
     private var totalDuration: Double {
@@ -595,6 +599,13 @@ private struct SegmentEditSheet: View {
     var body: some View {
         NavigationStack {
             Form {
+                if !editEnabled {
+                    Section {
+                        Label("编辑功能已在「设置 → 编辑」中关闭", systemImage: "exclamationmark.triangle")
+                            .font(.callout)
+                            .foregroundStyle(.orange)
+                    }
+                }
                 Section {
                     if let a = selectionStart, let b = selectionEnd, b > a {
                         HStack {
@@ -607,9 +618,11 @@ private struct SegmentEditSheet: View {
                         Button("剪掉这一段（保留其余）") {
                             editor.cutOut(start: a, end: b, duration: totalDuration)
                         }
+                        .disabled(!editEnabled)
                         Button("只保留这一段") {
                             editor.keepOnly(start: a, end: b)
                         }
+                        .disabled(!editEnabled)
                     } else {
                         Text("请先用播放器上的「设 A / 设 B」选出区间")
                             .font(.callout)
@@ -659,7 +672,7 @@ private struct SegmentEditSheet: View {
                             if editor.isExporting { ProgressView() }
                         }
                     }
-                    .disabled(editor.ranges.isEmpty || editor.isExporting)
+                    .disabled(editor.ranges.isEmpty || editor.isExporting || !editEnabled)
 
                     if editor.isExporting {
                         ProgressView(value: editor.progress)

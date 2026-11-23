@@ -1021,6 +1021,7 @@ struct EngineSettingsView: View {
     @StateObject private var playPrefs = PlaybackPrefs.shared
     @AppStorage(LibraryGrouping.groupPrefKey) private var groupBySeries = true
     @AppStorage(PlayerView.autoLandscapeKey) private var autoLandscape = true
+    @AppStorage(SegmentEditStore.enabledKey) private var editEnabled = true
 
     private func summaryText(_ timing: PlaybackPrefs.SeriesTiming) -> String {
         let intro = timing.introLength > 0 ? "片头 " + PlaybackStore.timeText(timing.introLength) : "无片头"
@@ -1073,6 +1074,13 @@ struct EngineSettingsView: View {
                     Text("播放")
                 } footer: {
                     Text("开启后：横视频自动横屏、竖视频自动竖屏、近似方形跟随设备；关闭则完全跟随设备方向。播放器上的锁形按钮可临时解锁旋转。")
+                }
+                Section {
+                    Toggle("启用视频编辑功能", isOn: $editEnabled)
+                } header: {
+                    Text("编辑")
+                } footer: {
+                    Text("总开关。关闭后，所有编辑相关入口与操作（当前为分片剪辑，后续新增的编辑能力同样）一律不可用；已生成的剪辑成片不受影响。")
                 }
                 if segmentEnabled {
                     Section {
