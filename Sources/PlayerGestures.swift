@@ -220,6 +220,18 @@ final class PlayerHostViewController: UIViewController, UIGestureRecognizerDeleg
     }
 
     @objc private func handleSingleTap(_ gesture: UITapGestureRecognizer) {
+        // 设点模式：上半屏 = 设 A，下半屏 = 设 B；否则仍是显隐控制条
+        let store = PlaybackStore.shared
+        if store.isMarkingPoints {
+            let y = gesture.location(in: view).y
+            if y < view.bounds.height / 2 {
+                store.markA()
+            } else {
+                store.markB()
+            }
+            model.pokeChrome()
+            return
+        }
         model.toggleChrome()
     }
 

@@ -631,6 +631,40 @@ final class PlaybackStore: ObservableObject {
         DiagnosticsLog.write("[播放] 已清空循环区间")
     }
 
+    /// 手势设点模式（上半屏设 A / 下半屏设 B）
+    @Published var isMarkingPoints = false
+
+    /// 直接设置起点（时间框提交时用）
+    func updateLoopStart(_ seconds: Double) {
+        let total = currentDuration
+        var value = max(0, seconds)
+        if total > 1 { value = min(value, total - 1) }
+        if let end = loopEnd { value = min(value, max(0, end - 1)) }
+        loopStart = value
+        rebuildLoopObserverIfNeeded()
+    }
+
+    /// 直接设置终点
+    func updateLoopEnd(_ seconds: Double) {
+        guard let start = loopStart else { return }
+        let total = currentDuration
+        var value = max(0, seconds)
+        if total > 0 { value = min(value, total - 0.05) }
+        value = max(value, start + 1)
+        loopEnd = value
+        rebuildLoopObserverIfNeeded()
+    }
+
+    /// 手势：设 A（当前播放位置）
+    func markA() {
+        setLoopStartToCurrent()
+    }
+
+    /// 手势：设 B（当前播放位置）
+    func markB() {
+        setLoopEndToCurrent()
+    }
+
     func setLoopStartToCurrent() {
         let position = player.currentTime().seconds
         guard position.isFinite, position >= 0 else { return }
@@ -643,6 +677,7 @@ final class PlaybackStore: ObservableObject {
         if let end = loopEnd { value = min(value, end - 1) }
         loopStart = max(0, value)
         rebuildLoopObserverIfNeeded()
+        notifyLoop("已设 A " + Self.timeText(loopStart ?? 0))
     }
 
     func setLoopEndToCurrent() {
@@ -660,6 +695,7 @@ final class PlaybackStore: ObservableObject {
         if total > 0 { value = min(value, total - 0.05) }
         loopEnd = value
         rebuildLoopObserverIfNeeded()
+        notifyLoop("已设 B " + Self.timeText(value))
     }
 
     func adjustLoopStart(by delta: Double) {

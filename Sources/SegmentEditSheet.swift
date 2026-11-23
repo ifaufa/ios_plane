@@ -8,6 +8,8 @@ struct SegmentEditSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var showClearConfirm = false
+    @State private var showLibraryPicker = false
+    @State private var editingClip: SegmentEditStore.Clip?
 
     private var totalDuration: Double {
         let value = playback.player.currentItem?.duration.seconds ?? 0
@@ -54,10 +56,29 @@ struct SegmentEditSheet: View {
                             .font(.callout)
                             .foregroundStyle(.secondary)
                     }
+
+                    Button {
+                        playback.isMarkingPoints = true
+                        dismiss()
+                    } label: {
+                        Label("开始手势设点（上半屏=设A，下半屏=设B）", systemImage: "hand.tap")
+                    }
+                    .disabled(!editEnabled)
                 } header: {
                     Text("选区")
                 } footer: {
-                    Text("切点吸附到最近关键帧（误差通常 ≤1 秒），不重新编码、无损。切换视频后清单会保留，可继续「追加到清单」实现跨源合并。")
+                    Text("切点吸附到最近关键帧（误差通常 ≤1 秒），不重新编码、无损。手势设点仅在设点模式下生效，退出后单击恢复显隐控制条。")
+                }
+
+                Section {
+                    Button {
+                        showLibraryPicker = true
+                    } label: {
+                        Label("从视频库添加素材…", systemImage: "text.badge.plus")
+                    }
+                    .disabled(!editEnabled)
+                } footer: {
+                    Text("可直接选择库里的分片视频（整片或指定区间）加入清单，不需要先播放它。")
                 }
 
                 Section {
@@ -66,27 +87,36 @@ struct SegmentEditSheet: View {
                             .foregroundStyle(.secondary)
                     } else {
                         ForEach(editor.clips) { clip in
-                            HStack(spacing: 8) {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(Self.rangeText(clip.start, clip.end))
-                                        .monospacedDigit()
-                                    HStack(spacing: 6) {
-                                        Text(clip.sourceTitle)
-                                            .lineLimit(1)
-                                        Text(clip.signatureLabel)
-                                        if clip.sourceMixed {
-                                            Text("混合参数")
-                                                .foregroundStyle(.orange)
+                            Button {
+                                editingClip = clip
+                            } label: {
+                                HStack(spacing: 8) {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(Self.rangeText(clip.start, clip.end))
+                                            .monospacedDigit()
+                                            .foregroundStyle(.primary)
+                                        HStack(spacing: 6) {
+                                            Text(clip.sourceTitle)
+                                                .lineLimit(1)
+                                            Text(clip.signatureLabel)
+                                            if clip.sourceMixed {
+                                                Text("混合参数")
+                                                    .foregroundStyle(.orange)
+                                            }
                                         }
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
                                     }
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
+                                    Spacer()
+                                    Text(PlaybackStore.timeText(clip.duration))
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    Image(systemName: "chevron.right")
+                                        .font(.caption2)
+                                        .foregroundStyle(.tertiary)
                                 }
-                                Spacer()
-                                Text(PlaybackStore.timeText(clip.duration))
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
                             }
+                            .buttonStyle(.plain)
                         }
                         .onMove { editor.move(from: $0, to: $1) }
                         .onDelete { indexSet in
@@ -104,7 +134,7 @@ struct SegmentEditSheet: View {
                             .font(.caption)
                     }
                 } footer: {
-                    Text("点「编辑」可拖动排序；导出按清单顺序拼接。")
+                    Text("点片段可修改起止；点「编辑」可拖动排序。")
                 }
 
                 Section {
@@ -131,6 +161,19 @@ struct SegmentEditSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("关闭") { dismiss() }
+                }
+            }
+            .sheet(isPresented: $showLibraryPicker) {
+                LibraryClipPicker(items: libraryItems) { item, start, end in
+                    editor.appendSelection(start: start, end: end, source: item)
+                }
+            }
+            .sheet(item: $editingClip) { clip in
+                ClipRangeEditor(title: clip.sourceTitle,
+                                duration: clip.end > clip.start ? maxDurationHint(clip) : clip.end,
+                                initialStart: clip.start,
+                                initialEnd: clip.end) { start, end in
+                    editor.updateClip(clip.id, start: start, end: end)
                 }
             }
             .confirmationDialog("清空剪辑清单？", isPresented: $showClearConfirm, titleVisibility: .visible) {
@@ -160,7 +203,142 @@ struct SegmentEditSheet: View {
         }
     }
 
+    private var libraryItems: [VideoItem] {
+        guard let library = editor.library else { return [] }
+        return library.items.filter { $0.fileName.lowercased().hasSuffix(".m3u8") }
+    }
+
+    private func maxDurationHint(_ clip: SegmentEditStore.Clip) -> Double {
+        guard let library = editor.library,
+              let item = library.items.first(where: { $0.id == clip.sourceID }) else { return clip.end }
+        return max(item.duration, clip.end)
+    }
+
     private static func rangeText(_ start: Double, _ end: Double) -> String {
         PlaybackStore.timeText(start) + " – " + PlaybackStore.timeText(end)
+    }
+}
+
+// MARK: - 素材选择
+
+private struct LibraryClipPicker: View {
+    let items: [VideoItem]
+    let onPick: (VideoItem, Double, Double) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if items.isEmpty {
+                    Text("视频库里没有可用的分片视频")
+                        .foregroundStyle(.secondary)
+                }
+                ForEach(items) { item in
+                    NavigationLink {
+                        ClipRangeEditor(title: item.title,
+                                        duration: item.duration,
+                                        initialStart: 0,
+                                        initialEnd: item.duration) { start, end in
+                            onPick(item, start, end)
+                            dismiss()
+                        }
+                    } label: {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(item.title)
+                                .lineLimit(1)
+                            HStack(spacing: 8) {
+                                Text(PlaybackStore.timeText(item.duration))
+                                Text("分片")
+                            }
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("选择素材")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - 区间编辑（整片 / 指定区间）
+
+private struct ClipRangeEditor: View {
+    let title: String
+    let duration: Double
+    let onSave: (Double, Double) -> Void
+
+    @State private var start: Double
+    @State private var end: Double
+    @Environment(\.dismiss) private var dismiss
+
+    init(title: String, duration: Double, initialStart: Double, initialEnd: Double, onSave: @escaping (Double, Double) -> Void) {
+        self.title = title
+        self.duration = duration
+        self.onSave = onSave
+        _start = State(initialValue: max(0, initialStart))
+        _end = State(initialValue: max(initialStart, initialEnd))
+    }
+
+    private var valid: Bool {
+        end - start >= 0.2 && end <= max(duration, end)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    HStack {
+                        Text("起点 A")
+                        Spacer()
+                        TimeMaskField(seconds: start, maxSeconds: max(1, duration)) { start = $0 }
+                            .frame(width: 112, height: 34)
+                    }
+                    HStack {
+                        Text("终点 B")
+                        Spacer()
+                        TimeMaskField(seconds: end, maxSeconds: max(1, duration)) { end = $0 }
+                            .frame(width: 112, height: 34)
+                    }
+                    HStack {
+                        Text("区间长度")
+                        Spacer()
+                        Text(PlaybackStore.timeText(max(0, end - start)))
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
+                    Button("使用整片（0 – 结束）") {
+                        start = 0
+                        end = duration
+                    }
+                } header: {
+                    Text(title)
+                } footer: {
+                    Text("只输入数字，冒号自动补（hh:mm:ss）。区间至少 0.2 秒。")
+                }
+
+                Section {
+                    Button("保存") {
+                        onSave(start, end)
+                        dismiss()
+                    }
+                    .disabled(!valid)
+                }
+            }
+            .navigationTitle("选择区间")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
+                }
+            }
+        }
     }
 }

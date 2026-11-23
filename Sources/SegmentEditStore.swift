@@ -100,6 +100,28 @@ final class SegmentEditStore: ObservableObject {
         DiagnosticsLog.write("[剪辑] 追加片段 源=" + clip.sourceTitle
                              + " " + Self.timeText(clip.start) + "–" + Self.timeText(clip.end)
                              + " 共 " + String(clips.count) + " 段")
+
+        // 立即提示参数差异（避免导出时才发现）
+        let keys = Set(clips.map { $0.signatureKey })
+        if keys.count > 1 {
+            notice = "注意：清单里存在不同编码参数（" + clip.signatureLabel
+                + "），合并后播放可能异常，且该产物不能转 MP4。"
+        }
+    }
+
+    /// 修改清单中某个片段的起止
+    func updateClip(_ id: UUID, start: Double, end: Double) {
+        guard let index = clips.firstIndex(where: { $0.id == id }) else { return }
+        let a = max(0, start)
+        let b = max(a, end)
+        guard b - a >= 0.2 else {
+            notice = "区间太短（至少 0.2 秒）"
+            return
+        }
+        clips[index].start = a
+        clips[index].end = b
+        DiagnosticsLog.write("[剪辑] 修改片段 源=" + clips[index].sourceTitle
+                             + " " + Self.timeText(a) + "–" + Self.timeText(b))
     }
 
     func remove(_ id: UUID) {

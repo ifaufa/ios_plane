@@ -1,4 +1,4 @@
-﻿import SwiftUI
+import SwiftUI
 import AVKit
 import UIKit
 
@@ -66,6 +66,26 @@ struct PlayerView: View {
                 .padding(.horizontal, 26)
                 .padding(.vertical, 18)
                 .background(.black.opacity(0.72), in: RoundedRectangle(cornerRadius: 16))
+            }
+
+            if store.isMarkingPoints {
+                HStack(spacing: 10) {
+                    Image(systemName: "hand.tap")
+                        .font(.caption)
+                    Text("上半屏单击=设A ｜ 下半屏单击=设B")
+                        .font(.caption)
+                    Button("完成") { store.isMarkingPoints = false }
+                        .font(.caption.weight(.semibold))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(.white.opacity(0.22), in: Capsule())
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 9)
+                .background(.black.opacity(0.72), in: Capsule())
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .padding(.top, 44)
             }
 
             if let notice = store.loopNotice {
@@ -526,7 +546,7 @@ private struct LoopRangeSheet: View {
         NavigationStack {
             Form {
                 Section {
-                    adjustRow(title: "起点 A", value: store.loopStart) { store.adjustLoopStart(by: $0) }
+                    adjustRow(title: "起点 A", value: store.loopStart, onAdjust: { store.adjustLoopStart(by: $0) }, onCommitValue: { store.updateLoopStart($0) })
                     Button("用当前时间设为 A") { store.setLoopStartToCurrent() }
                 } header: {
                     Text("起点 A")
@@ -535,7 +555,7 @@ private struct LoopRangeSheet: View {
                 }
 
                 Section {
-                    adjustRow(title: "终点 B", value: store.loopEnd) { store.adjustLoopEnd(by: $0) }
+                    adjustRow(title: "终点 B", value: store.loopEnd, onAdjust: { store.adjustLoopEnd(by: $0) }, onCommitValue: { store.updateLoopEnd($0) })
                     Button("用当前时间设为 B") { store.setLoopEndToCurrent() }
                         .disabled(store.loopStart == nil)
                 } header: {
@@ -579,14 +599,21 @@ private struct LoopRangeSheet: View {
     @ViewBuilder
     private func adjustRow(title: String,
                            value: Double?,
-                           onAdjust: @escaping (Double) -> Void) -> some View {
+                           onAdjust: @escaping (Double) -> Void,
+                           onCommitValue: @escaping (Double) -> Void) -> some View {
         VStack(spacing: 10) {
             HStack {
                 Text(title)
                 Spacer()
-                Text(value.map { PlaybackStore.timeText($0) } ?? "未设置")
-                    .font(.body.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                if let value {
+                    TimeMaskField(seconds: value,
+                                  maxSeconds: max(1, duration),
+                                  onCommit: onCommitValue)
+                        .frame(width: 112, height: 34)
+                } else {
+                    Text("未设置")
+                        .foregroundStyle(.secondary)
+                }
             }
             HStack(spacing: 8) {
                 ForEach([(-5.0, "-5s"), (-1.0, "-1s"), (1.0, "+1s"), (5.0, "+5s")], id: \.0) { item in
