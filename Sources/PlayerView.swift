@@ -47,6 +47,27 @@ struct PlayerView: View {
                 countdownCard(next: next)
             }
 
+            if store.isFinished {
+                VStack(spacing: 12) {
+                    Text("已播放完")
+                        .font(.headline)
+                    Button {
+                        store.player.seek(to: .zero)
+                        store.play()
+                    } label: {
+                        Text("重新播放")
+                            .font(.caption.weight(.medium))
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 7)
+                            .background(.white.opacity(0.18), in: Capsule())
+                    }
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 26)
+                .padding(.vertical, 18)
+                .background(.black.opacity(0.72), in: RoundedRectangle(cornerRadius: 16))
+            }
+
             if let notice = store.loopNotice {
                 Text(notice)
                     .font(.caption)

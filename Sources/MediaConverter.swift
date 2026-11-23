@@ -329,10 +329,37 @@ enum MediaConverter {
     }
     private static func loadState(dir: URL) -> SegmentJobState? {
         let stateURL = dir.appendingPathComponent("state.json")
-        guard let data = try? Data(contentsOf: stateURL) else { return nil }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        return try? decoder.decode(SegmentJobState.self, from: data)
+        if let data = try? Data(contentsOf: stateURL),
+           let state = try? decoder.decode(SegmentJobState.self, from: data) {
+            return state
+        }
+        // 回退：没有 state.json（剪辑产物 / 外部导入的分片）→ 按 index.m3u8 合成
+        let indexURL = dir.appendingPathComponent("index.m3u8")
+        guard let entries = HLSEditor.parsePlaylist(indexURL) else { return nil }
+        let durations = entries.map { $0.duration }
+        DiagnosticsLog.write("[转MP4] 无 state.json，按 index.m3u8 合成状态（段=" + String(entries.count) + "）")
+        return SegmentJobState(id: dir.lastPathComponent,
+                               title: dir.lastPathComponent,
+                               sourceURL: "local://" + dir.lastPathComponent,
+                               container: "ts",
+                               segmentURLs: entries.map { $0.uri },
+                               durations: durations,
+                               completed: Array(0..<entries.count),
+                               mediaSequence: 0,
+                               totalDuration: durations.reduce(0, +),
+                               createdAt: Date(),
+                               updatedAt: Date(),
+                               initURL: nil,
+                               keyURI: nil,
+                               keyIV: nil,
+                               paused: true,
+                               failure: nil,
+                               discontinuities: nil,
+                               keyChanges: nil,
+                               excluded: nil,
+                               pendingParse: false)
     }
 
     /// 清理下载中断/历史转换遗留的临时文件，避免虚增分片目录大小

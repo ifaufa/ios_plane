@@ -15,6 +15,8 @@ final class PlaybackStore: ObservableObject {
     @Published var isFullscreen = false
     @Published var isPlaying = false
     @Published var expectsPlaying = false
+    /// 已播放到结尾且没有下一集（用于显示"已播放完"、并阻止自愈逻辑反复恢复）
+    @Published private(set) var isFinished = false
     /// 是否正在 AirPlay 投屏
     @Published var isAirPlaying = false
     @Published var errorNotice: String?
@@ -154,6 +156,7 @@ final class PlaybackStore: ObservableObject {
         waitingTicks = 0
         pauseTicks = 0
         pauseRecoveries = 0
+        isFinished = false
         cancelCountdown()
         resetEpisodeSkipState(fromBeginning: fromBeginning)
         // 循环区间不跨集
@@ -260,9 +263,22 @@ final class PlaybackStore: ObservableObject {
     // MARK: - 播放控制（用户意图入口，全屏与悬浮窗共用）
 
     func play() {
+        isFinished = false
         expectsPlaying = true
         if player.rate == 0 { player.play() }
         isPlaying = player.rate > 0
+    }
+
+    /// 播放到结尾且没有下一集：明确进入"已播放完"状态，
+    /// 关闭 expectsPlaying 以免"意外暂停自愈"反复恢复一个已经结束的视频
+    private func finishPlayback() {
+        isFinished = true
+        expectsPlaying = false
+        pauseTicks = 0
+        waitingTicks = 0
+        player.pause()
+        isPlaying = false
+        DiagnosticsLog.write("[播放] 已播放完，进入结束状态（不再自动恢复）")
     }
 
     func pause() {
@@ -474,7 +490,8 @@ final class PlaybackStore: ObservableObject {
         guard ignoreOutroSuppressed || !outroSuppressed else { return }
         guard PlaybackPrefs.shared.autoNext, let current = currentVideo else { return }
         guard let next = nextEpisodeProvider?(current) else {
-            DiagnosticsLog.write("[播放] 无下一集（\(reason)）")
+            DiagnosticsLog.write("[播放] 无下一集（\(reason)）→ 进入结束状态")
+            finishPlayback()
             return
         }
         outroTriggered = true
