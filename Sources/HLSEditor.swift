@@ -574,7 +574,8 @@ enum HLSEditor {
                             dirName: uuid,
                             duration: sumDuration,
                             fileSize: size,
-                            segmentCount: writtenURI.count)
+                            segmentCount: writtenURI.count,
+                            mixedParams: isMixed)
     }
 
     static func directorySize(_ url: URL) -> Int64 {
