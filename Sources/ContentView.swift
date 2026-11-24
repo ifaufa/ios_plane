@@ -275,17 +275,10 @@ struct ContentView: View {
             } message: { info in
                 Text(info.message)
             }
-            .onChange(of: pendingLibraryAction) { action in
-                if let action {
-                    DiagnosticsLog.write("[库] 待确认操作：\(action.title)（\(action.id)）")
-                }
-            }
             .alert(item: $pendingLibraryAction) { action in
                 Alert(title: Text(action.title),
                       message: Text(action.message),
-                      primaryButton: action.isDestructive
-                          ? .destructive(Text(action.confirmTitle)) { perform(action) }
-                          : .default(Text(action.confirmTitle)) { perform(action) },
+                      primaryButton: primaryButton(for: action),
                       secondaryButton: .cancel(Text("取消")))
             }
             .confirmationDialog("该源体积较大",
@@ -780,6 +773,13 @@ struct ContentView: View {
                             .font(.caption2)
                     }
                 }
+    }
+
+    private func primaryButton(for action: LibraryAction) -> Alert.Button {
+        if action.isDestructive {
+            return .destructive(Text(action.confirmTitle)) { perform(action) }
+        }
+        return .default(Text(action.confirmTitle)) { perform(action) }
     }
 
     private func perform(_ action: LibraryAction) {
