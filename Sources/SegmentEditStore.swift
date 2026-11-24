@@ -86,15 +86,55 @@ final class SegmentEditStore: ObservableObject {
         DiagnosticsLog.write("[剪辑] 只保留 " + Self.timeText(clip.start) + "–" + Self.timeText(clip.end))
     }
 
+    enum AppendOutcome {
+        /// 已加入，附带清单当前总段数
+        case added(Int)
+        /// 该视频已有 N 段在清单里（需要用户确认是否重复添加）
+        case duplicate(Int)
+        /// 无法加入（附原因）
+        case unavailable(String)
+    }
+
+    /// 该条目是否有可剪辑的分片（纯 MP4 且分片已删除 → nil）
+    func playlistRelPath(for item: VideoItem) -> String? {
+        let fm = FileManager.default
+        if item.fileName.lowercased().hasSuffix(".m3u8") {
+            let url = VideoLibrary.assetsDir.appendingPathComponent(item.fileName)
+            return fm.fileExists(atPath: url.path) ? item.fileName : nil
+        }
+        if let dir = item.segmentDirName, !dir.isEmpty {
+            let rel = dir + "/index.m3u8"
+            let url = VideoLibrary.assetsDir.appendingPathComponent(rel)
+            if fm.fileExists(atPath: url.path) { return rel }
+        }
+        return nil
+    }
+
+    /// 该视频在清单里已有的段数
+    func existingClipCount(for sourceID: UUID) -> Int {
+        clips.filter { $0.sourceID == sourceID }.count
+    }
+
     /// 把当前选区追加到清单（支持跨源合并）
-    func appendSelection(start: Double, end: Double, source: VideoItem?) {
-        guard let source, let clip = makeClip(source: source, start: start, end: end) else {
+    @discardableResult
+    func appendSelection(start: Double,
+                         end: Double,
+                         source: VideoItem?,
+                         allowDuplicate: Bool = false) -> AppendOutcome {
+        guard let source else {
             notice = "当前没有正在播放的视频"
-            return
+            return .unavailable("当前没有正在播放的视频")
+        }
+        guard let clip = makeClip(source: source, start: start, end: end) else {
+            return .unavailable(notice ?? "该视频无法加入清单")
         }
         guard clip.duration >= 0.2 else {
             notice = "选区太短（至少 0.2 秒）"
-            return
+            return .unavailable("选区太短（至少 0.2 秒）")
+        }
+        if !allowDuplicate {
+            let existing = existingClipCount(for: source.id)
+            if existing > 0 { return .duplicate(existing) }
         }
         clips.append(clip)
         DiagnosticsLog.write("[剪辑] 追加片段 源=" + clip.sourceTitle
@@ -107,6 +147,24 @@ final class SegmentEditStore: ObservableObject {
             notice = "注意：清单里存在不同编码参数（" + clip.signatureLabel
                 + "），合并后播放可能异常，且该产物不能转 MP4。"
         }
+        return .added(clips.count)
+    }
+
+    /// 整片加入清单（视频库长按菜单用）
+    @discardableResult
+    func appendWhole(_ item: VideoItem, allowDuplicate: Bool = false) -> AppendOutcome {
+        var duration = item.duration
+        if duration <= 0.5, let rel = playlistRelPath(for: item) {
+            let indexURL = VideoLibrary.assetsDir.appendingPathComponent(rel)
+            if let entries = HLSEditor.parsePlaylist(indexURL) {
+                duration = entries.reduce(0) { $0 + $1.duration }
+            }
+        }
+        guard duration > 0.5 else {
+            notice = "无法读取该视频时长"
+            return .unavailable("无法读取该视频时长")
+        }
+        return appendSelection(start: 0, end: duration, source: item, allowDuplicate: allowDuplicate)
     }
 
     /// 修改清单中某个片段的起止
@@ -147,33 +205,33 @@ final class SegmentEditStore: ObservableObject {
     // MARK: - 片段构造
 
     private func makeClip(source: VideoItem, start: Double, end: Double) -> Clip? {
-        guard source.fileName.lowercased().hasSuffix(".m3u8") else {
-            notice = "该条目已是 MP4，仅分片视频支持剪辑"
+        guard let rel = playlistRelPath(for: source) else {
+            notice = "该视频没有可用的分片（可能已转 MP4 且分片已删除）"
             return nil
         }
-        let signature = signatureFor(source)
+        let signature = signatureFor(rel: rel)
         return Clip(id: UUID(),
                     sourceID: source.id,
                     sourceTitle: source.title,
-                    fileName: source.fileName,
+                    fileName: rel,
                     start: max(0, start),
                     end: max(0, end),
                     signatureKey: signature?.key ?? "unknown",
                     signatureLabel: signature?.label ?? "未知参数",
-                    sourceMixed: isMixedProduct(source))
+                    sourceMixed: isMixedProduct(rel: rel))
     }
 
-    private func signatureFor(_ source: VideoItem) -> HLSEditor.StreamSignature? {
-        if let cached = signatureCache[source.fileName] { return cached }
-        let url = VideoLibrary.assetsDir.appendingPathComponent(source.fileName)
+    private func signatureFor(rel: String) -> HLSEditor.StreamSignature? {
+        if let cached = signatureCache[rel] { return cached }
+        let url = VideoLibrary.assetsDir.appendingPathComponent(rel)
         let signature = HLSEditor.probeSignature(playlistURL: url)
-        if let signature { signatureCache[source.fileName] = signature }
+        if let signature { signatureCache[rel] = signature }
         return signature
     }
 
-    /// 该条目本身是否是"混合参数"合并产物
-    private func isMixedProduct(_ source: VideoItem) -> Bool {
-        let dir = VideoLibrary.assetsDir.appendingPathComponent((source.fileName as NSString).deletingLastPathComponent)
+    /// 该条目本身是否是"混合参数"合并产物（按分片目录里的 state.json 判断）
+    private func isMixedProduct(rel: String) -> Bool {
+        let dir = VideoLibrary.assetsDir.appendingPathComponent((rel as NSString).deletingLastPathComponent)
         let stateURL = dir.appendingPathComponent("state.json")
         guard let data = try? Data(contentsOf: stateURL) else { return false }
         let decoder = JSONDecoder()

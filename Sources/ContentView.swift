@@ -13,6 +13,14 @@ struct ContentView: View {
     @AppStorage(LibraryGrouping.ungroupedExpandedKey) private var ungroupedExpanded = false
     @State private var pendingLibraryAction: LibraryAction?
     @State private var pendingLargeConvert: VideoItem?
+    @State private var pendingClipAdd: ClipAddRequest?
+
+    struct ClipAddRequest: Identifiable {
+        let id = UUID()
+        let item: VideoItem
+        let openEditor: Bool
+        let existing: Int
+    }
     @State private var toastText: String?
     @State private var pendingToast: String?
     @State private var showAdd = false
@@ -279,6 +287,24 @@ struct ContentView: View {
                       primaryButton: .destructive(Text(action.confirmTitle)) { perform(action) },
                       secondaryButton: .cancel(Text("取消")))
             }
+            .confirmationDialog("已在清单中",
+                                isPresented: Binding(get: { pendingClipAdd != nil },
+                                                     set: { if !$0 { pendingClipAdd = nil } }),
+                                titleVisibility: .visible,
+                                presenting: pendingClipAdd) { request in
+                Button("仍然添加") {
+                    let item = request.item
+                    let openEditor = request.openEditor
+                    pendingClipAdd = nil
+                    if case .added(let total) = SegmentEditStore.shared.appendWhole(item, allowDuplicate: true) {
+                        showToast("已加入剪辑清单：\(item.title)（共 \(total) 段）")
+                        if openEditor { openClipEditor(for: item) }
+                    }
+                }
+                Button("取消", role: .cancel) { pendingClipAdd = nil }
+            } message: { request in
+                Text("《\(request.item.title)》已在剪辑清单中 \(request.existing) 段，是否再添加一次？")
+            }
             .confirmationDialog("该源体积较大",
                                 isPresented: Binding(get: { pendingLargeConvert != nil },
                                                      set: { if !$0 { pendingLargeConvert = nil } }),
@@ -527,6 +553,18 @@ struct ContentView: View {
                 renameTarget = item
             } label: {
                 Label("重命名…", systemImage: "pencil")
+            }
+            if library.hasSegments(item) {
+                Button {
+                    addToClipList(item, openEditor: false)
+                } label: {
+                    Label("添加到剪辑素材列表", systemImage: "text.badge.plus")
+                }
+                Button {
+                    addToClipList(item, openEditor: true)
+                } label: {
+                    Label("分片剪辑", systemImage: "scissors")
+                }
             }
             if !library.isMissing(item) {
                 Button {
@@ -793,6 +831,29 @@ struct ContentView: View {
             return
         }
         playback.open(video: item, url: url, fromBeginning: fromBeginning)
+    }
+
+    /// 视频库长按菜单：加入剪辑清单（可选是否直接打开剪辑面板）
+    private func addToClipList(_ item: VideoItem, openEditor: Bool) {
+        guard SegmentEditStore.isEnabled else {
+            showToast("编辑功能已在「设置 → 编辑」中关闭")
+            return
+        }
+        switch SegmentEditStore.shared.appendWhole(item) {
+        case .added(let total):
+            showToast("已加入剪辑清单：\(item.title)（共 \(total) 段）")
+            if openEditor { openClipEditor(for: item) }
+        case .duplicate(let existing):
+            pendingClipAdd = ClipAddRequest(item: item, openEditor: openEditor, existing: existing)
+        case .unavailable(let reason):
+            showToast(reason)
+        }
+    }
+
+    /// 打开该视频的播放器，并自动弹出剪辑面板
+    private func openClipEditor(for item: VideoItem) {
+        PlaybackStore.shared.pendingOpenEditor = true
+        openPlayer(item, fromBeginning: false)
     }
 
     private func exportTS(_ item: VideoItem) {

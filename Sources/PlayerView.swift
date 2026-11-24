@@ -109,7 +109,13 @@ struct PlayerView: View {
             SegmentEditSheet(playback: store)
         }
         .persistentSystemOverlays(immersive ? .hidden : .automatic)
-        .onAppear { startPlayback() }
+        .onAppear {
+            startPlayback()
+            if store.pendingOpenEditor {
+                store.pendingOpenEditor = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { showEditor = true }
+            }
+        }
         .onDisappear { stopPlayback() }
     }
 

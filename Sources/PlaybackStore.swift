@@ -633,6 +633,8 @@ final class PlaybackStore: ObservableObject {
 
     /// 手势设点模式（上半屏设 A / 下半屏设 B）
     @Published var isMarkingPoints = false
+    /// 打开播放器后是否自动弹出剪辑面板（视频库「分片剪辑」入口用）
+    var pendingOpenEditor = false
 
     /// 直接设置起点（时间框提交时用）
     func updateLoopStart(_ seconds: Double) {

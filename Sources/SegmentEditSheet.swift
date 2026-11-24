@@ -10,6 +10,15 @@ struct SegmentEditSheet: View {
     @State private var showClearConfirm = false
     @State private var showLibraryPicker = false
     @State private var editingClip: SegmentEditStore.Clip?
+    @State private var pendingAppend: PendingAppend?
+
+    struct PendingAppend: Identifiable {
+        let id = UUID()
+        let item: VideoItem
+        let start: Double
+        let end: Double
+        let existing: Int
+    }
 
     private var totalDuration: Double {
         let value = playback.player.currentItem?.duration.seconds ?? 0
@@ -48,7 +57,7 @@ struct SegmentEditSheet: View {
                         }
                         .disabled(!editEnabled)
                         Button("追加到清单（用于多段/跨源合并）") {
-                            editor.appendSelection(start: a, end: b, source: playback.currentVideo)
+                            appendCurrentSelection(start: a, end: b)
                         }
                         .disabled(!editEnabled)
                     } else {
@@ -165,8 +174,31 @@ struct SegmentEditSheet: View {
             }
             .sheet(isPresented: $showLibraryPicker) {
                 LibraryClipPicker(items: libraryItems) { item, start, end in
-                    editor.appendSelection(start: start, end: end, source: item)
+                    switch editor.appendSelection(start: start, end: end, source: item) {
+                    case .added:
+                        break
+                    case .duplicate(let existing):
+                        pendingAppend = PendingAppend(item: item, start: start, end: end, existing: existing)
+                    case .unavailable(let reason):
+                        editor.notice = reason
+                    }
                 }
+            }
+            .confirmationDialog("已在清单中",
+                                isPresented: Binding(
+                                    get: { pendingAppend != nil },
+                                    set: { if !$0 { pendingAppend = nil } }
+                                ),
+                                titleVisibility: .visible,
+                                presenting: pendingAppend) { pending in
+                Button("仍然添加") {
+                    editor.appendSelection(start: pending.start, end: pending.end,
+                                           source: pending.item, allowDuplicate: true)
+                    pendingAppend = nil
+                }
+                Button("取消", role: .cancel) { pendingAppend = nil }
+            } message: { pending in
+                Text("《\(pending.item.title)》已加入 \(pending.existing) 段，是否再添加一次？")
             }
             .sheet(item: $editingClip) { clip in
                 ClipRangeEditor(title: clip.sourceTitle,
@@ -203,9 +235,25 @@ struct SegmentEditSheet: View {
         }
     }
 
+    private func appendCurrentSelection(start: Double, end: Double) {
+        guard let item = playback.currentVideo else {
+            editor.notice = "当前没有正在播放的视频"
+            return
+        }
+        switch editor.appendSelection(start: start, end: end, source: item) {
+        case .added:
+            break
+        case .duplicate(let existing):
+            pendingAppend = PendingAppend(item: item, start: start, end: end, existing: existing)
+        case .unavailable(let reason):
+            editor.notice = reason
+        }
+    }
+
+    /// 只要还有可剪辑分片（含"已转 MP4 但保留分片"的条目）就应出现在列表中
     private var libraryItems: [VideoItem] {
         guard let library = editor.library else { return [] }
-        return library.items.filter { $0.fileName.lowercased().hasSuffix(".m3u8") }
+        return library.items.filter { editor.playlistRelPath(for: $0) != nil }
     }
 
     private func maxDurationHint(_ clip: SegmentEditStore.Clip) -> Double {
