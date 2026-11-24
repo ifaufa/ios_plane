@@ -7,7 +7,7 @@ struct SegmentEditSheet: View {
     @AppStorage(SegmentEditStore.enabledKey) private var editEnabled = true
     @Environment(\.dismiss) private var dismiss
 
-    @State private var showClearConfirm = false
+    @State private var confirmingClear = false
     @State private var showLibraryPicker = false
     @State private var editingClip: SegmentEditStore.Clip?
     @State private var pendingAppend: PendingAppend?
@@ -106,7 +106,14 @@ struct SegmentEditSheet: View {
                                 editor.remove(editor.clips[index].id)
                             }
                         }
-                        Button("清空清单", role: .destructive) { showClearConfirm = true }
+                        Button(confirmingClear ? "确认清空？（再点一次）" : "清空清单", role: .destructive) {
+                            if confirmingClear {
+                                editor.clear()
+                                confirmingClear = false
+                            } else {
+                                confirmingClear = true
+                            }
+                        }
                     }
                 } header: {
                     Text("剪辑清单（\(editor.clips.count) 段 · 共 \(PlaybackStore.timeText(editor.totalDuration))）")
@@ -120,11 +127,22 @@ struct SegmentEditSheet: View {
                 }
 
                 Section {
+                    if let warning = editor.mixedWarningText {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Label("参数不一致", systemImage: "exclamationmark.triangle.fill")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.orange)
+                            Text(warning)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
                     Button {
                         editor.export()
                     } label: {
                         HStack {
-                            Text(editor.isExporting ? "导出中…" : "导出为新的分片视频")
+                            Text(exportButtonTitle)
                             Spacer()
                             if editor.isExporting { ProgressView() }
                         }
@@ -196,22 +214,7 @@ struct SegmentEditSheet: View {
                     editor.updateClip(clip.id, start: start, end: end)
                 }
             }
-            .confirmationDialog("清空剪辑清单？", isPresented: $showClearConfirm, titleVisibility: .visible) {
-                Button("清空", role: .destructive) { editor.clear() }
-                Button("取消", role: .cancel) {}
-            }
-            .confirmationDialog(editor.pendingMixedPrompt?.title ?? "",
-                                isPresented: Binding(
-                                    get: { editor.pendingMixedPrompt != nil },
-                                    set: { if !$0 { editor.pendingMixedPrompt = nil } }
-                                ),
-                                titleVisibility: .visible,
-                                presenting: editor.pendingMixedPrompt) { _ in
-                Button("仍然合并", role: .destructive) { editor.confirmMixedExport() }
-                Button("取消", role: .cancel) { editor.pendingMixedPrompt = nil }
-            } message: { prompt in
-                Text(prompt.message)
-            }
+
             .alert("剪辑", isPresented: Binding(
                 get: { editor.notice != nil },
                 set: { if !$0 { editor.notice = nil } }
@@ -285,6 +288,11 @@ struct SegmentEditSheet: View {
         guard let library = editor.library,
               let item = library.items.first(where: { $0.id == clip.sourceID }) else { return clip.end }
         return max(item.duration, clip.end)
+    }
+
+    private var exportButtonTitle: String {
+        if editor.isExporting { return "导出中…" }
+        return editor.mixedWarningText == nil ? "导出为新的分片视频" : "仍然合并导出（参数不一致）"
     }
 
     private static func rangeText(_ start: Double, _ end: Double) -> String {

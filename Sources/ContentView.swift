@@ -13,14 +13,8 @@ struct ContentView: View {
     @AppStorage(LibraryGrouping.ungroupedExpandedKey) private var ungroupedExpanded = false
     @State private var pendingLibraryAction: LibraryAction?
     @State private var pendingLargeConvert: VideoItem?
-    @State private var pendingClipAdd: ClipAddRequest?
 
-    struct ClipAddRequest: Identifiable {
-        let id = UUID()
-        let item: VideoItem
-        let openEditor: Bool
-        let existing: Int
-    }
+
     @State private var toastText: String?
     @State private var pendingToast: String?
     @State private var showAdd = false
@@ -281,23 +275,17 @@ struct ContentView: View {
             } message: { info in
                 Text(info.message)
             }
+            .onChange(of: pendingLibraryAction) { action in
+                if let action {
+                    DiagnosticsLog.write("[库] 待确认操作：\(action.title)（\(action.id)）")
+                }
+            }
             .alert(item: $pendingLibraryAction) { action in
                 Alert(title: Text(action.title),
                       message: Text(action.message),
-                      primaryButton: .destructive(Text(action.confirmTitle)) { perform(action) },
-                      secondaryButton: .cancel(Text("取消")))
-            }
-            .alert(item: $pendingClipAdd) { request in
-                Alert(title: Text("已在清单中"),
-                      message: Text("《\(request.item.title)》已在剪辑清单中 \(request.existing) 段，是否再添加一次？"),
-                      primaryButton: .default(Text("仍然添加")) {
-                          let item = request.item
-                          let openEditor = request.openEditor
-                          if case .added(let total) = SegmentEditStore.shared.appendWhole(item, allowDuplicate: true) {
-                              showToast("已加入剪辑清单：\(item.title)（共 \(total) 段）")
-                              if openEditor { openClipEditor(for: item) }
-                          }
-                      },
+                      primaryButton: action.isDestructive
+                          ? .destructive(Text(action.confirmTitle)) { perform(action) }
+                          : .default(Text(action.confirmTitle)) { perform(action) },
                       secondaryButton: .cancel(Text("取消")))
             }
             .confirmationDialog("该源体积较大",
@@ -814,8 +802,13 @@ struct ContentView: View {
         case .deleteDownload(let task):
             DiagnosticsLog.write("[清理] 执行 删除下载任务 \(task.title)")
             downloads.remove(task)
+        case .clipDuplicate(let item, let openEditor, _):
+            if case .added(let total) = SegmentEditStore.shared.appendWhole(item, allowDuplicate: true) {
+                showToast("已加入剪辑清单：\(item.title)（共 \(total) 段）")
+                if openEditor { openClipEditor(for: item) }
+            }
         }
-    }
+        }
 
     private func openPlayer(_ item: VideoItem, fromBeginning: Bool = false) {
         let url = library.localURL(for: item)
@@ -839,7 +832,7 @@ struct ContentView: View {
             showToast("已加入剪辑清单：\(item.title)（共 \(total) 段）")
             if openEditor { openClipEditor(for: item) }
         case .duplicate(let existing):
-            pendingClipAdd = ClipAddRequest(item: item, openEditor: openEditor, existing: existing)
+            pendingLibraryAction = .clipDuplicate(item, openEditor: openEditor, existing: existing)
         case .unavailable(let reason):
             showToast(reason)
         }
@@ -1234,6 +1227,8 @@ enum LibraryAction: Identifiable {
     case cleanupSegments
     case cleanupMP4
     case deleteDownload(DownloadTaskInfo)
+    /// 该视频已在剪辑清单中，询问是否重复加入
+    case clipDuplicate(VideoItem, openEditor: Bool, existing: Int)
 
     var id: String {
         switch self {
@@ -1243,6 +1238,7 @@ enum LibraryAction: Identifiable {
         case .cleanupSegments: return "cleanup-seg"
         case .cleanupMP4: return "cleanup-mp4"
         case .deleteDownload(let task): return "task-\(task.id)"
+        case .clipDuplicate(let item, _, let existing): return "clip-\(item.id)-\(existing)"
         }
     }
 
@@ -1254,6 +1250,7 @@ enum LibraryAction: Identifiable {
         case .cleanupSegments: return "清理所有分片？"
         case .cleanupMP4: return "删除所有 MP4？"
         case .deleteDownload: return "删除这个下载任务？"
+        case .clipDuplicate: return "已在剪辑清单中"
         }
     }
 
@@ -1265,6 +1262,8 @@ enum LibraryAction: Identifiable {
         case .cleanupSegments: return "将删除所有已保留的原始分片，只保留 MP4。此操作不可恢复。"
         case .cleanupMP4: return "将删除所有已转换的 MP4，原始分片全部保留，可随时再次转换。"
         case .deleteDownload: return "将删除该任务已下载的分片与任务记录，且不可恢复。视频库中已转换的成品不受影响。"
+        case .clipDuplicate(let item, _, let existing):
+            return "《\(item.title)》已在剪辑清单中 \(existing) 段，是否再添加一次？"
         }
     }
 
@@ -1276,7 +1275,14 @@ enum LibraryAction: Identifiable {
         case .cleanupSegments: return "清理"
         case .cleanupMP4: return "删除 MP4"
         case .deleteDownload: return "删除"
+        case .clipDuplicate: return "仍然添加"
         }
+    }
+
+    /// 「仍然添加」不是破坏性操作，用普通按钮样式
+    var isDestructive: Bool {
+        if case .clipDuplicate = self { return false }
+        return true
     }
 }
 

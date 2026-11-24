@@ -30,19 +30,13 @@ final class SegmentEditStore: ObservableObject {
         var duration: Double { max(0, end - start) }
     }
 
-    struct MixedPrompt: Identifiable {
-        let id = UUID()
-        var title: String
-        var message: String
-    }
-
     weak var library: VideoLibrary?
 
     @Published var clips: [Clip] = []
     @Published var isExporting = false
     @Published var progress: Double = 0
     @Published var notice: String?
-    @Published var pendingMixedPrompt: MixedPrompt?
+
 
     private var signatureCache: [String: HLSEditor.StreamSignature] = [:]
     private var pendingExportClips: [Clip] = []
@@ -302,7 +296,26 @@ final class SegmentEditStore: ObservableObject {
 
     // MARK: - 导出
 
-    /// UI 调用：先做参数一致性检查，必要时弹确认
+    /// 参数不一致的提示文案（内联展示在导出区，不再用弹窗：同视图多弹窗会互相吞掉）
+    var mixedWarningText: String? {
+        guard !clips.isEmpty else { return nil }
+        var parts: [String] = []
+        let keys = Set(clips.map { $0.signatureKey })
+        if keys.count > 1 {
+            var seen: [String: String] = [:]
+            for clip in clips where seen[clip.signatureKey] == nil {
+                seen[clip.signatureKey] = clip.signatureLabel
+            }
+            parts.append("不同编码参数：" + seen.values.joined(separator: " / "))
+            parts.append("合并后可能黑屏/花屏/中途停止，且不能转 MP4")
+        }
+        if clips.contains(where: { $0.sourceMixed }) {
+            parts.append("含「混合参数」产物，问题可能叠加")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: "；")
+    }
+
+    /// UI 调用：直接导出（参数不一致只在界面上做提示，不再弹窗确认）
     func export() {
         guard Self.isEnabled else {
             notice = "编辑功能已在「设置 → 编辑」中关闭"
@@ -313,35 +326,10 @@ final class SegmentEditStore: ObservableObject {
             notice = "请先设置要保留的片段"
             return
         }
-
-        let keys = Set(clips.map { $0.signatureKey })
-        var warnings: [String] = []
-        if keys.count > 1 {
-            var seen: [String: String] = [:]
-            for clip in clips where seen[clip.signatureKey] == nil {
-                seen[clip.signatureKey] = clip.signatureLabel
-            }
-            let detail = seen.values.joined(separator: " / ")
-            warnings.append("检测到不同编码参数：" + detail)
-            warnings.append("合并后可能出现黑屏、花屏或中途停止，且该产物不能转 MP4。")
+        if mixedWarningText != nil {
+            DiagnosticsLog.write("[剪辑] 导出（参数不一致，用户已确认）")
         }
-        if clips.contains(where: { $0.sourceMixed }) {
-            warnings.append("清单中包含「混合参数」产物，问题可能叠加。")
-        }
-
-        guard !warnings.isEmpty else {
-            pendingExportClips = clips
-            Task { await performExport() }
-            return
-        }
-
         pendingExportClips = clips
-        pendingMixedPrompt = MixedPrompt(title: "参数不一致", message: warnings.joined(separator: "\n"))
-    }
-
-    /// 用户在弹窗里选择"仍然合并"
-    func confirmMixedExport() {
-        pendingMixedPrompt = nil
         Task { await performExport() }
     }
 
