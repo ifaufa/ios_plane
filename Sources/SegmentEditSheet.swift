@@ -11,6 +11,8 @@ struct SegmentEditSheet: View {
     @State private var showLibraryPicker = false
     @State private var editingClip: SegmentEditStore.Clip?
     @State private var pendingAppend: PendingAppend?
+    /// 自己管理编辑态（不用 EditButton：放在 List 内容里会与行重建互相触发，造成持续闪动）
+    @State private var editMode: EditMode = .inactive
 
     struct PendingAppend: Identifiable {
         let id = UUID()
@@ -96,36 +98,7 @@ struct SegmentEditSheet: View {
                             .foregroundStyle(.secondary)
                     } else {
                         ForEach(editor.clips) { clip in
-                            Button {
-                                editingClip = clip
-                            } label: {
-                                HStack(spacing: 8) {
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(Self.rangeText(clip.start, clip.end))
-                                            .monospacedDigit()
-                                            .foregroundStyle(.primary)
-                                        HStack(spacing: 6) {
-                                            Text(clip.sourceTitle)
-                                                .lineLimit(1)
-                                            Text(clip.signatureLabel)
-                                            if clip.sourceMixed {
-                                                Text("混合参数")
-                                                    .foregroundStyle(.orange)
-                                            }
-                                        }
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                    }
-                                    Spacer()
-                                    Text(PlaybackStore.timeText(clip.duration))
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                    Image(systemName: "chevron.right")
-                                        .font(.caption2)
-                                        .foregroundStyle(.tertiary)
-                                }
-                            }
-                            .buttonStyle(.plain)
+                            clipRow(clip)
                         }
                         .onMove { editor.move(from: $0, to: $1) }
                         .onDelete { indexSet in
@@ -136,12 +109,7 @@ struct SegmentEditSheet: View {
                         Button("清空清单", role: .destructive) { showClearConfirm = true }
                     }
                 } header: {
-                    HStack {
-                        Text("剪辑清单（\(editor.clips.count) 段 · 共 \(PlaybackStore.timeText(editor.totalDuration))）")
-                        Spacer()
-                        EditButton()
-                            .font(.caption)
-                    }
+                    Text("剪辑清单（\(editor.clips.count) 段 · 共 \(PlaybackStore.timeText(editor.totalDuration))）")
                 } footer: {
                     if editor.totalDuration > 7200 {
                         Text("清单总时长已超过 2 小时（\(PlaybackStore.timeText(editor.totalDuration))），导出耗时与占用会明显增加。")
@@ -170,11 +138,26 @@ struct SegmentEditSheet: View {
                     Text("导出后会在视频库顶部生成新条目（原片保留）。跨参数合并的产物不能转 MP4。")
                 }
             }
+            .environment(\.editMode, $editMode)
             .navigationTitle("剪辑")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("关闭") { dismiss() }
+                }
+                ToolbarItemGroup(placement: .primaryAction) {
+                    if !editor.clips.isEmpty {
+                        Menu {
+                            Button("按标题升序") { editor.sortClips(by: .titleAsc) }
+                            Button("按标题降序") { editor.sortClips(by: .titleDesc) }
+                            Button("按加入顺序") { editor.sortClips(by: .added) }
+                        } label: {
+                            Image(systemName: "arrow.up.arrow.down")
+                        }
+                        Button(editMode == .active ? "完成" : "编辑") {
+                            editMode = (editMode == .active ? .inactive : .active)
+                        }
+                    }
                 }
             }
             .sheet(isPresented: $showLibraryPicker) {
@@ -237,6 +220,43 @@ struct SegmentEditSheet: View {
             } message: {
                 Text(editor.notice ?? "")
             }
+        }
+    }
+
+    /// 清单行：用普通 HStack + 点击手势（编辑态下让位给拖拽手柄，避免手势冲突）
+    @ViewBuilder
+    private func clipRow(_ clip: SegmentEditStore.Clip) -> some View {
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(Self.rangeText(clip.start, clip.end))
+                    .monospacedDigit()
+                    .foregroundStyle(.primary)
+                HStack(spacing: 6) {
+                    Text(clip.sourceTitle)
+                        .lineLimit(1)
+                    Text(clip.signatureLabel)
+                    if clip.sourceMixed {
+                        Text("混合参数")
+                            .foregroundStyle(.orange)
+                    }
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Text(PlaybackStore.timeText(clip.duration))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if editMode != .active {
+                Image(systemName: "chevron.right")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            guard editMode != .active else { return }
+            editingClip = clip
         }
     }
 

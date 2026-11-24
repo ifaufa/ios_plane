@@ -24,6 +24,8 @@ final class SegmentEditStore: ObservableObject {
         var signatureLabel: String
         /// 该源本身已是"混合参数"产物
         var sourceMixed: Bool
+        /// 加入清单的时间（用于"按加入顺序"排序）
+        var addedAt: Date = Date()
 
         var duration: Double { max(0, end - start) }
     }
@@ -213,6 +215,31 @@ final class SegmentEditStore: ObservableObject {
         clips[index].end = b
         DiagnosticsLog.write("[剪辑] 修改片段 源=" + clips[index].sourceTitle
                              + " " + Self.timeText(a) + "–" + Self.timeText(b))
+    }
+
+    enum ClipSort {
+        case titleAsc
+        case titleDesc
+        case added
+    }
+
+    /// 排序会覆盖手动拖动顺序（之后仍可再拖动调整）
+    func sortClips(by mode: ClipSort) {
+        switch mode {
+        case .titleAsc:
+            clips.sort { lhs, rhs in
+                if lhs.sourceTitle == rhs.sourceTitle { return lhs.start < rhs.start }
+                return lhs.sourceTitle.localizedStandardCompare(rhs.sourceTitle) == .orderedAscending
+            }
+        case .titleDesc:
+            clips.sort { lhs, rhs in
+                if lhs.sourceTitle == rhs.sourceTitle { return lhs.start < rhs.start }
+                return lhs.sourceTitle.localizedStandardCompare(rhs.sourceTitle) == .orderedDescending
+            }
+        case .added:
+            clips.sort { $0.addedAt < $1.addedAt }
+        }
+        DiagnosticsLog.write("[剪辑] 清单排序 方式=\(mode) 段数=\(clips.count)")
     }
 
     func remove(_ id: UUID) {
