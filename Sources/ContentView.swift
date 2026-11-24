@@ -287,23 +287,18 @@ struct ContentView: View {
                       primaryButton: .destructive(Text(action.confirmTitle)) { perform(action) },
                       secondaryButton: .cancel(Text("取消")))
             }
-            .confirmationDialog("已在清单中",
-                                isPresented: Binding(get: { pendingClipAdd != nil },
-                                                     set: { if !$0 { pendingClipAdd = nil } }),
-                                titleVisibility: .visible,
-                                presenting: pendingClipAdd) { request in
-                Button("仍然添加") {
-                    let item = request.item
-                    let openEditor = request.openEditor
-                    pendingClipAdd = nil
-                    if case .added(let total) = SegmentEditStore.shared.appendWhole(item, allowDuplicate: true) {
-                        showToast("已加入剪辑清单：\(item.title)（共 \(total) 段）")
-                        if openEditor { openClipEditor(for: item) }
-                    }
-                }
-                Button("取消", role: .cancel) { pendingClipAdd = nil }
-            } message: { request in
-                Text("《\(request.item.title)》已在剪辑清单中 \(request.existing) 段，是否再添加一次？")
+            .alert(item: $pendingClipAdd) { request in
+                Alert(title: Text("已在清单中"),
+                      message: Text("《\(request.item.title)》已在剪辑清单中 \(request.existing) 段，是否再添加一次？"),
+                      primaryButton: .default(Text("仍然添加")) {
+                          let item = request.item
+                          let openEditor = request.openEditor
+                          if case .added(let total) = SegmentEditStore.shared.appendWhole(item, allowDuplicate: true) {
+                              showToast("已加入剪辑清单：\(item.title)（共 \(total) 段）")
+                              if openEditor { openClipEditor(for: item) }
+                          }
+                      },
+                      secondaryButton: .cancel(Text("取消")))
             }
             .confirmationDialog("该源体积较大",
                                 isPresented: Binding(get: { pendingLargeConvert != nil },
