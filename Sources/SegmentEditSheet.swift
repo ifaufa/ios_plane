@@ -143,7 +143,12 @@ struct SegmentEditSheet: View {
                             .font(.caption)
                     }
                 } footer: {
-                    Text("点片段可修改起止；点「编辑」可拖动排序。")
+                    if editor.totalDuration > 7200 {
+                        Text("清单总时长已超过 2 小时（\(PlaybackStore.timeText(editor.totalDuration))），导出耗时与占用会明显增加。")
+                            .foregroundStyle(.orange)
+                    } else {
+                        Text("点片段可修改起止；点「编辑」可拖动排序。")
+                    }
                 }
 
                 Section {
@@ -267,52 +272,201 @@ struct SegmentEditSheet: View {
     }
 }
 
-// MARK: - 素材选择
+// MARK: - 素材选择（支持批量加入）
 
 private struct LibraryClipPicker: View {
     let items: [VideoItem]
     let onPick: (VideoItem, Double, Double) -> Void
 
+    @ObservedObject private var editor = SegmentEditStore.shared
     @Environment(\.dismiss) private var dismiss
+
+    @State private var selecting = false
+    @State private var selected: Set<UUID> = []
+    @State private var onlyUnadded = false
+    @State private var summary: BatchSummary?
+
+    struct BatchSummary: Identifiable {
+        let id = UUID()
+        var added: Int
+        var duplicates: [VideoItem]
+        var failures: [String]
+        var totalDuration: Double
+    }
+
+    private var visibleItems: [VideoItem] {
+        guard onlyUnadded else { return items }
+        return items.filter { editor.existingClipCount(for: $0.id) == 0 }
+    }
+
+    private var allSelected: Bool {
+        !visibleItems.isEmpty && visibleItems.allSatisfy { selected.contains($0.id) }
+    }
 
     var body: some View {
         NavigationStack {
             List {
-                if items.isEmpty {
-                    Text("视频库里没有可用的分片视频")
-                        .foregroundStyle(.secondary)
+                Section {
+                    Toggle("仅显示未加入清单", isOn: $onlyUnadded)
                 }
-                ForEach(items) { item in
-                    NavigationLink {
-                        ClipRangeEditor(title: item.title,
-                                        duration: item.duration,
-                                        initialStart: 0,
-                                        initialEnd: item.duration) { start, end in
-                            onPick(item, start, end)
-                            dismiss()
-                        }
-                    } label: {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(item.title)
-                                .lineLimit(1)
-                            HStack(spacing: 8) {
-                                Text(PlaybackStore.timeText(item.duration))
-                                Text("分片")
-                            }
-                            .font(.caption2)
+
+                Section {
+                    if visibleItems.isEmpty {
+                        Text(items.isEmpty ? "视频库里没有可用的分片视频" : "没有符合条件的素材")
                             .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(visibleItems) { item in
+                            row(item)
                         }
+                    }
+                } footer: {
+                    if selecting {
+                        Text("多选模式下按「整片」加入；需要局部区间时，加入后在清单里点该片段修改起止。")
                     }
                 }
             }
-            .navigationTitle("选择素材")
+            .navigationTitle(selecting ? "选择素材（\(selected.count)）" : "选择素材")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("取消") { dismiss() }
                 }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button(selecting ? "完成" : "选择") {
+                        selecting.toggle()
+                        if !selecting { selected.removeAll() }
+                    }
+                    .disabled(items.isEmpty)
+                }
+            }
+            .safeAreaInset(edge: .bottom) {
+                if selecting {
+                    batchBar
+                }
+            }
+            .alert(item: $summary) { value in
+                if value.duplicates.isEmpty {
+                    return Alert(title: Text("已加入 \(value.added) 段"),
+                                 message: Text(messageText(value)),
+                                 dismissButton: .default(Text("完成")) { dismiss() })
+                }
+                return Alert(title: Text("已加入 \(value.added) 段"),
+                             message: Text(messageText(value) + "\n跳过 \(value.duplicates.count) 个（已在清单中）"),
+                             primaryButton: .default(Text("仍然加入这 \(value.duplicates.count) 个")) {
+                                 editor.appendBatch(value.duplicates, allowDuplicate: true)
+                                 dismiss()
+                             },
+                             secondaryButton: .cancel(Text("完成")) { dismiss() })
             }
         }
+    }
+
+    // MARK: 行
+
+    @ViewBuilder
+    private func row(_ item: VideoItem) -> some View {
+        if selecting {
+            Button {
+                if selected.contains(item.id) {
+                    selected.remove(item.id)
+                } else {
+                    selected.insert(item.id)
+                }
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: selected.contains(item.id) ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 20))
+                        .foregroundStyle(selected.contains(item.id) ? Color.accentColor : Color.secondary)
+                    rowContent(item)
+                }
+            }
+            .buttonStyle(.plain)
+        } else {
+            NavigationLink {
+                ClipRangeEditor(title: item.title,
+                                duration: item.duration,
+                                initialStart: 0,
+                                initialEnd: item.duration) { start, end in
+                    onPick(item, start, end)
+                    dismiss()
+                }
+            } label: {
+                rowContent(item)
+            }
+        }
+    }
+
+    private func rowContent(_ item: VideoItem) -> some View {
+        let info = editor.signatureInfo(for: item)
+        let existing = editor.existingClipCount(for: item.id)
+        return VStack(alignment: .leading, spacing: 3) {
+            Text(item.title)
+                .lineLimit(1)
+                .foregroundStyle(.primary)
+            HStack(spacing: 6) {
+                Text(PlaybackStore.timeText(item.duration))
+                Text(info.label)
+                if info.mixed {
+                    Text("混合参数")
+                        .foregroundStyle(.orange)
+                }
+                if existing > 0 {
+                    Text("已在清单 \(existing) 段")
+                        .foregroundStyle(.blue)
+                }
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    // MARK: 批量
+
+    private var batchBar: some View {
+        HStack(spacing: 12) {
+            Button(allSelected ? "取消全选" : "全选") {
+                if allSelected {
+                    selected.removeAll()
+                } else {
+                    selected = Set(visibleItems.map { $0.id })
+                }
+            }
+            .buttonStyle(.bordered)
+
+            Spacer()
+
+            Button("加入清单（\(selected.count)）") {
+                commitBatch()
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(selected.isEmpty)
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 10)
+        .background(.bar)
+    }
+
+    private func commitBatch() {
+        let chosen = visibleItems.filter { selected.contains($0.id) }
+        guard !chosen.isEmpty else { return }
+        let result = editor.appendBatch(chosen)
+        selected.removeAll()
+        summary = BatchSummary(added: result.added,
+                               duplicates: result.duplicates,
+                               failures: result.failures,
+                               totalDuration: result.totalDuration)
+    }
+
+    private func messageText(_ value: BatchSummary) -> String {
+        var lines: [String] = []
+        lines.append("清单共 \(editor.clips.count) 段，总时长 \(PlaybackStore.timeText(value.totalDuration))")
+        if value.totalDuration > 7200 {
+            lines.append("提示：清单已超过 2 小时，导出耗时与占用会明显增加。")
+        }
+        if !value.failures.isEmpty {
+            lines.append("未加入：" + value.failures.prefix(3).joined(separator: "；"))
+        }
+        return lines.joined(separator: "\n")
     }
 }
 

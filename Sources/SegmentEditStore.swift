@@ -96,18 +96,19 @@ final class SegmentEditStore: ObservableObject {
     }
 
     /// 该条目是否有可剪辑的分片（纯 MP4 且分片已删除 → nil）
+    /// 判定统一收敛到 VideoLibrary.hasPlaylist，避免两处逻辑漂移
     func playlistRelPath(for item: VideoItem) -> String? {
-        let fm = FileManager.default
-        if item.fileName.lowercased().hasSuffix(".m3u8") {
-            let url = VideoLibrary.assetsDir.appendingPathComponent(item.fileName)
-            return fm.fileExists(atPath: url.path) ? item.fileName : nil
-        }
-        if let dir = item.segmentDirName, !dir.isEmpty {
-            let rel = dir + "/index.m3u8"
-            let url = VideoLibrary.assetsDir.appendingPathComponent(rel)
-            if fm.fileExists(atPath: url.path) { return rel }
-        }
+        guard library?.hasPlaylist(item) ?? false else { return nil }
+        if item.fileName.lowercased().hasSuffix(".m3u8") { return item.fileName }
+        if let dir = item.segmentDirName, !dir.isEmpty { return dir + "/index.m3u8" }
         return nil
+    }
+
+    /// 素材列表展示用的参数信息
+    func signatureInfo(for item: VideoItem) -> (label: String, mixed: Bool) {
+        guard let rel = playlistRelPath(for: item) else { return ("无分片", false) }
+        let signature = signatureFor(rel: rel)
+        return (signature?.label ?? "未知参数", isMixedProduct(rel: rel))
     }
 
     /// 该视频在清单里已有的段数
@@ -165,6 +166,38 @@ final class SegmentEditStore: ObservableObject {
             return .unavailable("无法读取该视频时长")
         }
         return appendSelection(start: 0, end: duration, source: item, allowDuplicate: allowDuplicate)
+    }
+
+    struct BatchResult {
+        var added = 0
+        var duplicates: [VideoItem] = []
+        var failures: [String] = []
+        var totalDuration: Double = 0
+
+        var exceedsTwoHours: Bool { totalDuration > 7200 }
+    }
+
+    /// 批量加入（默认整片）
+    @discardableResult
+    func appendBatch(_ items: [VideoItem], allowDuplicate: Bool = false) -> BatchResult {
+        var result = BatchResult()
+        for item in items {
+            switch appendWhole(item, allowDuplicate: allowDuplicate) {
+            case .added:
+                result.added += 1
+            case .duplicate:
+                result.duplicates.append(item)
+            case .unavailable(let reason):
+                result.failures.append(item.title + "：" + reason)
+            }
+        }
+        result.totalDuration = totalDuration
+        DiagnosticsLog.write("[剪辑] 批量加入 提交=" + String(items.count)
+                             + " 成功=" + String(result.added)
+                             + " 重复=" + String(result.duplicates.count)
+                             + " 失败=" + String(result.failures.count)
+                             + " 清单总时长=" + String(format: "%.0f", result.totalDuration) + "s")
+        return result
     }
 
     /// 修改清单中某个片段的起止

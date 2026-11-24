@@ -549,7 +549,7 @@ struct ContentView: View {
             } label: {
                 Label("重命名…", systemImage: "pencil")
             }
-            if library.hasSegments(item) {
+            if library.hasPlaylist(item) {
                 Button {
                     addToClipList(item, openEditor: false)
                 } label: {

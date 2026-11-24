@@ -218,6 +218,22 @@ final class VideoLibrary: ObservableObject {
     /// 仅删除台账条目；文件不存在时也能正常移除
     // MARK: - 分片保留 / 清理
 
+    /// 是否有可剪辑的分片（「纯分片」与「已转 MP4 但保留分片」都算）
+    /// 注意：纯分片条目的 segmentDirName 为空（fileName 本身指向 m3u8），不能用 hasSegments 判断
+    func hasPlaylist(_ item: VideoItem) -> Bool {
+        let fm = FileManager.default
+        if item.fileName.lowercased().hasSuffix(".m3u8") {
+            return fm.fileExists(atPath: localURL(for: item).path)
+        }
+        if let name = item.segmentDirName, !name.isEmpty {
+            let url = Self.assetsDir
+                .appendingPathComponent(name, isDirectory: true)
+                .appendingPathComponent("index.m3u8")
+            return fm.fileExists(atPath: url.path)
+        }
+        return false
+    }
+
     /// 该条目是否仍保留分片
     func hasSegments(_ item: VideoItem) -> Bool {
         guard let name = item.segmentDirName, !name.isEmpty else { return false }
