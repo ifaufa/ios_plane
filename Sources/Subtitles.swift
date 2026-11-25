@@ -62,7 +62,9 @@ enum SubtitleParser {
         let gb18030 = String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(
             CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue)))
         if let text = String(data: data, encoding: gb18030) { return text }
-        if let text = String(data: data, encoding: .big5) { return text }
+        let big5 = String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(
+            CFStringEncoding(CFStringEncodings.big5.rawValue)))
+        if let text = String(data: data, encoding: big5) { return text }
         if let text = String(data: data, encoding: .utf16) { return text }
         return nil
     }
