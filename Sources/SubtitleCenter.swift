@@ -15,20 +15,27 @@ final class SubtitleCenter: ObservableObject {
     @Published var fontSizeIndex: Int
     @Published var positionIndex: Int
     @Published var backgroundIndex: Int
+    /// 0 白 1 黄 2 青 3 绿 4 粉
+    @Published var colorIndex: Int
 
     private static let fontKey = "subtitle.font"
     private static let posKey = "subtitle.pos"
     private static let bgKey = "subtitle.bg"
+    private static let colorKey = "subtitle.color"
 
     private init() {
         let defaults = UserDefaults.standard
         fontSizeIndex = defaults.object(forKey: Self.fontKey) as? Int ?? 1
         positionIndex = defaults.object(forKey: Self.posKey) as? Int ?? 0
         backgroundIndex = defaults.object(forKey: Self.bgKey) as? Int ?? 1
+        colorIndex = defaults.object(forKey: Self.colorKey) as? Int ?? 0
     }
 
     var hasSubtitles: Bool { !tracks.isEmpty }
-    var isActive: Bool { primary != nil }
+    var isActive: Bool {
+        guard let primary else { return false }
+        return primary.videoID == nil || primary.videoID == currentVideoID
+    }
 
     // MARK: - 关联视频
 
@@ -44,27 +51,43 @@ final class SubtitleCenter: ObservableObject {
     }
 
     /// 打开视频时准备字幕（自动匹配同名/目录内文件）
+    private static let offSentinel = "__off__"
+
     func prepare(for video: VideoItem?) {
         guard let video else { clear(); return }
+
+        // 换视频：先彻底清空上一次的轨道，避免串台
+        if currentVideoID != video.id {
+            primary = nil
+            secondary = nil
+        }
         currentVideoID = video.id
-        let dir = mediaDirectory(for: video)
-        rescan(directory: dir)
+        rescan(directory: mediaDirectory(for: video))
 
         let defaults = UserDefaults.standard
-        if let saved = defaults.string(forKey: "subtitle.sel.\(video.id.uuidString)"),
-           let track = tracks.first(where: { $0.fileName == saved }) {
-            primary = track
-        } else if primary == nil {
-            primary = tracks.first
+        let primaryKey = "subtitle.sel.\(video.id.uuidString)"
+        let secondaryKey = "subtitle.sel2.\(video.id.uuidString)"
+
+        if let saved = defaults.string(forKey: primaryKey) {
+            if saved == Self.offSentinel {
+                primary = nil                     // 用户上次主动关闭 → 保持关闭
+            } else {
+                primary = tracks.first { $0.fileName == saved }
+            }
+        } else {
+            primary = tracks.first                // 从未设置 → 自动选中第一条
         }
-        if let saved2 = defaults.string(forKey: "subtitle.sel2.\(video.id.uuidString)"),
-           let track = tracks.first(where: { $0.fileName == saved2 }) {
-            secondary = track
+
+        if let saved2 = defaults.string(forKey: secondaryKey) {
+            secondary = saved2 == Self.offSentinel ? nil : tracks.first { $0.fileName == saved2 }
+        } else {
+            secondary = nil
         }
+
         if let track = primary {
             DiagnosticsLog.write("[字幕] 载入 " + track.fileName + " 共 " + String(track.cues.count) + " 条")
         } else {
-            DiagnosticsLog.write("[字幕] 该视频没有可用字幕文件")
+            DiagnosticsLog.write("[字幕] 当前无主字幕（文件 " + String(tracks.count) + " 条）")
         }
     }
 
@@ -90,6 +113,7 @@ final class SubtitleCenter: ObservableObject {
                 seen.insert(rel)
                 guard let cues = SubtitleParser.parse(url: file), !cues.isEmpty else { continue }
                 found.append(SubtitleTrack(id: UUID(),
+                                           videoID: currentVideoID,
                                            title: file.deletingPathExtension().lastPathComponent,
                                            fileName: rel,
                                            cues: cues))
@@ -100,13 +124,9 @@ final class SubtitleCenter: ObservableObject {
         scan(directory.appendingPathComponent("subtitles", isDirectory: true), prefix: "subtitles/")
         tracks = found
 
-        // 已选中的轨道用新解析结果替换
-        if let current = primary, let updated = found.first(where: { $0.fileName == current.fileName }) {
-            primary = updated
-        }
-        if let current = secondary, let updated = found.first(where: { $0.fileName == current.fileName }) {
-            secondary = updated
-        }
+        // 已选中的轨道用新解析结果替换；找不到就置空（绝不保留旧视频的轨道）
+        primary = primary.flatMap { current in found.first { $0.fileName == current.fileName } }
+        secondary = secondary.flatMap { current in found.first { $0.fileName == current.fileName } }
     }
 
     // MARK: - 选择
@@ -114,7 +134,8 @@ final class SubtitleCenter: ObservableObject {
     func selectPrimary(_ track: SubtitleTrack?) {
         primary = track
         if let id = currentVideoID {
-            UserDefaults.standard.set(track?.fileName, forKey: "subtitle.sel.\(id.uuidString)")
+            UserDefaults.standard.set(track?.fileName ?? Self.offSentinel,
+                                      forKey: "subtitle.sel.\(id.uuidString)")
         }
         DiagnosticsLog.write("[字幕] 主轨=" + (track?.title ?? "关闭"))
     }
@@ -122,7 +143,8 @@ final class SubtitleCenter: ObservableObject {
     func selectSecondary(_ track: SubtitleTrack?) {
         secondary = track
         if let id = currentVideoID {
-            UserDefaults.standard.set(track?.fileName, forKey: "subtitle.sel2.\(id.uuidString)")
+            UserDefaults.standard.set(track?.fileName ?? Self.offSentinel,
+                                      forKey: "subtitle.sel2.\(id.uuidString)")
         }
         DiagnosticsLog.write("[字幕] 次轨=" + (track?.title ?? "关闭"))
     }
@@ -165,6 +187,17 @@ final class SubtitleCenter: ObservableObject {
         defaults.set(fontSizeIndex, forKey: Self.fontKey)
         defaults.set(positionIndex, forKey: Self.posKey)
         defaults.set(backgroundIndex, forKey: Self.bgKey)
+        defaults.set(colorIndex, forKey: Self.colorKey)
+    }
+
+    var textColor: Color {
+        switch colorIndex {
+        case 1: return .yellow
+        case 2: return .cyan
+        case 3: return .green
+        case 4: return Color(red: 1.0, green: 0.62, blue: 0.78)
+        default: return .white
+        }
     }
 
     var fontSize: CGFloat {
@@ -175,8 +208,13 @@ final class SubtitleCenter: ObservableObject {
         }
     }
 
-    /// 主/次两条轨在指定时间的文本
+    /// 主/次两条轨在指定时间的文本（带归属校验，杜绝跨视频串台）
     func texts(at time: Double) -> (primary: String?, secondary: String?) {
-        (primary?.text(at: time), secondary?.text(at: time))
+        guard let currentVideoID else { return (nil, nil) }
+        let first = (primary?.videoID == nil || primary?.videoID == currentVideoID)
+            ? primary?.text(at: time) : nil
+        let second = (secondary?.videoID == nil || secondary?.videoID == currentVideoID)
+            ? secondary?.text(at: time) : nil
+        return (first, second)
     }
 }

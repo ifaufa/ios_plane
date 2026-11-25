@@ -139,6 +139,7 @@ struct PlayerView: View {
             SegmentEditSheet(playback: store)
         }
         .persistentSystemOverlays(immersive ? .hidden : .automatic)
+        .onDisappear { SubtitleCenter.shared.clear() }
         .onChange(of: store.isMarkingPoints) { active in
             if active {
                 gestures.chromeVisible = true
@@ -530,6 +531,13 @@ struct PlayerView: View {
                 Button("无") { subtitles.backgroundIndex = 0; subtitles.persistStyle() }
                 Button("半透明") { subtitles.backgroundIndex = 1; subtitles.persistStyle() }
                 Button("描边") { subtitles.backgroundIndex = 2; subtitles.persistStyle() }
+            }
+            Menu("颜色") {
+                Button("白色") { subtitles.colorIndex = 0; subtitles.persistStyle() }
+                Button("黄色") { subtitles.colorIndex = 1; subtitles.persistStyle() }
+                Button("青色") { subtitles.colorIndex = 2; subtitles.persistStyle() }
+                Button("绿色") { subtitles.colorIndex = 3; subtitles.persistStyle() }
+                Button("粉色") { subtitles.colorIndex = 4; subtitles.persistStyle() }
             }
             Menu("时间偏移") {
                 Button("−0.5 秒") { subtitles.adjustOffset(-0.5) }

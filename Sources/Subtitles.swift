@@ -11,6 +11,8 @@ struct SubtitleCue: Equatable {
 
 struct SubtitleTrack: Identifiable, Equatable {
     let id: UUID
+    /// 所属视频（防止切换视频时串台）
+    var videoID: UUID?
     var title: String
     /// 相对 Assets 的路径
     var fileName: String
