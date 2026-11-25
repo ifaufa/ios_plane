@@ -12,7 +12,7 @@ final class SegmentEditStore: ObservableObject {
         (UserDefaults.standard.object(forKey: enabledKey) as? Bool) ?? true
     }
 
-    struct Clip: Identifiable, Equatable {
+    struct Clip: Identifiable, Equatable, Codable {
         let id: UUID
         var sourceID: UUID
         var sourceTitle: String
@@ -32,13 +32,43 @@ final class SegmentEditStore: ObservableObject {
 
     weak var library: VideoLibrary?
 
-    @Published var clips: [Clip] = []
+    @Published var clips: [Clip] = [] {
+        didSet { persistList() }
+    }
     @Published var isExporting = false
     @Published var progress: Double = 0
     @Published var notice: String?
 
 
     private var signatureCache: [String: HLSEditor.StreamSignature] = [:]
+
+    private static var listURL: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("editList.json")
+    }
+
+    private init() {
+        restoreList()
+    }
+
+    private func persistList() {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        guard let data = try? encoder.encode(clips) else { return }
+        try? data.write(to: Self.listURL, options: .atomic)
+    }
+
+    private func restoreList() {
+        guard let data = try? Data(contentsOf: Self.listURL) else { return }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let list = try? decoder.decode([Clip].self, from: data) else { return }
+        let assets = VideoLibrary.assetsDir
+        clips = list.filter { FileManager.default.fileExists(atPath: assets.appendingPathComponent($0.fileName).path) }
+        if !clips.isEmpty {
+            DiagnosticsLog.write("[剪辑] 恢复清单 " + String(clips.count) + " 段")
+        }
+    }
     private var pendingExportClips: [Clip] = []
 
     // MARK: - 清单编辑

@@ -1,6 +1,7 @@
 import SwiftUI
 import AVKit
 import UIKit
+import UniformTypeIdentifiers
 
 struct PlayerView: View {
     static let autoLandscapeKey = "playback.autoLandscape"
@@ -25,6 +26,10 @@ struct PlayerView: View {
     /// 手动解锁旋转后，本次播放不再自动锁定方向
     @State private var orientationUnlocked = false
     @State private var showEditor = false
+    @ObservedObject private var subtitles = SubtitleCenter.shared
+    @State private var subtitleTime: Double = 0
+    @State private var subtitleObserver: Any?
+    @State private var showSubtitleImporter = false
     @AppStorage(SegmentEditStore.enabledKey) private var editEnabled = true
 
     var body: some View {
@@ -38,6 +43,8 @@ struct PlayerView: View {
                 PlayerHUDView(hud: hud)
                     .allowsHitTesting(false)
             }
+
+            subtitleOverlay
 
             if gestures.chromeVisible {
                 chrome
@@ -115,6 +122,16 @@ struct PlayerView: View {
             }
         }
         .statusBarHidden(immersive)
+        .fileImporter(isPresented: $showSubtitleImporter,
+                      allowedContentTypes: subtitleTypes,
+                      allowsMultipleSelection: false) { result in
+            guard case .success(let urls) = result, let url = urls.first else { return }
+            let accessing = url.startAccessingSecurityScopedResource()
+            defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+            if SubtitleCenter.shared.importFile(from: url) {
+                DiagnosticsLog.write("[字幕] 导入成功 " + url.lastPathComponent)
+            }
+        }
         .sheet(isPresented: $showLoopPanel) {
             LoopRangeSheet(store: store, duration: duration)
         }
@@ -231,6 +248,8 @@ struct PlayerView: View {
                             .frame(width: 28, height: 28)
                     }
                 }
+
+                subtitleMenu
 
                 Spacer()
 
@@ -424,10 +443,123 @@ struct PlayerView: View {
         gestures.pokeChrome()
     }
 
+    // MARK: - 字幕
+
+    @ViewBuilder
+    private var subtitleOverlay: some View {
+        let texts = subtitles.texts(at: subtitleTime)
+        if texts.primary != nil || texts.secondary != nil {
+            VStack(spacing: 4) {
+                if let primary = texts.primary {
+                    subtitleLine(primary, scale: 1.0)
+                }
+                if let secondary = texts.secondary {
+                    subtitleLine(secondary, scale: 0.82)
+                }
+            }
+            .padding(.horizontal, 14)
+            .frame(maxWidth: .infinity, maxHeight: .infinity,
+                   alignment: subtitles.positionIndex == 0 ? .bottom : .center)
+            .padding(.bottom, subtitles.positionIndex == 0 ? 96 : 0)
+            .allowsHitTesting(false)
+            .animation(.easeOut(duration: 0.12), value: texts.primary)
+        }
+    }
+
+    private func subtitleLine(_ text: String, scale: CGFloat) -> some View {
+        Text(text)
+            .font(.system(size: subtitles.fontSize * scale, weight: .semibold))
+            .multilineTextAlignment(.center)
+            .foregroundStyle(.white)
+            .padding(.horizontal, subtitles.backgroundIndex == 2 ? 4 : 10)
+            .padding(.vertical, subtitles.backgroundIndex == 2 ? 1 : 4)
+            .background(subtitleBackground)
+            .shadow(color: .black.opacity(0.9), radius: 3, x: 0, y: 1)
+    }
+
+    @ViewBuilder
+    private var subtitleBackground: some View {
+        switch subtitles.backgroundIndex {
+        case 0:
+            Color.clear
+        case 2:
+            Color.clear   // 仅描边效果（靠 shadow 实现）
+        default:
+            RoundedRectangle(cornerRadius: 6).fill(Color.black.opacity(0.55))
+        }
+    }
+
+    private var subtitleTypes: [UTType] {
+        var types: [UTType] = ["srt", "vtt", "ass", "ssa"].compactMap { UTType(filenameExtension: $0) }
+        types.append(.plainText)
+        return types
+    }
+
+    @ViewBuilder
+    private var subtitleMenu: some View {
+        Menu {
+            Button("关闭主字幕") { subtitles.selectPrimary(nil) }
+            ForEach(subtitles.tracks) { track in
+                Button((subtitles.primary?.id == track.id ? "✓ " : "") + track.title) {
+                    subtitles.selectPrimary(track)
+                }
+            }
+
+            if subtitles.tracks.count > 1 {
+                Menu("次字幕（双语）") {
+                    Button("关闭次字幕") { subtitles.selectSecondary(nil) }
+                    ForEach(subtitles.tracks) { track in
+                        Button((subtitles.secondary?.id == track.id ? "✓ " : "") + track.title) {
+                            subtitles.selectSecondary(track)
+                        }
+                    }
+                }
+            }
+
+            Divider()
+            Menu("字号") {
+                Button("小") { subtitles.fontSizeIndex = 0; subtitles.persistStyle() }
+                Button("中") { subtitles.fontSizeIndex = 1; subtitles.persistStyle() }
+                Button("大") { subtitles.fontSizeIndex = 2; subtitles.persistStyle() }
+            }
+            Menu("位置") {
+                Button("底部") { subtitles.positionIndex = 0; subtitles.persistStyle() }
+                Button("居中") { subtitles.positionIndex = 1; subtitles.persistStyle() }
+            }
+            Menu("背景") {
+                Button("无") { subtitles.backgroundIndex = 0; subtitles.persistStyle() }
+                Button("半透明") { subtitles.backgroundIndex = 1; subtitles.persistStyle() }
+                Button("描边") { subtitles.backgroundIndex = 2; subtitles.persistStyle() }
+            }
+            Menu("时间偏移") {
+                Button("−0.5 秒") { subtitles.adjustOffset(-0.5) }
+                Button("−0.1 秒") { subtitles.adjustOffset(-0.1) }
+                Button("+0.1 秒") { subtitles.adjustOffset(0.1) }
+                Button("+0.5 秒") { subtitles.adjustOffset(0.5) }
+            }
+            Divider()
+            Button("加载字幕文件…") { showSubtitleImporter = true }
+        } label: {
+            Image(systemName: subtitles.isActive ? "captions.bubble.fill" : "captions.bubble")
+                .font(.caption)
+                .foregroundStyle(.white.opacity(subtitles.hasSubtitles ? 1 : 0.75))
+                .frame(width: 28, height: 28)
+        }
+    }
+
     private func startPlayback() {
         UIApplication.shared.isIdleTimerDisabled = true
         initialBrightness = ScreenBrightness.current
         applyOrientationForCurrentVideo()
+
+        SubtitleCenter.shared.prepare(for: store.currentVideo)
+        if subtitleObserver == nil {
+            let interval = CMTime(seconds: 0.2, preferredTimescale: 600)
+            subtitleObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { time in
+                let seconds = time.seconds
+                if seconds.isFinite { subtitleTime = seconds }
+            }
+        }
 
         if store.expectsPlaying, player.rate == 0 { player.play() }
         gestures.isPlaying = player.rate > 0
@@ -522,6 +654,10 @@ struct PlayerView: View {
         if let timeObserver {
             player.removeTimeObserver(timeObserver)
             self.timeObserver = nil
+        }
+        if let subtitleObserver {
+            player.removeTimeObserver(subtitleObserver)
+            self.subtitleObserver = nil
         }
         let current = player.currentTime().seconds
         if current.isFinite { store.reportProgress(current) }
