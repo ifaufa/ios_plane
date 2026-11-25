@@ -471,7 +471,7 @@ struct PlayerView: View {
         Text(text)
             .font(.system(size: subtitles.fontSize * scale, weight: .semibold))
             .multilineTextAlignment(.center)
-            .foregroundStyle(.white)
+            .foregroundStyle(subtitles.textColor)
             .padding(.horizontal, subtitles.backgroundIndex == 2 ? 4 : 10)
             .padding(.vertical, subtitles.backgroundIndex == 2 ? 1 : 4)
             .background(subtitleBackground)
