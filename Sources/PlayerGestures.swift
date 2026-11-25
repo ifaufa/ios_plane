@@ -221,15 +221,22 @@ final class PlayerHostViewController: UIViewController, UIGestureRecognizerDeleg
         endSpeedChange()
     }
 
-    /// 设点模式下由 SwiftUI 覆盖层接管单击，这里直接关闭，避免"点完成却设了 A"
-    func setSingleTapEnabled(_ enabled: Bool) {
-        singleTap?.isEnabled = enabled
-    }
-
     @objc private func handleSingleTap(_ gesture: UITapGestureRecognizer) {
-        // 设点模式下单击由 SwiftUI 覆盖层处理（可精确避开按钮），这里只做兜底
+        // 设点模式：左 35% = −1s ｜ 中间 30% 上=设A/下=设B ｜ 右 35% = +1s
         let store = PlaybackStore.shared
         if store.isMarkingPoints {
+            let point = gesture.location(in: view)
+            let width = max(1, view.bounds.width)
+            let ratio = point.x / width
+            if ratio < 0.35 {
+                store.stepSeek(-1)
+            } else if ratio > 0.65 {
+                store.stepSeek(1)
+            } else if point.y < view.bounds.height / 2 {
+                store.markA()
+            } else {
+                store.markB()
+            }
             return
         }
         model.toggleChrome()
@@ -239,6 +246,16 @@ final class PlayerHostViewController: UIViewController, UIGestureRecognizerDeleg
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
                            shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
         true
+    }
+
+    /// 设点模式下，顶部提示条区域不接收我们的单击（完整交给 SwiftUI 的「控制条」「完成」按钮）
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                           shouldReceive touch: UITouch) -> Bool {
+        if gestureRecognizer === singleTap, PlaybackStore.shared.isMarkingPoints {
+            let y = touch.location(in: view).y
+            if y < 150 { return false }
+        }
+        return true
     }
 
     @objc private func handleDoubleTap(_ gesture: UITapGestureRecognizer) {
@@ -524,10 +541,7 @@ struct PlayerHostView: UIViewControllerRepresentable {
         PlayerHostViewController(player: player, model: model)
     }
 
-    func updateUIViewController(_ controller: PlayerHostViewController, context: Context) {
-        // 设点模式下关闭 UIKit 单击识别，改由 SwiftUI 覆盖层处理
-        controller.setSingleTapEnabled(!PlaybackStore.shared.isMarkingPoints)
-    }
+    func updateUIViewController(_ controller: PlayerHostViewController, context: Context) {}
 }
 
 // MARK: - HUD 视图

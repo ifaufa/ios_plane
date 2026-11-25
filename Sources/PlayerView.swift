@@ -39,32 +39,6 @@ struct PlayerView: View {
                     .allowsHitTesting(false)
             }
 
-            // 设点模式：四区点击层放在控制条之下，按钮不会被抢走
-            if store.isMarkingPoints {
-                GeometryReader { geo in
-                    HStack(spacing: 0) {
-                        Color.clear
-                            .contentShape(Rectangle())
-                            .frame(width: geo.size.width * 0.35)
-                            .onTapGesture { store.stepSeek(-1) }
-                        VStack(spacing: 0) {
-                            Color.clear
-                                .contentShape(Rectangle())
-                                .onTapGesture { store.markA() }
-                            Color.clear
-                                .contentShape(Rectangle())
-                                .onTapGesture { store.markB() }
-                        }
-                        .frame(width: geo.size.width * 0.30)
-                        Color.clear
-                            .contentShape(Rectangle())
-                            .frame(width: geo.size.width * 0.35)
-                            .onTapGesture { store.stepSeek(1) }
-                    }
-                }
-                .ignoresSafeArea()
-            }
-
             if gestures.chromeVisible {
                 chrome
             }
@@ -95,11 +69,24 @@ struct PlayerView: View {
             }
 
             if store.isMarkingPoints {
-                HStack(spacing: 10) {
-                    Image(systemName: "hand.tap")
-                        .font(.caption)
-                    Text("左边缘=后退1s ｜ 中间上=设A 下=设B ｜ 右边缘=前进1s")
+                HStack(spacing: 8) {
+                    Button {
+                        if gestures.chromeVisible {
+                            gestures.chromeVisible = false
+                        } else {
+                            gestures.pokeChrome()
+                        }
+                    } label: {
+                        Text("控制条")
+                            .font(.caption2.weight(.semibold))
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 5)
+                            .background(.white.opacity(0.22), in: Capsule())
+                    }
+                    Text("左=－1s ｜ 中上=设A 中下=设B ｜ 右=＋1s")
                         .font(.caption2)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
                     Button("完成") { store.isMarkingPoints = false }
                         .font(.caption.weight(.semibold))
                         .padding(.horizontal, 10)
@@ -107,9 +94,9 @@ struct PlayerView: View {
                         .background(.white.opacity(0.22), in: Capsule())
                 }
                 .foregroundStyle(.white)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 9)
-                .background(.black.opacity(0.72), in: Capsule())
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(.black.opacity(0.75), in: Capsule())
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 .padding(.top, 44)
             }
@@ -138,7 +125,7 @@ struct PlayerView: View {
         .onChange(of: store.isMarkingPoints) { active in
             if active {
                 gestures.chromeVisible = true
-                DiagnosticsLog.write("[手势] 进入设点模式（单击由覆盖层接管）")
+                DiagnosticsLog.write("[手势] 进入设点模式（顶部 150pt 让给提示条，其余由 UIKit 四区处理）")
             } else {
                 DiagnosticsLog.write("[手势] 退出设点模式")
             }
