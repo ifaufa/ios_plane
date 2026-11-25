@@ -39,6 +39,32 @@ struct PlayerView: View {
                     .allowsHitTesting(false)
             }
 
+            // 设点模式：四区点击层放在控制条之下，按钮不会被抢走
+            if store.isMarkingPoints {
+                GeometryReader { geo in
+                    HStack(spacing: 0) {
+                        Color.clear
+                            .contentShape(Rectangle())
+                            .frame(width: geo.size.width * 0.35)
+                            .onTapGesture { store.stepSeek(-1) }
+                        VStack(spacing: 0) {
+                            Color.clear
+                                .contentShape(Rectangle())
+                                .onTapGesture { store.markA() }
+                            Color.clear
+                                .contentShape(Rectangle())
+                                .onTapGesture { store.markB() }
+                        }
+                        .frame(width: geo.size.width * 0.30)
+                        Color.clear
+                            .contentShape(Rectangle())
+                            .frame(width: geo.size.width * 0.35)
+                            .onTapGesture { store.stepSeek(1) }
+                    }
+                }
+                .ignoresSafeArea()
+            }
+
             if gestures.chromeVisible {
                 chrome
             }
@@ -109,6 +135,14 @@ struct PlayerView: View {
             SegmentEditSheet(playback: store)
         }
         .persistentSystemOverlays(immersive ? .hidden : .automatic)
+        .onChange(of: store.isMarkingPoints) { active in
+            if active {
+                gestures.chromeVisible = true
+                DiagnosticsLog.write("[手势] 进入设点模式（单击由覆盖层接管）")
+            } else {
+                DiagnosticsLog.write("[手势] 退出设点模式")
+            }
+        }
         .onAppear {
             startPlayback()
             if store.pendingOpenEditor {

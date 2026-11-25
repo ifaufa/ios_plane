@@ -46,6 +46,8 @@ final class PlayerGestureModel: ObservableObject {
 
     func scheduleAutoHide() {
         autoHideTask?.cancel()
+        // 设点模式下不自动隐藏控制条，避免与四区点击层抢层级
+        guard !PlaybackStore.shared.isMarkingPoints else { return }
         guard chromeVisible, isPlaying else { return }
         autoHideTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: 3_500_000_000)
@@ -219,23 +221,15 @@ final class PlayerHostViewController: UIViewController, UIGestureRecognizerDeleg
         endSpeedChange()
     }
 
+    /// 设点模式下由 SwiftUI 覆盖层接管单击，这里直接关闭，避免"点完成却设了 A"
+    func setSingleTapEnabled(_ enabled: Bool) {
+        singleTap?.isEnabled = enabled
+    }
+
     @objc private func handleSingleTap(_ gesture: UITapGestureRecognizer) {
-        // 设点模式分区：左 35% = −1s ｜ 中间 30% 上=设A/下=设B ｜ 右 35% = +1s
+        // 设点模式下单击由 SwiftUI 覆盖层处理（可精确避开按钮），这里只做兜底
         let store = PlaybackStore.shared
         if store.isMarkingPoints {
-            let point = gesture.location(in: view)
-            let width = max(1, view.bounds.width)
-            let ratio = point.x / width
-            if ratio < 0.35 {
-                store.stepSeek(-1)
-            } else if ratio > 0.65 {
-                store.stepSeek(1)
-            } else if point.y < view.bounds.height / 2 {
-                store.markA()
-            } else {
-                store.markB()
-            }
-            model.pokeChrome()
             return
         }
         model.toggleChrome()
@@ -530,7 +524,10 @@ struct PlayerHostView: UIViewControllerRepresentable {
         PlayerHostViewController(player: player, model: model)
     }
 
-    func updateUIViewController(_ controller: PlayerHostViewController, context: Context) {}
+    func updateUIViewController(_ controller: PlayerHostViewController, context: Context) {
+        // 设点模式下关闭 UIKit 单击识别，改由 SwiftUI 覆盖层处理
+        controller.setSingleTapEnabled(!PlaybackStore.shared.isMarkingPoints)
+    }
 }
 
 // MARK: - HUD 视图
