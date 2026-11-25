@@ -528,13 +528,13 @@ private struct ClipRangeEditor: View {
                     HStack {
                         Text("起点 A")
                         Spacer()
-                        TimeMaskField(seconds: start, maxSeconds: max(1, duration)) { start = $0 }
+                        TimeMaskField(value: $start, maxSeconds: max(1, duration))
                             .frame(width: 112, height: 34)
                     }
                     HStack {
                         Text("终点 B")
                         Spacer()
-                        TimeMaskField(seconds: end, maxSeconds: max(1, duration)) { end = $0 }
+                        TimeMaskField(value: $end, maxSeconds: max(1, duration))
                             .frame(width: 112, height: 34)
                     }
                     HStack {

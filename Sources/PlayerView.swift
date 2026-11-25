@@ -72,8 +72,8 @@ struct PlayerView: View {
                 HStack(spacing: 10) {
                     Image(systemName: "hand.tap")
                         .font(.caption)
-                    Text("上半屏单击=设A ｜ 下半屏单击=设B")
-                        .font(.caption)
+                    Text("左边缘=后退1s ｜ 中间上=设A 下=设B ｜ 右边缘=前进1s")
+                        .font(.caption2)
                     Button("完成") { store.isMarkingPoints = false }
                         .font(.caption.weight(.semibold))
                         .padding(.horizontal, 10)
@@ -548,11 +548,21 @@ private struct LoopRangeSheet: View {
         return String(format: "%.1f 秒", max(0, end - start))
     }
 
+    private var aBinding: Binding<Double>? {
+        guard store.loopStart != nil else { return nil }
+        return Binding(get: { store.loopStart ?? 0 }, set: { store.updateLoopStart($0) })
+    }
+
+    private var bBinding: Binding<Double>? {
+        guard store.loopEnd != nil else { return nil }
+        return Binding(get: { store.loopEnd ?? 0 }, set: { store.updateLoopEnd($0) })
+    }
+
     var body: some View {
         NavigationStack {
             Form {
                 Section {
-                    adjustRow(title: "起点 A", value: store.loopStart, onAdjust: { store.adjustLoopStart(by: $0) }, onCommitValue: { store.updateLoopStart($0) })
+                    adjustRow(title: "起点 A", binding: aBinding, onAdjust: { store.adjustLoopStart(by: $0) })
                     Button("用当前时间设为 A") { store.setLoopStartToCurrent() }
                 } header: {
                     Text("起点 A")
@@ -561,7 +571,7 @@ private struct LoopRangeSheet: View {
                 }
 
                 Section {
-                    adjustRow(title: "终点 B", value: store.loopEnd, onAdjust: { store.adjustLoopEnd(by: $0) }, onCommitValue: { store.updateLoopEnd($0) })
+                    adjustRow(title: "终点 B", binding: bBinding, onAdjust: { store.adjustLoopEnd(by: $0) })
                     Button("用当前时间设为 B") { store.setLoopEndToCurrent() }
                         .disabled(store.loopStart == nil)
                 } header: {
@@ -593,6 +603,11 @@ private struct LoopRangeSheet: View {
             }
             .navigationTitle("循环区间")
             .navigationBarTitleDisplayMode(.inline)
+            .onAppear {
+                let a = store.loopStart.map { String(format: "%.1f", $0) } ?? "nil"
+                let b = store.loopEnd.map { String(format: "%.1f", $0) } ?? "nil"
+                DiagnosticsLog.write("[循环] 面板打开 A=\(a)s B=\(b)s")
+            }
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("完成") { dismiss() }
@@ -604,17 +619,15 @@ private struct LoopRangeSheet: View {
 
     @ViewBuilder
     private func adjustRow(title: String,
-                           value: Double?,
-                           onAdjust: @escaping (Double) -> Void,
-                           onCommitValue: @escaping (Double) -> Void) -> some View {
+                           binding: Binding<Double>?,
+                           onAdjust: @escaping (Double) -> Void) -> some View {
         VStack(spacing: 10) {
             HStack {
                 Text(title)
                 Spacer()
-                if let value {
-                    TimeMaskField(seconds: value,
-                                  maxSeconds: max(1, duration),
-                                  onCommit: onCommitValue)
+                if let binding {
+                    TimeMaskField(value: binding,
+                                  maxSeconds: max(1, duration))
                         .frame(width: 112, height: 34)
                 } else {
                     Text("未设置")
@@ -626,7 +639,7 @@ private struct LoopRangeSheet: View {
                     Button(item.1) { onAdjust(item.0) }
                         .buttonStyle(.bordered)
                         .frame(minWidth: 54, minHeight: 40)
-                        .disabled(value == nil)
+                        .disabled(binding == nil)
                 }
             }
         }

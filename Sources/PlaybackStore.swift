@@ -667,6 +667,21 @@ final class PlaybackStore: ObservableObject {
         setLoopEndToCurrent()
     }
 
+    /// 设点模式下的 ±秒 微调（左右边缘单击）
+    func stepSeek(_ delta: Double) {
+        let current = player.currentTime().seconds
+        guard current.isFinite else { return }
+        let total = currentDuration
+        var target = current + delta
+        if total > 0 { target = min(target, total - 0.05) }
+        target = max(0, target)
+        player.seek(to: CMTime(seconds: target, preferredTimescale: 600),
+                    toleranceBefore: .zero,
+                    toleranceAfter: .zero)
+        notifyLoop((delta > 0 ? "＋" : "－") + String(format: "%.0f", abs(delta))
+                   + " 秒 → " + Self.timeText(target))
+    }
+
     func setLoopStartToCurrent() {
         let position = player.currentTime().seconds
         guard position.isFinite, position >= 0 else { return }

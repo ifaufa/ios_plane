@@ -238,11 +238,21 @@ final class BrowserModel: NSObject, ObservableObject {
 
     // MARK: 导航
 
-    func load(_ url: URL) {
+    /// 自动补的 https 失败时，回退用的 http 地址
+    var pendingHTTPFallback: URL?
+
+    func load(_ url: URL, fallbackHTTP: Bool = false) {
         var request = URLRequest(url: url)
         // 按域名匹配对应规则（精确 > 后缀通配 > 全局默认）
         for (key, value) in RequestSettings.headers(for: url) {
             request.setValue(value, forHTTPHeaderField: key)
+        }
+        pendingHTTPFallback = nil
+        if fallbackHTTP,
+           url.scheme?.lowercased() == "https",
+           var components = URLComponents(url: url, resolvingAgainstBaseURL: false) {
+            components.scheme = "http"
+            pendingHTTPFallback = components.url
         }
         webView.load(request)
     }
@@ -587,8 +597,22 @@ extension BrowserModel: WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         DispatchQueue.main.async { self.currentURL = webView.url?.absoluteString ?? "" }
+        pendingHTTPFallback = nil
         applyAdBlockState(for: webView.url?.host)
         pollResourceEntries()
+    }
+
+    /// 自动补的 https 打不开时，回退一次 http（仅一次，用户显式写的协议不会被改）
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        guard let fallback = pendingHTTPFallback else { return }
+        pendingHTTPFallback = nil
+        DiagnosticsLog.write("[浏览器] 加载失败(" + String((error as NSError).code)
+                             + ")，回退 " + fallback.absoluteString)
+        var request = URLRequest(url: fallback)
+        for (key, value) in RequestSettings.headers(for: fallback) {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+        webView.load(request)
     }
 
     /// 把「本站点是否拦截」的决定告知页面脚本，并在关闭时还原被处理过的元素
@@ -935,17 +959,20 @@ struct WebSnifferBrowser: View {
 
     private func submit() {
         let text = address.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let url = URL(string: text),
-              let scheme = url.scheme?.lowercased(),
-              ["http", "https"].contains(scheme) else {
-            extractHint = "请输入 http(s) 开头的地址"
+        guard let resolved = AddressNormalizer.resolve(text) else {
+            extractHint = "请输入网址，例如 example.com 或 https://…"
             return
         }
-        if text.lowercased().contains(".m3u8") {
+        let url = resolved.url
+        if resolved.url.absoluteString != text {
+            DiagnosticsLog.write("[浏览器] 规范化 " + text + " → " + resolved.url.absoluteString)
+        }
+        address = resolved.url.absoluteString
+        if resolved.url.absoluteString.lowercased().contains(".m3u8") {
             model.addManual(url)
             showCandidates = true
         } else {
-            model.load(url)
+            model.load(url, fallbackHTTP: resolved.autoHTTPS)
         }
     }
 }

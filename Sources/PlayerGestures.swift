@@ -220,11 +220,17 @@ final class PlayerHostViewController: UIViewController, UIGestureRecognizerDeleg
     }
 
     @objc private func handleSingleTap(_ gesture: UITapGestureRecognizer) {
-        // 设点模式：上半屏 = 设 A，下半屏 = 设 B；否则仍是显隐控制条
+        // 设点模式分区：左 35% = −1s ｜ 中间 30% 上=设A/下=设B ｜ 右 35% = +1s
         let store = PlaybackStore.shared
         if store.isMarkingPoints {
-            let y = gesture.location(in: view).y
-            if y < view.bounds.height / 2 {
+            let point = gesture.location(in: view)
+            let width = max(1, view.bounds.width)
+            let ratio = point.x / width
+            if ratio < 0.35 {
+                store.stepSeek(-1)
+            } else if ratio > 0.65 {
+                store.stepSeek(1)
+            } else if point.y < view.bounds.height / 2 {
                 store.markA()
             } else {
                 store.markB()

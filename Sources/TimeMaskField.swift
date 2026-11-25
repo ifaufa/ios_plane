@@ -3,28 +3,38 @@ import UIKit
 
 /// 只输入数字、冒号自动补的 hh:mm:ss 时间输入框
 /// 从右往左填充：敲 1 → 00:00:01，敲 1234 → 00:12:34
+/// 数据源唯一：外部用 Binding<Double> 双向绑定，避免"显示值"与"真实值"两套状态打架。
 struct TimeMaskField: UIViewRepresentable {
-    /// 当前秒数（外部值）
-    let seconds: Double
+    @Binding var value: Double
     /// 允许的最大秒数
     let maxSeconds: Double
-    /// 提交（失焦/点完成）时回调，值已做范围校验
-    let onCommit: (Double) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
 
     func makeUIView(context: Context) -> MaskedTimeTextField {
         let field = MaskedTimeTextField()
         field.maxSeconds = maxSeconds
-        field.onCommit = onCommit
-        field.setSecondsValue(seconds)
+        let coordinator = context.coordinator
+        field.onCommit = { newValue in
+            coordinator.parent.value = newValue
+        }
+        field.setSecondsValue(value)
         return field
     }
 
     func updateUIView(_ view: MaskedTimeTextField, context: Context) {
+        context.coordinator.parent = self
         view.maxSeconds = maxSeconds
-        view.onCommit = onCommit
         if !view.isFirstResponder {
-            view.setSecondsValue(seconds)
+            view.setSecondsValue(value)
         }
+    }
+
+    final class Coordinator {
+        var parent: TimeMaskField
+        init(_ parent: TimeMaskField) { self.parent = parent }
     }
 }
 
@@ -65,10 +75,14 @@ final class MaskedTimeTextField: UITextField, UITextFieldDelegate {
         resignFirstResponder()
     }
 
+    /// 外部值 → 显示：必须按 时/分/秒 拆位（旧实现把总秒数当 hhmmss，导致显示与真实值错位）
     func setSecondsValue(_ seconds: Double) {
         let clamped = max(0, seconds.isFinite ? seconds : 0)
-        let total = Int(clamped.rounded())
-        digits = String(format: "%06d", min(total, 359999))
+        let total = min(Int(clamped.rounded()), 359999)
+        let h = total / 3600
+        let m = (total % 3600) / 60
+        let s = total % 60
+        digits = String(format: "%02d%02d%02d", h, m, s)
         text = Self.format(digits)
     }
 
@@ -92,7 +106,7 @@ final class MaskedTimeTextField: UITextField, UITextFieldDelegate {
                    shouldChangeCharactersIn range: NSRange,
                    replacementString string: String) -> Bool {
         if string.isEmpty {
-            // 退格：删掉最后一位
+            // 退格：删掉最后一位数字
             if !digits.isEmpty { digits.removeLast() }
         } else {
             let numbers = string.filter { $0.isNumber }
@@ -101,7 +115,6 @@ final class MaskedTimeTextField: UITextField, UITextFieldDelegate {
             if digits.count > 6 { digits = String(digits.suffix(6)) }
         }
         text = Self.format(digits)
-        // 光标始终放在末尾
         if let end = textField.endOfDocument as UITextPosition? {
             textField.selectedTextRange = textField.textRange(from: end, to: end)
         }
