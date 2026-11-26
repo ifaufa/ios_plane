@@ -648,7 +648,7 @@ final class DownloadManager: NSObject, ObservableObject {
         switch tasks[idx].status {
         case .failed(let message):
             scheduleRetry(id: id, message: message)
-        case .downloading, .completed:
+        case .downloading:
             retryAttempts[id] = nil
             retryPending.remove(id)
         default:

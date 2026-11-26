@@ -12,6 +12,8 @@ struct VideoItem: Identifiable, Codable, Equatable {
     var lastPosition: Double?
     /// 保留的分片目录（相对 assets 目录，nil 表示分片已删除）
     var segmentDirName: String?
+    /// 最近一次播放时间（"最近在看"排序用；旧台账没有此字段，解码为 nil）
+    var lastPlayedAt: Date? = nil
 }
 
 @MainActor
