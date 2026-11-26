@@ -521,13 +521,13 @@ struct PlayerView: View {
             ForEach(PlaybackStore.VideoGravityMode.allCases, id: \.self) { mode in
                 Button(gravityLabel(mode)) { store.setGravity(mode) }
             }
-        } primaryAction: {
-            store.cycleGravity()
         } label: {
             Image(systemName: store.gravityMode.icon)
                 .font(.caption)
                 .foregroundStyle(.white.opacity(0.85))
                 .frame(width: 28, height: 28)
+        } primaryAction: {
+            store.cycleGravity()
         }
     }
 
