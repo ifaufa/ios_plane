@@ -420,7 +420,7 @@ final class BrowserModel: NSObject, ObservableObject {
 
             var title = candidates[index].title.trimmingCharacters(in: .whitespacesAndNewlines)
             if title.isEmpty {
-                title = URL(string: candidates[index].url)?.host ?? "未命名"
+                title = candidates[index].url.host ?? "未命名"
             }
             var newTitle = title
             if !head.isEmpty, !newTitle.hasPrefix(head) { newTitle = head + newTitle }
