@@ -161,6 +161,62 @@ final class BrowserModel: NSObject, ObservableObject {
     private var observations: [NSKeyValueObservation] = []
     private var isTornDown = false
 
+    // MARK: - 历史记录
+
+    struct HistoryEntry: Codable, Identifiable, Equatable {
+        var id: UUID = UUID()
+        var title: String
+        var url: String
+        var visitedAt: Date = Date()
+    }
+
+    @Published var history: [HistoryEntry] = []
+
+    private static let historyKey = "browser.history.v1"
+    private static let historyLimit = 200
+
+    private func loadHistory() {
+        guard let data = UserDefaults.standard.data(forKey: Self.historyKey) else { return }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        if let list = try? decoder.decode([HistoryEntry].self, from: data) {
+            history = list
+        }
+    }
+
+    private func saveHistory() {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        if let data = try? encoder.encode(history) {
+            UserDefaults.standard.set(data, forKey: Self.historyKey)
+        }
+    }
+
+    func recordVisit(_ url: URL, title: String?) {
+        let text = url.absoluteString
+        guard !text.isEmpty, !text.hasPrefix("about:") else { return }
+        let name = (title?.isEmpty == false ? title! : (url.host ?? text))
+        history.removeAll { $0.url == text }
+        history.insert(HistoryEntry(title: name, url: text), at: 0)
+        if history.count > Self.historyLimit {
+            history = Array(history.prefix(Self.historyLimit))
+        }
+        saveHistory()
+    }
+
+    func clearHistory() {
+        history.removeAll()
+        saveHistory()
+        DiagnosticsLog.write("[浏览器] 已清空历史记录")
+    }
+
+    func removeHistory(at offsets: IndexSet) {
+        for index in offsets.sorted(by: >) where history.indices.contains(index) {
+            history.remove(at: index)
+        }
+        saveHistory()
+    }
+
     override init() {
         let config = WKWebViewConfiguration()
         let controller = WKUserContentController()
@@ -178,6 +234,7 @@ final class BrowserModel: NSObject, ObservableObject {
         controller.add(self, name: "sniff")
         webView.navigationDelegate = self
         webView.uiDelegate = self
+        loadHistory()
         webView.allowsBackForwardNavigationGestures = true
         let defaultUA = RequestSettings.defaultProfile?.userAgent ?? ""
         webView.customUserAgent = defaultUA.isEmpty ? nil : defaultUA
@@ -598,6 +655,9 @@ extension BrowserModel: WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         DispatchQueue.main.async { self.currentURL = webView.url?.absoluteString ?? "" }
         pendingHTTPFallback = nil
+        if let url = webView.url {
+            recordVisit(url, title: webView.title)
+        }
         applyAdBlockState(for: webView.url?.host)
         pollResourceEntries()
     }
@@ -675,6 +735,7 @@ struct WebSnifferBrowser: View {
 
     @State private var address = ""
     @State private var showCandidates = false
+    @State private var showHistory = false
     @State private var showClearCandidatesConfirm = false
     @State private var pendingClearSource: Candidate.Source?
     @State private var showHeaders = false
@@ -717,6 +778,9 @@ struct WebSnifferBrowser: View {
                             .foregroundStyle(isBookmarked ? Color.yellow : Color.accentColor)
                     }
                     adBlockMenu
+                    Button { showHistory = true } label: {
+                        Image(systemName: "clock.arrow.circlepath")
+                    }
                     Button { showBookmarks = true } label: {
                         Image(systemName: "book")
                     }
@@ -753,6 +817,20 @@ struct WebSnifferBrowser: View {
                 Button("取消", role: .cancel) { pendingClearSource = nil }
             } message: {
                 Text("清空后无法恢复；已加入下载队列的任务不受影响。")
+            }
+            .sheet(isPresented: $showHistory) {
+                BrowserHistorySheet(model: model) { url in
+                    address = url
+                    guard let parsed = URL(string: url) else { return }
+                    if url.lowercased().contains(".m3u8") {
+                        model.addManual(parsed)
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                            showCandidates = true
+                        }
+                    } else {
+                        model.load(parsed)
+                    }
+                }
             }
             .sheet(isPresented: $showBookmarks) {
                 BookmarksSheet(store: bookmarks) { url in
@@ -1428,5 +1506,58 @@ struct QueueOverviewSheet: View {
             }
         }
         .presentationDetents([.medium, .large])
+    }
+}
+
+// MARK: - 历史记录
+
+struct BrowserHistorySheet: View {
+    @ObservedObject var model: BrowserModel
+    let onOpen: (String) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var showClearConfirm = false
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if model.history.isEmpty {
+                    Text("暂无历史记录")
+                        .foregroundStyle(.secondary)
+                }
+                ForEach(model.history) { entry in
+                    Button {
+                        onOpen(entry.url)
+                        dismiss()
+                    } label: {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(entry.title)
+                                .lineLimit(1)
+                                .foregroundStyle(.primary)
+                            Text(entry.url)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+                }
+                .onDelete { model.removeHistory(at: $0) }
+            }
+            .navigationTitle("历史记录")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("关闭") { dismiss() }
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    Button("清空", role: .destructive) { showClearConfirm = true }
+                        .disabled(model.history.isEmpty)
+                }
+            }
+            .confirmationDialog("清空全部历史记录？", isPresented: $showClearConfirm, titleVisibility: .visible) {
+                Button("清空", role: .destructive) { model.clearHistory() }
+                Button("取消", role: .cancel) {}
+            }
+        }
     }
 }

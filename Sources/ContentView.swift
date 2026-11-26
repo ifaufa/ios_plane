@@ -62,6 +62,13 @@ struct ContentView: View {
                     }
                 }
                 downloadsSection
+                if searchText.isEmpty, libraryFilter == .all, !recentItems.isEmpty {
+                    Section("最近在看") {
+                        ForEach(recentItems) { item in
+                            libraryRow(item)
+                        }
+                    }
+                }
                 Section("视频库 (\(library.items.count))") {
                     if groupBySeries {
                         ForEach(groupedItems) { group in
@@ -731,6 +738,10 @@ struct ContentView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+
+    private var recentItems: [VideoItem] {
+        library.recentlyWatched(limit: 5)
     }
 
     private var filteredItems: [VideoItem] {

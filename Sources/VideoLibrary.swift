@@ -435,9 +435,22 @@ final class VideoLibrary: ObservableObject {
     /// 记录播放进度
     func updateProgress(id: UUID, seconds: Double) {
         guard seconds.isFinite, let idx = items.firstIndex(where: { $0.id == id }) else { return }
-        guard abs((items[idx].lastPosition ?? 0) - seconds) >= 1 else { return }
-        items[idx].lastPosition = seconds
+        let changed = abs((items[idx].lastPosition ?? 0) - seconds) >= 1
+        let lastPlayed = items[idx].lastPlayedAt
+        let needTimestamp = lastPlayed == nil || Date().timeIntervalSince(lastPlayed!) > 60
+        guard changed || needTimestamp else { return }
+        if changed { items[idx].lastPosition = seconds }
+        if needTimestamp { items[idx].lastPlayedAt = Date() }
         save()
+    }
+
+    /// 「最近在看」：有进度且最近播放过的条目
+    func recentlyWatched(limit: Int = 5) -> [VideoItem] {
+        items
+            .filter { ($0.lastPosition ?? 0) > 5 && $0.lastPlayedAt != nil }
+            .sorted { ($0.lastPlayedAt ?? .distantPast) > ($1.lastPlayedAt ?? .distantPast) }
+            .prefix(limit)
+            .map { $0 }
     }
 
     /// 合并备份里的条目（按 fileName 去重）

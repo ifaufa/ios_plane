@@ -645,6 +645,45 @@ final class DownloadManager: NSObject, ObservableObject {
     private func update(_ id: String, _ mutate: (inout DownloadTaskInfo) -> Void) {
         guard let idx = tasks.firstIndex(where: { $0.id == id }) else { return }
         mutate(&tasks[idx])
+        switch tasks[idx].status {
+        case .failed(let message):
+            scheduleRetry(id: id, message: message)
+        case .downloading, .completed:
+            retryAttempts[id] = nil
+            retryPending.remove(id)
+        default:
+            break
+        }
+    }
+
+    // MARK: - 失败自动重试（1s / 3s / 9s，最多 3 次）
+
+    static let autoRetryKey = "download.autoRetry"
+    private var retryAttempts: [String: Int] = [:]
+    private var retryPending: Set<String> = []
+
+    private func scheduleRetry(id: String, message: String) {
+        let enabled = (UserDefaults.standard.object(forKey: Self.autoRetryKey) as? Bool) ?? true
+        guard enabled, !retryPending.contains(id) else { return }
+        let attempt = (retryAttempts[id] ?? 0) + 1
+        guard attempt <= 3 else {
+            retryAttempts[id] = 0
+            DiagnosticsLog.write("[下载] 已重试 3 次仍失败：" + message)
+            return
+        }
+        retryAttempts[id] = attempt
+        retryPending.insert(id)
+        let delay = pow(3.0, Double(attempt - 1))
+        DiagnosticsLog.write("[下载] 失败将重试(" + String(attempt) + "/3) "
+                             + String(format: "%.0f", delay) + "s 后：" + message)
+        update(id) { $0.status = .queued }
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self else { return }
+            self.retryPending.remove(id)
+            guard let task = self.tasks.first(where: { $0.id == id }),
+                  case .queued = task.status else { return }
+            self.resume(task)
+        }
     }
 
     private func duration(of task: URLSessionTask, id: String) async -> Double {
