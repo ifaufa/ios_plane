@@ -218,6 +218,41 @@ final class VideoLibrary: ObservableObject {
     /// 仅删除台账条目；文件不存在时也能正常移除
     // MARK: - 分片保留 / 清理
 
+    private var mixedCache: [UUID: Bool] = [:]
+
+    /// 该条目对应的分片目录（纯分片 → fileName 的父目录；MP4+分片 → segmentDirName）
+    func segmentDirectory(_ item: VideoItem) -> URL? {
+        if item.fileName.lowercased().hasSuffix(".m3u8") {
+            return Self.assetsDir.appendingPathComponent((item.fileName as NSString).deletingLastPathComponent)
+        }
+        if let name = item.segmentDirName, !name.isEmpty {
+            return Self.assetsDir.appendingPathComponent(name, isDirectory: true)
+        }
+        return nil
+    }
+
+    /// 该条目是否是"不同编码参数合并"的产物（读 state.json 的 mixedParams，带缓存）
+    func isMixedParams(_ item: VideoItem) -> Bool {
+        if let cached = mixedCache[item.id] { return cached }
+        var value = false
+        if let dir = segmentDirectory(item) {
+            let stateURL = dir.appendingPathComponent("state.json")
+            if let data = try? Data(contentsOf: stateURL) {
+                let decoder = JSONDecoder()
+                decoder.dateDecodingStrategy = .iso8601
+                if let state = try? decoder.decode(SegmentJobState.self, from: data) {
+                    value = state.mixedParams == true
+                }
+            }
+        }
+        mixedCache[item.id] = value
+        return value
+    }
+
+    func invalidateMixedCache() {
+        mixedCache.removeAll()
+    }
+
     /// 是否有可剪辑的分片（「纯分片」与「已转 MP4 但保留分片」都算）
     /// 注意：纯分片条目的 segmentDirName 为空（fileName 本身指向 m3u8），不能用 hasSegments 判断
     func hasPlaylist(_ item: VideoItem) -> Bool {

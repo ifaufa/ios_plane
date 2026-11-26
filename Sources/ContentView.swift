@@ -12,6 +12,8 @@ struct ContentView: View {
     @AppStorage(LibraryGrouping.collapsedKey) private var collapsedRaw = ""
     @AppStorage(LibraryGrouping.ungroupedExpandedKey) private var ungroupedExpanded = false
     @State private var pendingLibraryAction: LibraryAction?
+    @State private var searchText = ""
+    @State private var libraryFilter: LibraryFilter = .all
     @State private var pendingLargeConvert: VideoItem?
 
 
@@ -83,6 +85,7 @@ struct ContentView: View {
                     }
                 }
             }
+            .searchable(text: $searchText, placement: .navigationBarDrawer(displayMode: .automatic), prompt: "搜索标题")
             .alert("重命名", isPresented: Binding(
                 get: { renameTarget != nil },
                 set: { if !$0 { renameTarget = nil } }
@@ -146,6 +149,26 @@ struct ContentView: View {
                         }
                     } label: {
                         Image(systemName: "arrow.up.arrow.down")
+                    }
+                    .disabled(library.items.isEmpty)
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Menu {
+                        ForEach(LibraryFilter.allCases) { filter in
+                            Button {
+                                libraryFilter = filter
+                            } label: {
+                                if libraryFilter == filter {
+                                    Label(filter.title, systemImage: "checkmark")
+                                } else {
+                                    Text(filter.title)
+                                }
+                            }
+                        }
+                    } label: {
+                        Image(systemName: libraryFilter == .all
+                              ? "line.3.horizontal.decrease.circle"
+                              : "line.3.horizontal.decrease.circle.fill")
                     }
                     .disabled(library.items.isEmpty)
                 }
@@ -710,9 +733,30 @@ struct ContentView: View {
         .buttonStyle(.plain)
     }
 
+    private var filteredItems: [VideoItem] {
+        var items = library.items
+        switch libraryFilter {
+        case .all:
+            break
+        case .segments:
+            items = items.filter { library.hasPlaylist($0) }
+        case .mp4Only:
+            items = items.filter { $0.fileName.lowercased().hasSuffix(".mp4") }
+        case .missing:
+            items = items.filter { library.isMissing($0) }
+        case .mixed:
+            items = items.filter { library.isMixedParams($0) }
+        }
+        let keyword = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !keyword.isEmpty {
+            items = items.filter { $0.title.localizedCaseInsensitiveContains(keyword) }
+        }
+        return items
+    }
+
     private var sortedItems: [VideoItem] {
         let mode = LibrarySortMode(rawValue: sortModeRaw) ?? .timeDesc
-        return library.items.sorted(by: mode)
+        return filteredItems.sorted(by: mode)
     }
 
     @ViewBuilder
@@ -1371,5 +1415,21 @@ private struct SeriesTimingEditor: View {
         }
         .navigationTitle(prefs.displayName(forKey: key))
         .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+enum LibraryFilter: String, CaseIterable, Identifiable {
+    case all, segments, mp4Only, missing, mixed
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .all: return "全部"
+        case .segments: return "有分片"
+        case .mp4Only: return "仅 MP4"
+        case .missing: return "文件缺失"
+        case .mixed: return "混合参数"
+        }
     }
 }

@@ -15,6 +15,8 @@ final class PlaybackStore: ObservableObject {
     @Published var isFullscreen = false
     @Published var isPlaying = false
     @Published var expectsPlaying = false
+    /// 常驻倍速（按视频记忆）
+    @Published var playbackRate: Float = 1.0
     /// 已播放到结尾且没有下一集（用于显示"已播放完"、并阻止自愈逻辑反复恢复）
     @Published private(set) var isFinished = false
     /// 是否正在 AirPlay 投屏
@@ -148,6 +150,7 @@ final class PlaybackStore: ObservableObject {
         title = video.title
         currentVideo = video
         seriesTiming = PlaybackPrefs.shared.timing(forTitle: video.title)
+        restorePlaybackRate(for: video.id)
         sourceURL = url
         isHLS = url.pathExtension.lowercased() == "m3u8"
         lastSaved = video.lastPosition ?? 0
@@ -267,8 +270,27 @@ final class PlaybackStore: ObservableObject {
     func play() {
         isFinished = false
         expectsPlaying = true
-        if player.rate == 0 { player.play() }
+        if player.rate == 0 { player.playImmediately(atRate: max(0.5, playbackRate)) }
         isPlaying = player.rate > 0
+    }
+
+    /// 设置常驻倍速（0.5–2.0），按视频记忆
+    func setPlaybackRate(_ rate: Float) {
+        playbackRate = max(0.5, min(2.0, rate))
+        if let id = videoID {
+            UserDefaults.standard.set(Double(playbackRate), forKey: "playbackRate.\(id.uuidString)")
+        }
+        if player.rate > 0 {
+            player.playImmediately(atRate: playbackRate)
+        }
+        DiagnosticsLog.write("[播放] 倍速 " + String(format: "%.2f", playbackRate) + "×")
+    }
+
+    /// 打开视频时恢复该视频上次的倍速
+    private func restorePlaybackRate(for id: UUID) {
+        let saved = UserDefaults.standard.object(forKey: "playbackRate.\(id.uuidString)") as? Double
+        let value = Float(saved ?? 1.0)
+        playbackRate = (value >= 0.5 && value <= 2.0) ? value : 1.0
     }
 
     /// 播放到结尾且没有下一集：明确进入"已播放完"状态，
@@ -327,7 +349,7 @@ final class PlaybackStore: ObservableObject {
     /// 预览结束：仅在用户原本希望播放时恢复
     func resumeAfterPreview() {
         guard expectsPlaying else { return }
-        player.play()
+        player.playImmediately(atRate: max(0.5, playbackRate))
         isPlaying = player.rate > 0
     }
 
@@ -374,7 +396,7 @@ final class PlaybackStore: ObservableObject {
             return
         }
 
-        if player.rate == 0 { player.play() }
+        if player.rate == 0 { player.playImmediately(atRate: max(0.5, playbackRate)) }
         isPlaying = player.rate > 0
         DiagnosticsLog.write("[播放] 恢复尝试 会话=\(sessionError) rate=\(String(format: "%.1f", player.rate)) status=\(player.currentItem?.status.rawValue ?? -1)")
     }
@@ -790,7 +812,7 @@ final class PlaybackStore: ObservableObject {
                                  toleranceBefore: .zero, toleranceAfter: .zero) { _ in
                     Task { @MainActor in
                         self.isLoopSeeking = false
-                        if self.expectsPlaying { self.player.play() }
+                        if self.expectsPlaying { self.player.playImmediately(atRate: max(0.5, self.playbackRate)) }
                     }
                 }
             }

@@ -255,6 +255,7 @@ struct PlayerView: View {
                 }
 
                 subtitleMenu
+                rateMenu
 
                 Spacer()
 
@@ -446,6 +447,32 @@ struct PlayerView: View {
         store.togglePlay()
         gestures.isPlaying = store.isPlaying
         gestures.pokeChrome()
+    }
+
+    private var rateMenu: some View {
+        Menu {
+            ForEach([0.75, 1.0, 1.25, 1.5, 2.0], id: \\.self) { value in
+                Button {
+                    store.setPlaybackRate(Float(value))
+                } label: {
+                    if abs(Double(store.playbackRate) - value) < 0.01 {
+                        Label(Self.rateText(value), systemImage: "checkmark")
+                    } else {
+                        Text(Self.rateText(value))
+                    }
+                }
+            }
+        } label: {
+            Text(Self.rateText(Double(store.playbackRate)))
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.85))
+                .frame(width: 34, height: 28)
+        }
+    }
+
+    private static func rateText(_ value: Double) -> String {
+        if abs(value - 1.0) < 0.01 { return "1×" }
+        return String(format: "%g×", value)
     }
 
     // MARK: - 字幕
