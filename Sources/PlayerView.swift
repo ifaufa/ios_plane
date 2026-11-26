@@ -80,14 +80,8 @@ struct PlayerView: View {
                             .font(.system(size: 12, weight: .medium, design: .rounded))
                             .monospacedDigit()
                     }
-                    .foregroundStyle(.white.opacity(0.88))
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 5)
-                    .background {
-                        Capsule().fill(.ultraThinMaterial)
-                    }
-                    .overlay(Capsule().strokeBorder(.white.opacity(0.15), lineWidth: 0.5))
-                    .shadow(color: .black.opacity(0.3), radius: 6, y: 2)
+                    .foregroundStyle(.white.opacity(0.92))
+                    .shadow(color: .black.opacity(0.85), radius: 3, x: 0, y: 1)
                 }
                 .allowsHitTesting(false)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
@@ -194,6 +188,9 @@ struct PlayerView: View {
             SubtitleCenter.shared.prepare(for: store.currentVideo)
         }
         .onDisappear { SubtitleCenter.shared.clear() }
+        .onChange(of: store.gravityMode) { mode in
+            gestures.show(PlayerHUD(kind: .seek, progress: 0, text: mode.title, detail: mode.detail))
+        }
         .onChange(of: store.isMarkingPoints) { active in
             if active {
                 gestures.chromeVisible = true
@@ -324,6 +321,7 @@ struct PlayerView: View {
                 }
 
                 subtitleMenu
+                gravityMenu
                 rateMenu
 
                 Spacer()
@@ -516,6 +514,29 @@ struct PlayerView: View {
         store.togglePlay()
         gestures.isPlaying = store.isPlaying
         gestures.pokeChrome()
+    }
+
+    private var gravityMenu: some View {
+        Menu {
+            ForEach(PlaybackStore.VideoGravityMode.allCases, id: \.self) { mode in
+                Button {
+                    store.setGravity(mode)
+                } label: {
+                    if store.gravityMode == mode {
+                        Label(mode.title + "（" + mode.detail + "）", systemImage: "checkmark")
+                    } else {
+                        Text(mode.title + "（" + mode.detail + "）")
+                    }
+                }
+            }
+        } primaryAction: {
+            store.cycleGravity()
+        } label: {
+            Image(systemName: store.gravityMode.icon)
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.85))
+                .frame(width: 28, height: 28)
+        }
     }
 
     private var rateMenu: some View {

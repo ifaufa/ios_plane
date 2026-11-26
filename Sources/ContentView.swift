@@ -1239,6 +1239,7 @@ struct EngineSettingsView: View {
     @AppStorage("library.recentEnabled") private var recentEnabled = true
     @AppStorage(PlayerView.autoLandscapeKey) private var autoLandscape = true
     @AppStorage("playback.clockMode") private var clockMode = 0
+    @AppStorage("playback.gravity") private var gravityDefault = 0
     @AppStorage(SegmentEditStore.enabledKey) private var editEnabled = true
 
     private func summaryText(_ timing: PlaybackPrefs.SeriesTiming) -> String {
@@ -1293,6 +1294,11 @@ struct EngineSettingsView: View {
                         Text("关闭").tag(0)
                         Text("仅时间").tag(1)
                         Text("时间 + 日期").tag(2)
+                    }
+                    Picker("默认画面比例", selection: $gravityDefault) {
+                        Text("适应（完整画面）").tag(0)
+                        Text("填充（铺满裁切）").tag(1)
+                        Text("拉伸（铺满变形）").tag(2)
                     }
                 } header: {
                     Text("播放")

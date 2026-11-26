@@ -17,6 +17,64 @@ final class PlaybackStore: ObservableObject {
     @Published var expectsPlaying = false
     /// 常驻倍速（按视频记忆）
     @Published var playbackRate: Float = 1.0
+    /// 画面比例（全局默认 + 按视频记忆）
+    @Published private(set) var gravityMode: VideoGravityMode = .fit
+
+    enum VideoGravityMode: Int, CaseIterable {
+        case fit, fill, stretch
+
+        var title: String {
+            switch self {
+            case .fit: return "适应"
+            case .fill: return "填充"
+            case .stretch: return "拉伸"
+            }
+        }
+
+        var detail: String {
+            switch self {
+            case .fit: return "完整画面 + 黑边"
+            case .fill: return "铺满屏幕，裁切边缘"
+            case .stretch: return "铺满屏幕，画面变形"
+            }
+        }
+
+        var icon: String {
+            switch self {
+            case .fit: return "rectangle.arrowtriangle.2.inward"
+            case .fill: return "rectangle.arrowtriangle.2.outward"
+            case .stretch: return "arrow.up.left.and.arrow.down.right"
+            }
+        }
+    }
+
+    static let gravityKey = "playback.gravity"
+
+    func cycleGravity() {
+        let all = VideoGravityMode.allCases
+        let current = all.firstIndex(of: gravityMode) ?? 0
+        setGravity(all[(current + 1) % all.count])
+    }
+
+    func setGravity(_ mode: VideoGravityMode) {
+        gravityMode = mode
+        UserDefaults.standard.set(mode.rawValue, forKey: Self.gravityKey)
+        if let id = videoID {
+            UserDefaults.standard.set(mode.rawValue, forKey: "playback.gravity.\(id.uuidString)")
+        }
+        DiagnosticsLog.write("[播放] 画面比例 " + mode.title)
+    }
+
+    private func restoreGravity(for id: UUID) {
+        let defaults = UserDefaults.standard
+        if let raw = defaults.object(forKey: "playback.gravity.\(id.uuidString)") as? Int,
+           let mode = VideoGravityMode(rawValue: raw) {
+            gravityMode = mode
+            return
+        }
+        let globalRaw = defaults.object(forKey: Self.gravityKey) as? Int ?? 0
+        gravityMode = VideoGravityMode(rawValue: globalRaw) ?? .fit
+    }
     /// 已播放到结尾且没有下一集（用于显示"已播放完"、并阻止自愈逻辑反复恢复）
     @Published private(set) var isFinished = false
     /// 是否正在 AirPlay 投屏
@@ -151,6 +209,7 @@ final class PlaybackStore: ObservableObject {
         currentVideo = video
         seriesTiming = PlaybackPrefs.shared.timing(forTitle: video.title)
         restorePlaybackRate(for: video.id)
+        restoreGravity(for: video.id)
         sourceURL = url
         isHLS = url.pathExtension.lowercased() == "m3u8"
         lastSaved = video.lastPosition ?? 0

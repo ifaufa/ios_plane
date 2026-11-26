@@ -248,6 +248,18 @@ final class PlayerHostViewController: UIViewController, UIGestureRecognizerDeleg
         true
     }
 
+    /// 画面比例（适应 / 填充 / 拉伸）
+    func setGravity(_ mode: PlaybackStore.VideoGravityMode) {
+        switch mode {
+        case .fit:
+            playerViewController.videoGravity = .resizeAspect
+        case .fill:
+            playerViewController.videoGravity = .resizeAspectFill
+        case .stretch:
+            playerViewController.videoGravity = .resize
+        }
+    }
+
     /// 设点模式下，顶部提示条区域不接收我们的单击（完整交给 SwiftUI 的「控制条」「完成」按钮）
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
                            shouldReceive touch: UITouch) -> Bool {
@@ -541,7 +553,9 @@ struct PlayerHostView: UIViewControllerRepresentable {
         PlayerHostViewController(player: player, model: model)
     }
 
-    func updateUIViewController(_ controller: PlayerHostViewController, context: Context) {}
+    func updateUIViewController(_ controller: PlayerHostViewController, context: Context) {
+        controller.setGravity(PlaybackStore.shared.gravityMode)
+    }
 }
 
 // MARK: - HUD 视图
