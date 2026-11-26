@@ -139,6 +139,10 @@ struct PlayerView: View {
             SegmentEditSheet(playback: store)
         }
         .persistentSystemOverlays(immersive ? .hidden : .automatic)
+        .onChange(of: store.videoID) { _ in
+            // 连播切集：播放器不重建，需要重新准备该集的字幕
+            SubtitleCenter.shared.prepare(for: store.currentVideo)
+        }
         .onDisappear { SubtitleCenter.shared.clear() }
         .onChange(of: store.isMarkingPoints) { active in
             if active {

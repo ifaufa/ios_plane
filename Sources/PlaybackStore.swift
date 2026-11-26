@@ -240,6 +240,8 @@ final class PlaybackStore: ObservableObject {
         loopNotice = nil
         currentVideo = nil
         seriesTiming = nil
+        // 单例状态收口：关闭播放器时字幕一并清空，避免串到下一个视频
+        SubtitleCenter.shared.clear()
         stopHealthTimer()
         detachObserver()
         let seconds = player.currentTime().seconds
