@@ -13,7 +13,12 @@ struct ContentView: View {
     @AppStorage(LibraryGrouping.ungroupedExpandedKey) private var ungroupedExpanded = false
     @State private var pendingLibraryAction: LibraryAction?
     @State private var searchText = ""
-    @State private var libraryFilter: LibraryFilter = .all
+    /// 类型筛选（并集）：segments / mp4Only / missing
+    @AppStorage("library.filter.types") private var filterTypesRaw = ""
+    /// 标记筛选（交集）：混合参数
+    @AppStorage("library.filter.mixed") private var filterMixed = false
+    /// 「最近在看」分区开关
+    @AppStorage("library.recentEnabled") private var recentEnabled = true
     @State private var pendingLargeConvert: VideoItem?
 
 
@@ -63,14 +68,32 @@ struct ContentView: View {
                     }
                 }
                 downloadsSection
-                if searchText.isEmpty, libraryFilter == .all, !recentItems.isEmpty {
+                if recentEnabled, searchText.isEmpty, !isFiltering, !recentItems.isEmpty {
                     Section("最近在看") {
                         ForEach(recentItems) { item in
                             libraryRow(item)
                         }
                     }
                 }
-                Section("视频库 (\(library.items.count))") {
+                if sortedItems.isEmpty, isFiltering || !searchText.isEmpty {
+                    Section {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("没有匹配的内容")
+                                .foregroundStyle(.secondary)
+                            HStack(spacing: 14) {
+                                if !searchText.isEmpty {
+                                    Button("清除搜索") { searchText = "" }
+                                }
+                                if isFiltering {
+                                    Button("重置筛选") { resetFilters() }
+                                }
+                            }
+                            .font(.footnote)
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+                Section(librarySectionTitle) {
                     if groupBySeries {
                         ForEach(groupedItems) { group in
                             if group.isSeries {
@@ -162,21 +185,38 @@ struct ContentView: View {
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Menu {
-                        ForEach(LibraryFilter.allCases) { filter in
-                            Button {
-                                libraryFilter = filter
-                            } label: {
-                                if libraryFilter == filter {
-                                    Label(filter.title, systemImage: "checkmark")
-                                } else {
-                                    Text(filter.title)
+                        Section("类型（任一满足）") {
+                            ForEach([LibraryFilter.segments, .mp4Only, .missing]) { filter in
+                                Button {
+                                    toggleTypeFilter(filter)
+                                } label: {
+                                    if selectedTypes.contains(filter) {
+                                        Label(filter.title, systemImage: "checkmark")
+                                    } else {
+                                        Text(filter.title)
+                                    }
                                 }
                             }
                         }
+                        Section("标记（需同时满足）") {
+                            Button {
+                                filterMixed.toggle()
+                                selected.removeAll()
+                            } label: {
+                                if filterMixed {
+                                    Label("混合参数", systemImage: "checkmark")
+                                } else {
+                                    Text("混合参数")
+                                }
+                            }
+                        }
+                        Divider()
+                        Button("重置筛选") { resetFilters() }
+                            .disabled(!isFiltering && searchText.isEmpty)
                     } label: {
-                        Image(systemName: libraryFilter == .all
-                              ? "line.3.horizontal.decrease.circle"
-                              : "line.3.horizontal.decrease.circle.fill")
+                        Image(systemName: isFiltering
+                              ? "line.3.horizontal.decrease.circle.fill"
+                              : "line.3.horizontal.decrease.circle")
                     }
                     .disabled(library.items.isEmpty)
                 }
@@ -624,7 +664,7 @@ struct ContentView: View {
     }
 
     private var groupedItems: [VideoGroup] {
-        LibraryGrouping.make(from: library.items, mode: sortMode)
+        LibraryGrouping.make(from: sortedItems, mode: sortMode)
     }
 
     private var collapsedGroups: Set<String> {
@@ -751,18 +791,63 @@ struct ContentView: View {
         library.recentlyWatched(limit: 5)
     }
 
+    private var librarySectionTitle: String {
+        var title = "视频库 (\(sortedItems.count) / 共 \(library.items.count))"
+        if !filterSummary.isEmpty { title += " · " + filterSummary }
+        return title
+    }
+
+    private var selectedTypes: Set<LibraryFilter> {
+        Set(filterTypesRaw.split(separator: ",").compactMap { LibraryFilter(rawValue: String($0)) })
+    }
+
+    private var isFiltering: Bool {
+        !selectedTypes.isEmpty || filterMixed
+    }
+
+    private var filterSummary: String {
+        var parts: [String] = []
+        for filter in LibraryFilter.allCases where selectedTypes.contains(filter) {
+            parts.append(filter.title)
+        }
+        if filterMixed { parts.append("混合参数") }
+        if !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            parts.append("搜索「\(searchText)」")
+        }
+        return parts.joined(separator: "、")
+    }
+
+    private func toggleTypeFilter(_ filter: LibraryFilter) {
+        var types = selectedTypes
+        if types.contains(filter) { types.remove(filter) } else { types.insert(filter) }
+        filterTypesRaw = types.map { $0.rawValue }.sorted().joined(separator: ",")
+        selected.removeAll()
+    }
+
+    private func resetFilters() {
+        filterTypesRaw = ""
+        filterMixed = false
+        searchText = ""
+        selected.removeAll()
+    }
+
     private var filteredItems: [VideoItem] {
         var items = library.items
-        switch libraryFilter {
-        case .all:
-            break
-        case .segments:
-            items = items.filter { library.hasPlaylist($0) }
-        case .mp4Only:
-            items = items.filter { $0.fileName.lowercased().hasSuffix(".mp4") }
-        case .missing:
-            items = items.filter { library.isMissing($0) }
-        case .mixed:
+        let types = selectedTypes
+        if !types.isEmpty {
+            items = items.filter { item in
+                types.contains { filter in
+                    switch filter {
+                    case .segments: return library.hasPlaylist(item)
+                    case .mp4Only: return item.fileName.lowercased().hasSuffix(".mp4")
+                    case .missing: return library.isMissing(item)
+                    case .mixed: return library.isMixedParams(item)
+                    }
+                }
+            }
+        }
+        // 标记筛选：与类型取交集
+        if filterMixed {
             items = items.filter { library.isMixedParams($0) }
         }
         let keyword = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1194,10 +1279,11 @@ struct EngineSettingsView: View {
                 }
                 Section {
                     Toggle("按系列分组（可折叠）", isOn: $groupBySeries)
+                    Toggle("显示「最近在看」", isOn: $recentEnabled)
                 } header: {
                     Text("视频库")
                 } footer: {
-                    Text("开启后，同一系列的集数会折叠成一组，单条视频仍平铺显示；折叠状态会被记住。与连播共用同一套标题解析（第N集 / EP16 / S01E16 等）。")
+                    Text("开启后，同一系列的集数会折叠成一组，单条视频仍平铺显示；折叠状态会被记住。与连播共用同一套标题解析（第N集 / EP16 / S01E16 等）。关闭「最近在看」后首页不再显示该分区，播放进度仍会记录。")
                 }
                 Section {
                     Toggle("播放时自动旋转为横屏", isOn: $autoLandscape)
@@ -1466,13 +1552,12 @@ private struct SeriesTimingEditor: View {
 }
 
 enum LibraryFilter: String, CaseIterable, Identifiable {
-    case all, segments, mp4Only, missing, mixed
+    case segments, mp4Only, missing, mixed
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
-        case .all: return "全部"
         case .segments: return "有分片"
         case .mp4Only: return "仅 MP4"
         case .missing: return "文件缺失"
