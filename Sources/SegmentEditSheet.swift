@@ -13,6 +13,7 @@ struct SegmentEditSheet: View {
     @State private var pendingAppend: PendingAppend?
     /// 自己管理编辑态（不用 EditButton：放在 List 内容里会与行重建互相触发，造成持续闪动）
     @State private var editMode: EditMode = .inactive
+    @State private var showPreview = false
 
     struct PendingAppend: Identifiable {
         let id = UUID()
@@ -92,10 +93,31 @@ struct SegmentEditSheet: View {
                     Text("可直接选择库里的分片视频（整片或指定区间）加入清单，不需要先播放它。")
                 }
 
+                if let text = editor.lastActionText {
+                    Section {
+                        HStack(spacing: 10) {
+                            Text(text)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            if editor.canUndo {
+                                Button("撤销") { editor.undo() }
+                                    .font(.footnote.weight(.semibold))
+                            }
+                            Button("关闭") { editor.dismissLastAction() }
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+
                 Section {
                     if editor.clips.isEmpty {
                         Text("暂无片段")
                             .foregroundStyle(.secondary)
+                        if editor.hasBackup {
+                            Button("恢复上次清单") { editor.restoreBackup() }
+                        }
                     } else {
                         ForEach(editor.clips) { clip in
                             clipRow(clip)
@@ -139,7 +161,7 @@ struct SegmentEditSheet: View {
                     }
 
                     Button {
-                        editor.export()
+                        showPreview = true
                     } label: {
                         HStack {
                             Text(exportButtonTitle)
@@ -177,6 +199,9 @@ struct SegmentEditSheet: View {
                         }
                     }
                 }
+            }
+            .sheet(isPresented: $showPreview) {
+                ExportPreviewSheet(editor: editor)
             }
             .sheet(isPresented: $showLibraryPicker) {
                 LibraryClipPicker(items: libraryItems) { item, start, end in
@@ -563,6 +588,94 @@ private struct ClipRangeEditor: View {
                 }
             }
             .navigationTitle("选择区间")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - 导出预览（C2）
+
+private struct ExportPreviewSheet: View {
+    @ObservedObject var editor: SegmentEditStore
+    @Environment(\.dismiss) private var dismiss
+
+    private var subtitleHint: String {
+        let fm = FileManager.default
+        for clip in editor.clips {
+            let dir = VideoLibrary.assetsDir
+                .appendingPathComponent((clip.fileName as NSString).deletingLastPathComponent)
+            for folder in [dir, dir.appendingPathComponent("subtitles", isDirectory: true)] {
+                if let files = try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil),
+                   files.contains(where: { SubtitleParser.supportedExtensions.contains($0.pathExtension.lowercased()) }) {
+                    return "检测到字幕，将合并导出为 merged.srt"
+                }
+            }
+        }
+        return "未检测到字幕文件，产物不含字幕"
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("总览") {
+                    HStack {
+                        Text("片段数")
+                        Spacer()
+                        Text("\(editor.clips.count) 段").foregroundStyle(.secondary)
+                    }
+                    HStack {
+                        Text("总时长")
+                        Spacer()
+                        Text(PlaybackStore.timeText(editor.totalDuration))
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
+                    HStack {
+                        Text("参数一致性")
+                        Spacer()
+                        Text(editor.mixedWarningText == nil ? "一致" : "不一致")
+                            .foregroundStyle(editor.mixedWarningText == nil ? Color.secondary : .orange)
+                    }
+                    HStack {
+                        Text("字幕")
+                        Spacer()
+                        Text(subtitleHint)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.trailing)
+                    }
+                }
+
+                Section("片段明细") {
+                    ForEach(Array(editor.clips.enumerated()), id: \.element.id) { index, clip in
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("#\(index + 1)  " + PlaybackStore.timeText(clip.start) + " – " + PlaybackStore.timeText(clip.end))
+                                .monospacedDigit()
+                            Text(clip.sourceTitle + " · " + clip.signatureLabel)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+                }
+
+                Section {
+                    Button {
+                        editor.export()
+                        dismiss()
+                    } label: {
+                        Text(editor.mixedWarningText == nil ? "开始导出" : "仍然合并导出（参数不一致）")
+                    }
+                } footer: {
+                    Text("导出不会改动原片，产物作为新条目出现在视频库顶部。")
+                }
+            }
+            .navigationTitle("导出预览")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

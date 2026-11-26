@@ -93,6 +93,7 @@ final class SegmentEditStore: ObservableObject {
             notice = "剪掉这段后就没有内容了"
             return
         }
+        pushUndo("剪掉一段")
         clips = result
         DiagnosticsLog.write("[剪辑] 剪掉 " + Self.timeText(a) + "–" + Self.timeText(b)
                              + "，保留 " + String(result.count) + " 段")
@@ -108,6 +109,7 @@ final class SegmentEditStore: ObservableObject {
             notice = "选区太短（至少 0.2 秒）"
             return
         }
+        pushUndo("只保留一段")
         clips = [clip]
         DiagnosticsLog.write("[剪辑] 只保留 " + Self.timeText(clip.start) + "–" + Self.timeText(clip.end))
     }
@@ -163,6 +165,7 @@ final class SegmentEditStore: ObservableObject {
             let existing = existingClipCount(for: source.id)
             if existing > 0 { return .duplicate(existing) }
         }
+        pushUndo("加入片段")
         clips.append(clip)
         DiagnosticsLog.write("[剪辑] 追加片段 源=" + clip.sourceTitle
                              + " " + Self.timeText(clip.start) + "–" + Self.timeText(clip.end)
@@ -235,6 +238,7 @@ final class SegmentEditStore: ObservableObject {
             notice = "区间太短（至少 0.2 秒）"
             return
         }
+        pushUndo("修改区间")
         clips[index].start = a
         clips[index].end = b
         DiagnosticsLog.write("[剪辑] 修改片段 源=" + clips[index].sourceTitle
@@ -249,6 +253,7 @@ final class SegmentEditStore: ObservableObject {
 
     /// 排序会覆盖手动拖动顺序（之后仍可再拖动调整）
     func sortClips(by mode: ClipSort) {
+        pushUndo("排序")
         switch mode {
         case .titleAsc:
             clips.sort { lhs, rhs in
@@ -267,15 +272,82 @@ final class SegmentEditStore: ObservableObject {
     }
 
     func remove(_ id: UUID) {
+        pushUndo("删除片段")
         clips.removeAll { $0.id == id }
+        lastActionText = "已删除 1 段"
     }
 
     func move(from source: IndexSet, to destination: Int) {
+        pushUndo("调整顺序")
         clips.move(fromOffsets: source, toOffset: destination)
     }
 
     func clear() {
+        guard !clips.isEmpty else { return }
+        pushUndo("清空清单")
+        backupCurrent()
         clips.removeAll()
+        lastActionText = "已清空清单"
+    }
+
+    // MARK: - 撤销 / 备份
+
+    @Published private(set) var canUndo = false
+    @Published var lastActionText: String?
+
+    private var undoStack: [[Clip]] = []
+    private static let undoLimit = 10
+
+    private static var backupURL: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("editList.backup.json")
+    }
+
+    private func pushUndo(_ name: String) {
+        undoStack.append(clips)
+        if undoStack.count > Self.undoLimit { undoStack.removeFirst() }
+        canUndo = true
+        lastActionText = name
+    }
+
+    func undo() {
+        guard let previous = undoStack.popLast() else { return }
+        clips = previous
+        canUndo = !undoStack.isEmpty
+        lastActionText = "已撤销"
+        DiagnosticsLog.write("[剪辑] 撤销一步，当前 " + String(clips.count) + " 段")
+    }
+
+    func dismissLastAction() {
+        lastActionText = nil
+    }
+
+    private func backupCurrent() {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        guard let data = try? encoder.encode(clips) else { return }
+        try? data.write(to: Self.backupURL, options: .atomic)
+        DiagnosticsLog.write("[剪辑] 已备份清单 " + String(clips.count) + " 段")
+    }
+
+    var hasBackup: Bool {
+        guard let data = try? Data(contentsOf: Self.backupURL) else { return false }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let list = (try? decoder.decode([Clip].self, from: data)) ?? []
+        return !list.isEmpty
+    }
+
+    func restoreBackup() {
+        guard let data = try? Data(contentsOf: Self.backupURL) else { return }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let list = try? decoder.decode([Clip].self, from: data), !list.isEmpty else { return }
+        pushUndo("恢复备份")
+        let assets = VideoLibrary.assetsDir
+        clips = list.filter { FileManager.default.fileExists(atPath: assets.appendingPathComponent($0.fileName).path) }
+        lastActionText = "已恢复上次清单（\(clips.count) 段）"
+        DiagnosticsLog.write("[剪辑] 恢复备份 " + String(clips.count) + " 段")
     }
 
     var totalDuration: Double {
@@ -414,6 +486,7 @@ final class SegmentEditStore: ObservableObject {
                                  createdAt: Date(),
                                  lastPosition: nil,
                                  segmentDirName: result.dirName)
+            exportSubtitles(for: plan, into: dir)
             library?.add(item)
             clips.removeAll()
             notice = "已生成：" + title + "（" + Self.timeText(result.duration) + "）"
@@ -421,6 +494,59 @@ final class SegmentEditStore: ObservableObject {
             DiagnosticsLog.write("[剪辑] 导出失败：" + error.localizedDescription)
             notice = "剪辑失败：" + error.localizedDescription
         }
+    }
+
+    // MARK: - 字幕随剪辑片导出（C3）
+
+    private func exportSubtitles(for plan: [Clip], into dir: URL) {
+        var lines: [(start: Double, end: Double, text: String)] = []
+        var cursor = 0.0
+        for clip in plan {
+            defer { cursor += clip.duration }
+            let sourceDir = VideoLibrary.assetsDir
+                .appendingPathComponent((clip.fileName as NSString).deletingLastPathComponent)
+            guard let file = firstSubtitleFile(in: sourceDir),
+                  let cues = SubtitleParser.parse(url: file) else { continue }
+            for cue in cues {
+                let start = max(cue.start, clip.start) - clip.start
+                let end = min(cue.end, clip.end) - clip.start
+                guard end - start > 0.05 else { continue }
+                lines.append((cursor + start, cursor + end, cue.text))
+            }
+        }
+        guard !lines.isEmpty else { return }
+        lines.sort { $0.start < $1.start }
+
+        var srt = ""
+        for (index, line) in lines.enumerated() {
+            srt += "\(index + 1)\n\(Self.srtTime(line.start)) --> \(Self.srtTime(line.end))\n\(line.text)\n\n"
+        }
+        let subsDir = dir.appendingPathComponent("subtitles", isDirectory: true)
+        try? FileManager.default.createDirectory(at: subsDir, withIntermediateDirectories: true)
+        try? srt.write(to: subsDir.appendingPathComponent("merged.srt"),
+                       atomically: true, encoding: .utf8)
+        DiagnosticsLog.write("[剪辑] 字幕随片导出 " + String(lines.count) + " 条")
+    }
+
+    private func firstSubtitleFile(in dir: URL) -> URL? {
+        let fm = FileManager.default
+        for folder in [dir, dir.appendingPathComponent("subtitles", isDirectory: true)] {
+            guard let files = try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) else { continue }
+            let hit = files
+                .sorted { $0.lastPathComponent < $1.lastPathComponent }
+                .first { SubtitleParser.supportedExtensions.contains($0.pathExtension.lowercased()) }
+            if let hit { return hit }
+        }
+        return nil
+    }
+
+    private static func srtTime(_ seconds: Double) -> String {
+        let ms = Int((max(0, seconds) * 1000).rounded())
+        let h = ms / 3_600_000
+        let m = (ms % 3_600_000) / 60_000
+        let s = (ms % 60_000) / 1000
+        let f = ms % 1000
+        return String(format: "%02d:%02d:%02d,%03d", h, m, s, f)
     }
 
     static func timeText(_ seconds: Double) -> String {
