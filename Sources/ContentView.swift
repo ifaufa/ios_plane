@@ -1236,6 +1236,7 @@ struct EngineSettingsView: View {
     @State private var completionNotice = (UserDefaults.standard.object(forKey: CompletionFeedback.noticeKey) as? Bool) ?? true
     @StateObject private var playPrefs = PlaybackPrefs.shared
     @AppStorage(LibraryGrouping.groupPrefKey) private var groupBySeries = true
+    @AppStorage("library.recentEnabled") private var recentEnabled = true
     @AppStorage(PlayerView.autoLandscapeKey) private var autoLandscape = true
     @AppStorage(SegmentEditStore.enabledKey) private var editEnabled = true
 
