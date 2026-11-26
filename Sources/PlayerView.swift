@@ -519,15 +519,7 @@ struct PlayerView: View {
     private var gravityMenu: some View {
         Menu {
             ForEach(PlaybackStore.VideoGravityMode.allCases, id: \.self) { mode in
-                Button {
-                    store.setGravity(mode)
-                } label: {
-                    if store.gravityMode == mode {
-                        Label(mode.title + "（" + mode.detail + "）", systemImage: "checkmark")
-                    } else {
-                        Text(mode.title + "（" + mode.detail + "）")
-                    }
-                }
+                Button(gravityLabel(mode)) { store.setGravity(mode) }
             }
         } primaryAction: {
             store.cycleGravity()
@@ -537,6 +529,11 @@ struct PlayerView: View {
                 .foregroundStyle(.white.opacity(0.85))
                 .frame(width: 28, height: 28)
         }
+    }
+
+    private func gravityLabel(_ mode: PlaybackStore.VideoGravityMode) -> String {
+        let mark = store.gravityMode == mode ? "✓ " : ""
+        return mark + mode.title + "（" + mode.detail + "）"
     }
 
     private var rateMenu: some View {
