@@ -451,7 +451,7 @@ struct PlayerView: View {
 
     private var rateMenu: some View {
         Menu {
-            ForEach([0.75, 1.0, 1.25, 1.5, 2.0], id: \\.self) { value in
+            ForEach([0.75, 1.0, 1.25, 1.5, 2.0], id: \.self) { value in
                 Button {
                     store.setPlaybackRate(Float(value))
                 } label: {
