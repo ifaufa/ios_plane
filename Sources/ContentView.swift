@@ -24,6 +24,7 @@ struct ContentView: View {
     @State private var showHeaders = false
     @State private var showImporter = false
     @State private var showOrphanSheet = false
+    @State private var showStorage = false
     @State private var showQueueSheet = false
     @State private var restoreExpectation: String?
     @State private var selectionMode = false
@@ -267,6 +268,9 @@ struct ContentView: View {
                             Button { showOrphanSheet = true } label: {
                                 Label("清理孤立文件…", systemImage: "trash.slash")
                             }
+                            Button { showStorage = true } label: {
+                                Label("存储空间…", systemImage: "internaldrive")
+                            }
                         } label: {
                             Label("存储清理", systemImage: "externaldrive.badge.minus")
                         }
@@ -277,6 +281,9 @@ struct ContentView: View {
             }
             .sheet(isPresented: $showOrphanSheet) {
                 OrphanCleanupSheet(library: library)
+            }
+            .sheet(isPresented: $showStorage) {
+                StorageSheet(library: library)
             }
             .sheet(isPresented: $showQueueSheet) {
                 QueueOverviewSheet()
@@ -492,7 +499,7 @@ struct ContentView: View {
                 Image(systemName: selected.contains(item.id) ? "checkmark.circle.fill" : "circle")
                     .foregroundStyle(selected.contains(item.id) ? Color.accentColor : .secondary)
             }
-            LibraryRow(item: item, isMissing: library.isMissing(item), localURL: library.localURL(for: item))
+            LibraryRow(item: item, isMissing: library.isMissing(item), localURL: library.localURL(for: item), isMixed: library.isMixedParams(item))
         }
         .contentShape(Rectangle())
         .onTapGesture {
@@ -862,10 +869,21 @@ struct ContentView: View {
                 showToast("已加入剪辑清单：\(item.title)（共 \(total) 段）")
                 if openEditor { openClipEditor(for: item) }
             }
+        case .playMixed(let item, let fromBeginning):
+            actuallyOpenPlayer(item, fromBeginning: fromBeginning)
         }
         }
 
     private func openPlayer(_ item: VideoItem, fromBeginning: Bool = false) {
+        // 混合参数产物：播放前先提示可能异常
+        if library.isMixedParams(item) {
+            pendingLibraryAction = .playMixed(item, fromBeginning: fromBeginning)
+            return
+        }
+        actuallyOpenPlayer(item, fromBeginning: fromBeginning)
+    }
+
+    private func actuallyOpenPlayer(_ item: VideoItem, fromBeginning: Bool) {
         let url = library.localURL(for: item)
         let exists = FileManager.default.fileExists(atPath: url.path)
         DiagnosticsLog.write("[播放] 点击 \(item.title) 文件=\(item.fileName) 存在=\(exists) 从头=\(fromBeginning)")
@@ -1004,6 +1022,7 @@ private struct LibraryRow: View {
     let item: VideoItem
     let isMissing: Bool
     let localURL: URL
+    var isMixed: Bool = false
 
     @State private var thumbnail: UIImage?
 
@@ -1025,6 +1044,14 @@ private struct LibraryRow: View {
                 Text(item.duration > 0 ? Self.formatDuration(item.duration) : "--:--")
                 Text(Self.formatSize(item.fileSize))
                 Text(item.createdAt, style: .date)
+                if isMixed {
+                    Text("混合参数")
+                        .font(.caption2.weight(.semibold))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.orange.opacity(0.16), in: Capsule())
+                        .foregroundStyle(.orange)
+                }
             }
             .font(.caption).foregroundStyle(.secondary)
             if let position = item.lastPosition, position > 5,
@@ -1284,6 +1311,8 @@ enum LibraryAction: Identifiable {
     case deleteDownload(DownloadTaskInfo)
     /// 该视频已在剪辑清单中，询问是否重复加入
     case clipDuplicate(VideoItem, openEditor: Bool, existing: Int)
+    /// 混合参数产物：播放前提示
+    case playMixed(VideoItem, fromBeginning: Bool)
 
     var id: String {
         switch self {
@@ -1294,6 +1323,7 @@ enum LibraryAction: Identifiable {
         case .cleanupMP4: return "cleanup-mp4"
         case .deleteDownload(let task): return "task-\(task.id)"
         case .clipDuplicate(let item, _, let existing): return "clip-\(item.id)-\(existing)"
+        case .playMixed(let item, _): return "play-\(item.id)-\(item.lastPlayedAt?.timeIntervalSince1970 ?? 0)"
         }
     }
 
@@ -1306,6 +1336,7 @@ enum LibraryAction: Identifiable {
         case .cleanupMP4: return "删除所有 MP4？"
         case .deleteDownload: return "删除这个下载任务？"
         case .clipDuplicate: return "已在剪辑清单中"
+        case .playMixed: return "该视频为混合参数产物"
         }
     }
 
@@ -1319,6 +1350,8 @@ enum LibraryAction: Identifiable {
         case .deleteDownload: return "将删除该任务已下载的分片与任务记录，且不可恢复。视频库中已转换的成品不受影响。"
         case .clipDuplicate(let item, _, let existing):
             return "《\(item.title)》已在剪辑清单中 \(existing) 段，是否再添加一次？"
+        case .playMixed(let item, _):
+            return "《\(item.title)》由不同编码参数的片段合并而成，播放可能出现黑屏/花屏/中途停止，且不能转 MP4。"
         }
     }
 
@@ -1331,13 +1364,16 @@ enum LibraryAction: Identifiable {
         case .cleanupMP4: return "删除 MP4"
         case .deleteDownload: return "删除"
         case .clipDuplicate: return "仍然添加"
+        case .playMixed: return "继续播放"
         }
     }
 
-    /// 「仍然添加」不是破坏性操作，用普通按钮样式
+    /// 「仍然添加」「继续播放」不是破坏性操作，用普通按钮样式
     var isDestructive: Bool {
-        if case .clipDuplicate = self { return false }
-        return true
+        switch self {
+        case .clipDuplicate, .playMixed: return false
+        default: return true
+        }
     }
 }
 
