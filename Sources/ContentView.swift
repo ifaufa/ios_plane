@@ -1238,6 +1238,7 @@ struct EngineSettingsView: View {
     @AppStorage(LibraryGrouping.groupPrefKey) private var groupBySeries = true
     @AppStorage("library.recentEnabled") private var recentEnabled = true
     @AppStorage(PlayerView.autoLandscapeKey) private var autoLandscape = true
+    @AppStorage("playback.clockMode") private var clockMode = 0
     @AppStorage(SegmentEditStore.enabledKey) private var editEnabled = true
 
     private func summaryText(_ timing: PlaybackPrefs.SeriesTiming) -> String {
@@ -1288,10 +1289,15 @@ struct EngineSettingsView: View {
                 }
                 Section {
                     Toggle("播放时自动旋转为横屏", isOn: $autoLandscape)
+                    Picker("全屏常驻时钟", selection: $clockMode) {
+                        Text("关闭").tag(0)
+                        Text("仅时间").tag(1)
+                        Text("时间 + 日期").tag(2)
+                    }
                 } header: {
                     Text("播放")
                 } footer: {
-                    Text("开启后：横视频自动横屏、竖视频自动竖屏、近似方形跟随设备；关闭则完全跟随设备方向。播放器上的锁形按钮可临时解锁旋转。")
+                    Text("开启后：横视频自动横屏、竖视频自动竖屏、近似方形跟随设备；关闭则完全跟随设备方向。播放器上的锁形按钮可临时解锁旋转。全屏时钟仅在控制条隐藏时显示在右上角（点一下屏幕出现的控制条顶部本来就显示完整日期时间）。")
                 }
                 Section {
                     Toggle("启用视频编辑功能", isOn: $editEnabled)

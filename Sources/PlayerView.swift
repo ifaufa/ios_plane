@@ -31,6 +31,28 @@ struct PlayerView: View {
     @State private var subtitleObserver: Any?
     @State private var showSubtitleImporter = false
     @AppStorage(SegmentEditStore.enabledKey) private var editEnabled = true
+    /// 全屏常驻时钟：0 关闭，1 仅时间，2 时间+日期
+    @AppStorage("playback.clockMode") private var clockMode = 0
+
+    private static let clockDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.setLocalizedDateFormatFromTemplate("MMMdEEE")
+        return formatter
+    }()
+
+    private static let clockTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.setLocalizedDateFormatFromTemplate("Hm")
+        return formatter
+    }()
+
+    private static func clockDate(_ date: Date) -> String {
+        clockDateFormatter.string(from: date)
+    }
+
+    private static func clockTime(_ date: Date) -> String {
+        clockTimeFormatter.string(from: date)
+    }
 
     var body: some View {
         ZStack {
@@ -45,6 +67,34 @@ struct PlayerView: View {
             }
 
             subtitleOverlay
+
+            // 常驻时钟：仅在控制条隐藏时显示（控制条展开时顶部已有完整日期时间）
+            if clockMode > 0, !gestures.chromeVisible {
+                TimelineView(.periodic(from: .now, by: 30)) { context in
+                    HStack(spacing: 5) {
+                        Image(systemName: "clock")
+                            .font(.system(size: 10, weight: .semibold))
+                        Text(clockMode == 2
+                             ? Self.clockDate(context.date) + " " + Self.clockTime(context.date)
+                             : Self.clockTime(context.date))
+                            .font(.system(size: 12, weight: .medium, design: .rounded))
+                            .monospacedDigit()
+                    }
+                    .foregroundStyle(.white.opacity(0.88))
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background {
+                        Capsule().fill(.ultraThinMaterial)
+                    }
+                    .overlay(Capsule().strokeBorder(.white.opacity(0.15), lineWidth: 0.5))
+                    .shadow(color: .black.opacity(0.3), radius: 6, y: 2)
+                }
+                .allowsHitTesting(false)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                .padding(.top, 10)
+                .padding(.trailing, 14)
+                .transition(.opacity)
+            }
 
             if gestures.chromeVisible {
                 chrome
@@ -199,6 +249,25 @@ struct PlayerView: View {
             }
             .padding(.horizontal, 24)
             .padding(.top, immersive ? 8 : 16)
+
+            TimelineView(.periodic(from: .now, by: 30)) { context in
+                HStack(spacing: 6) {
+                    Text(Self.clockDate(context.date))
+                        .font(.caption2)
+                    Text("·")
+                        .opacity(0.5)
+                    Text(Self.clockTime(context.date))
+                        .font(.caption.weight(.medium))
+                        .monospacedDigit()
+                }
+                .foregroundStyle(.white.opacity(0.92))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 5)
+                .background(.black.opacity(0.4), in: Capsule())
+                .overlay(Capsule().strokeBorder(.white.opacity(0.12), lineWidth: 0.5))
+            }
+            .allowsHitTesting(false)
+            .padding(.top, 6)
 
             Spacer()
 
