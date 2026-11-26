@@ -399,6 +399,56 @@ final class BrowserModel: NSObject, ObservableObject {
         return summary
     }
 
+    // MARK: - 批量标题（前缀/后缀）
+
+    private var titleAffixBackup: [String: String] = [:]
+
+    var canUndoTitleAffix: Bool { !titleAffixBackup.isEmpty }
+
+    /// 给候选标题批量加前缀/后缀；返回实际修改的条数
+    @discardableResult
+    func applyTitleAffix(prefix: String, suffix: String, onlySelected: Bool) -> Int {
+        let head = prefix.trimmingCharacters(in: .whitespacesAndNewlines)
+        let tail = suffix.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !head.isEmpty || !tail.isEmpty else { return 0 }
+
+        titleAffixBackup.removeAll()
+        var changed = 0
+        for index in candidates.indices {
+            guard candidates[index].isSelectable else { continue }
+            if onlySelected && !candidates[index].selected { continue }
+
+            var title = candidates[index].title.trimmingCharacters(in: .whitespacesAndNewlines)
+            if title.isEmpty {
+                title = URL(string: candidates[index].url)?.host ?? "未命名"
+            }
+            var newTitle = title
+            if !head.isEmpty, !newTitle.hasPrefix(head) { newTitle = head + newTitle }
+            if !tail.isEmpty, !newTitle.hasSuffix(tail) { newTitle = newTitle + tail }
+            guard newTitle != candidates[index].title else { continue }
+
+            titleAffixBackup[candidates[index].id] = candidates[index].title
+            candidates[index].title = newTitle
+            candidates[index].titleEditedByUser = true
+            changed += 1
+        }
+        DiagnosticsLog.write("[候选] 批量标题 前缀=" + head + " 后缀=" + tail
+                             + " 范围=" + (onlySelected ? "已勾选" : "全部未加入")
+                             + " 修改=" + String(changed) + " 条")
+        return changed
+    }
+
+    func undoTitleAffix() {
+        guard !titleAffixBackup.isEmpty else { return }
+        for (id, oldTitle) in titleAffixBackup {
+            if let index = candidates.firstIndex(where: { $0.id == id }) {
+                candidates[index].title = oldTitle
+            }
+        }
+        DiagnosticsLog.write("[候选] 撤销批量标题 " + String(titleAffixBackup.count) + " 条")
+        titleAffixBackup.removeAll()
+    }
+
     func toggle(_ id: String) {
         guard let index = candidates.firstIndex(where: { $0.id == id }) else { return }
         candidates[index].selected.toggle()
@@ -1153,6 +1203,7 @@ private struct CandidateSheet: View {
 
     @State private var pendingClearSource: Candidate.Source?
     @State private var showClearConfirm = false
+    @State private var showTitleAffix = false
 
     private var clearTitle: String {
         if let source = pendingClearSource {
@@ -1187,9 +1238,20 @@ private struct CandidateSheet: View {
             } message: {
                 Text("清空后无法恢复；已加入下载队列的任务不受影响。")
             }
+            .sheet(isPresented: $showTitleAffix) {
+                TitleAffixSheet(model: model)
+            }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("关闭") { dismiss() }
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button {
+                        showTitleAffix = true
+                    } label: {
+                        Label("批量标题", systemImage: "textformat")
+                    }
+                    .disabled(model.candidates.isEmpty)
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Menu {
@@ -1557,6 +1619,81 @@ struct BrowserHistorySheet: View {
             .confirmationDialog("清空全部历史记录？", isPresented: $showClearConfirm, titleVisibility: .visible) {
                 Button("清空", role: .destructive) { model.clearHistory() }
                 Button("取消", role: .cancel) {}
+            }
+        }
+    }
+}
+// MARK: - 批量标题
+
+private struct TitleAffixSheet: View {
+    @ObservedObject var model: BrowserModel
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var prefix = ""
+    @State private var suffix = ""
+    @State private var onlySelected = true
+    @State private var applied = 0
+
+    private var targetCount: Int {
+        onlySelected ? model.selectedCount : model.availableCount
+    }
+
+    private var sampleText: String {
+        let base = model.candidates.first(where: { $0.isSelectable })?.title ?? "第01集"
+        return prefix + base + suffix
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("前缀（加在标题前）", text: $prefix)
+                    TextField("后缀（加在标题后）", text: $suffix)
+                } header: {
+                    Text("标题前后缀")
+                } footer: {
+                    Text("预览：" + sampleText)
+                }
+
+                Section {
+                    Picker("作用范围", selection: $onlySelected) {
+                        Text("仅已勾选（\(model.selectedCount) 条）").tag(true)
+                        Text("全部未加入（\(model.availableCount) 条）").tag(false)
+                    }
+                    .pickerStyle(.inline)
+                    .labelsHidden()
+                } header: {
+                    Text("范围")
+                }
+
+                Section {
+                    Button("应用（\(targetCount) 条）") {
+                        applied = model.applyTitleAffix(prefix: prefix,
+                                                        suffix: suffix,
+                                                        onlySelected: onlySelected)
+                    }
+                    .disabled(targetCount == 0 || (prefix.isEmpty && suffix.isEmpty))
+
+                    if model.canUndoTitleAffix {
+                        Button("撤销上次批量修改", role: .destructive) {
+                            model.undoTitleAffix()
+                            applied = 0
+                        }
+                    }
+                } footer: {
+                    if applied > 0 {
+                        Text("已修改 \(applied) 条标题")
+                    } else {
+                        Text("相同前后缀不会重复添加；修改后加入下载队列的标题即为新标题。")
+                    }
+                }
+            }
+            .navigationTitle("批量标题")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("关闭") { dismiss() }
+                }
             }
         }
     }

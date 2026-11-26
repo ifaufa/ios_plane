@@ -14,6 +14,8 @@ struct VideoItem: Identifiable, Codable, Equatable {
     var segmentDirName: String?
     /// 最近一次播放时间（"最近在看"排序用；旧台账没有此字段，解码为 nil）
     var lastPlayedAt: Date? = nil
+    /// 从「观看记录」移除的时间点（不影响视频与进度；再次播放会重新出现）
+    var recentDismissedAt: Date? = nil
 }
 
 @MainActor
@@ -446,13 +448,43 @@ final class VideoLibrary: ObservableObject {
         save()
     }
 
-    /// 「最近在看」：有进度且最近播放过的条目
+    /// 「最近在看」：有进度、最近播放过，且没有被移出记录的条目
     func recentlyWatched(limit: Int = 5) -> [VideoItem] {
         items
-            .filter { ($0.lastPosition ?? 0) > 5 && $0.lastPlayedAt != nil }
+            .filter { item in
+                guard let played = item.lastPlayedAt else { return false }
+                guard (item.lastPosition ?? 0) > 5 else { return false }
+                if let dismissed = item.recentDismissedAt, played <= dismissed { return false }
+                return true
+            }
             .sorted { ($0.lastPlayedAt ?? .distantPast) > ($1.lastPlayedAt ?? .distantPast) }
             .prefix(limit)
             .map { $0 }
+    }
+
+    /// 从观看记录中移除（可选同时清除播放进度）
+    func dismissRecent(_ id: UUID, clearProgress: Bool) {
+        guard let index = items.firstIndex(where: { $0.id == id }) else { return }
+        items[index].recentDismissedAt = Date()
+        if clearProgress {
+            items[index].lastPosition = nil
+        }
+        save()
+        DiagnosticsLog.write("[记录] 移除 " + items[index].title
+                             + (clearProgress ? "（并清除进度）" : "（保留进度）"))
+    }
+
+    /// 清空观看记录（视频与进度均不受影响）
+    func clearRecent() {
+        let now = Date()
+        var count = 0
+        for index in items.indices where items[index].lastPlayedAt != nil {
+            items[index].recentDismissedAt = now
+            count += 1
+        }
+        guard count > 0 else { return }
+        save()
+        DiagnosticsLog.write("[记录] 清空观看记录 " + String(count) + " 条")
     }
 
     /// 合并备份里的条目（按 fileName 去重）

@@ -19,6 +19,8 @@ struct ContentView: View {
     @AppStorage("library.filter.mixed") private var filterMixed = false
     /// 「最近在看」分区开关
     @AppStorage("library.recentEnabled") private var recentEnabled = true
+    /// 「最近在看」显示条数
+    @AppStorage("library.recentCount") private var recentCount = 5
     @State private var pendingLargeConvert: VideoItem?
 
 
@@ -69,9 +71,16 @@ struct ContentView: View {
                 }
                 downloadsSection
                 if recentEnabled, searchText.isEmpty, !isFiltering, !recentItems.isEmpty {
-                    Section("最近在看") {
+                    Section {
                         ForEach(recentItems) { item in
-                            libraryRow(item)
+                            recentRow(item)
+                        }
+                    } header: {
+                        HStack {
+                            Text("最近在看")
+                            Spacer()
+                            Button("清空") { pendingLibraryAction = .clearRecent }
+                                .font(.caption)
                         }
                     }
                 }
@@ -788,7 +797,57 @@ struct ContentView: View {
     }
 
     private var recentItems: [VideoItem] {
-        library.recentlyWatched(limit: 5)
+        library.recentlyWatched(limit: recentCount)
+    }
+
+    @ViewBuilder
+    private func recentRow(_ item: VideoItem) -> some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.title)
+                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    Text("上次看到 " + PlaybackStore.timeText(item.lastPosition ?? 0))
+                    Text("·")
+                    Text(Self.relativeTime(item.lastPlayedAt))
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Menu {
+                Button("继续播放") { openPlayer(item) }
+                Button("移除记录") { library.dismissRecent(item.id, clearProgress: false) }
+                Button("移除并清除进度", role: .destructive) {
+                    library.dismissRecent(item.id, clearProgress: true)
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .foregroundStyle(.secondary)
+                    .frame(width: 32, height: 32)
+                    .contentShape(Rectangle())
+            }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if library.isMissing(item) {
+                showToast("文件已丢失，需重新下载")
+            } else {
+                openPlayer(item)
+            }
+        }
+        .swipeActions(edge: .trailing) {
+            Button("移除记录", role: .destructive) {
+                library.dismissRecent(item.id, clearProgress: false)
+            }
+        }
+    }
+
+    private static func relativeTime(_ date: Date?) -> String {
+        guard let date else { return "" }
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .short
+        return formatter.localizedString(for: date, relativeTo: Date())
     }
 
     private var librarySectionTitle: String {
@@ -956,6 +1015,9 @@ struct ContentView: View {
             }
         case .playMixed(let item, let fromBeginning):
             actuallyOpenPlayer(item, fromBeginning: fromBeginning)
+        case .clearRecent:
+            library.clearRecent()
+            showToast("已清空观看记录")
         }
         }
 
@@ -1237,6 +1299,7 @@ struct EngineSettingsView: View {
     @StateObject private var playPrefs = PlaybackPrefs.shared
     @AppStorage(LibraryGrouping.groupPrefKey) private var groupBySeries = true
     @AppStorage("library.recentEnabled") private var recentEnabled = true
+    @AppStorage("library.recentCount") private var recentCount = 5
     @AppStorage(PlayerView.autoLandscapeKey) private var autoLandscape = true
     @AppStorage("playback.clockMode") private var clockMode = 0
     @AppStorage("playback.gravity") private var gravityDefault = 0
@@ -1283,6 +1346,12 @@ struct EngineSettingsView: View {
                 Section {
                     Toggle("按系列分组（可折叠）", isOn: $groupBySeries)
                     Toggle("显示「最近在看」", isOn: $recentEnabled)
+                    Picker("最近在看 显示条数", selection: $recentCount) {
+                        Text("3 条").tag(3)
+                        Text("5 条").tag(5)
+                        Text("10 条").tag(10)
+                    }
+                    .disabled(!recentEnabled)
                 } header: {
                     Text("视频库")
                 } footer: {
@@ -1412,6 +1481,8 @@ enum LibraryAction: Identifiable {
     case clipDuplicate(VideoItem, openEditor: Bool, existing: Int)
     /// 混合参数产物：播放前提示
     case playMixed(VideoItem, fromBeginning: Bool)
+    /// 清空观看记录（不删除视频）
+    case clearRecent
 
     var id: String {
         switch self {
@@ -1423,6 +1494,7 @@ enum LibraryAction: Identifiable {
         case .deleteDownload(let task): return "task-\(task.id)"
         case .clipDuplicate(let item, _, let existing): return "clip-\(item.id)-\(existing)"
         case .playMixed(let item, _): return "play-\(item.id)-\(item.lastPlayedAt?.timeIntervalSince1970 ?? 0)"
+        case .clearRecent: return "clear-recent"
         }
     }
 
@@ -1436,6 +1508,7 @@ enum LibraryAction: Identifiable {
         case .deleteDownload: return "删除这个下载任务？"
         case .clipDuplicate: return "已在剪辑清单中"
         case .playMixed: return "该视频为混合参数产物"
+        case .clearRecent: return "清空观看记录？"
         }
     }
 
@@ -1451,6 +1524,8 @@ enum LibraryAction: Identifiable {
             return "《\(item.title)》已在剪辑清单中 \(existing) 段，是否再添加一次？"
         case .playMixed(let item, _):
             return "《\(item.title)》由不同编码参数的片段合并而成，播放可能出现黑屏/花屏/中途停止，且不能转 MP4。"
+        case .clearRecent:
+            return "仅移除观看记录，视频与播放进度都不受影响。"
         }
     }
 
@@ -1464,6 +1539,7 @@ enum LibraryAction: Identifiable {
         case .deleteDownload: return "删除"
         case .clipDuplicate: return "仍然添加"
         case .playMixed: return "继续播放"
+        case .clearRecent: return "清空记录"
         }
     }
 
