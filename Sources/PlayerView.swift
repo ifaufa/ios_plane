@@ -33,6 +33,7 @@ struct PlayerView: View {
     @AppStorage(SegmentEditStore.enabledKey) private var editEnabled = true
     /// 全屏常驻时钟：0 关闭，1 仅时间，2 时间+日期
     @AppStorage("playback.clockMode") private var clockMode = 0
+    @AppStorage(SubtitleSpeaker.enabledKey) private var ttsEnabled = false
 
     private static let clockDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -188,6 +189,13 @@ struct PlayerView: View {
             SubtitleCenter.shared.prepare(for: store.currentVideo)
         }
         .onDisappear { SubtitleCenter.shared.clear() }
+        .onChange(of: subtitleTime) { _ in
+            guard ttsEnabled else { return }
+            SubtitleSpeaker.shared.handle(text: readableSubtitleText())
+        }
+        .onChange(of: store.isPlaying) { playing in
+            if !playing { SubtitleSpeaker.shared.stopAll() }
+        }
         .onChange(of: store.gravityMode) { mode in
             gestures.show(PlayerHUD(kind: .seek, progress: 0, text: mode.title, detail: mode.detail))
         }
@@ -585,6 +593,19 @@ struct PlayerView: View {
         }
     }
 
+    private func readableSubtitleText() -> String? {
+        let texts = subtitles.texts(at: subtitleTime)
+        switch SubtitleSpeaker.trackIndex {
+        case 1:
+            return texts.secondary
+        case 2:
+            let parts = [texts.primary, texts.secondary].compactMap { $0 }
+            return parts.isEmpty ? nil : parts.joined(separator: "，")
+        default:
+            return texts.primary
+        }
+    }
+
     private func subtitleLine(_ text: String, scale: CGFloat) -> some View {
         Text(text)
             .font(.system(size: subtitles.fontSize * scale, weight: .semibold))
@@ -664,6 +685,13 @@ struct PlayerView: View {
                 Button("+0.5 秒") { subtitles.adjustOffset(0.5) }
             }
             Divider()
+            Button {
+                ttsEnabled.toggle()
+                if !ttsEnabled { SubtitleSpeaker.shared.stopAll() }
+            } label: {
+                ttsEnabled ? Label("朗读字幕（开）", systemImage: "checkmark") : Text("朗读字幕（关）")
+            }
+            Divider()
             Button("加载字幕文件…") { showSubtitleImporter = true }
         } label: {
             Image(systemName: subtitles.isActive ? "captions.bubble.fill" : "captions.bubble")
@@ -679,6 +707,10 @@ struct PlayerView: View {
         applyOrientationForCurrentVideo()
 
         SubtitleCenter.shared.prepare(for: store.currentVideo)
+        SubtitleSpeaker.shared.onSpeakingChanged = { speaking in
+            let duck = SubtitleSpeaker.duckEnabled ? Float(SubtitleSpeaker.duckLevel) : 1.0
+            player.volume = speaking ? duck : 1.0
+        }
         if subtitleObserver == nil {
             let interval = CMTime(seconds: 0.2, preferredTimescale: 600)
             subtitleObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { time in
@@ -785,6 +817,7 @@ struct PlayerView: View {
             player.removeTimeObserver(subtitleObserver)
             self.subtitleObserver = nil
         }
+        SubtitleSpeaker.shared.stopAll()
         let current = player.currentTime().seconds
         if current.isFinite { store.reportProgress(current) }
 

@@ -1303,6 +1303,13 @@ struct EngineSettingsView: View {
     @AppStorage(PlayerView.autoLandscapeKey) private var autoLandscape = true
     @AppStorage("playback.clockMode") private var clockMode = 0
     @AppStorage("playback.gravity") private var gravityDefault = 0
+    @AppStorage(SubtitleSpeaker.enabledKey) private var ttsEnabled = false
+    @AppStorage(SubtitleSpeaker.trackKey) private var ttsTrack = 0
+    @AppStorage(SubtitleSpeaker.queueKey) private var ttsQueue = true
+    @AppStorage(SubtitleSpeaker.duckKey) private var ttsDuck = true
+    @AppStorage(SubtitleSpeaker.duckLevelKey) private var ttsDuckLevel = 0.6
+    @AppStorage(SubtitleSpeaker.rateKey) private var ttsRate = 0.52
+    @AppStorage(SubtitleSpeaker.voiceKey) private var ttsVoice = ""
     @AppStorage(SegmentEditStore.enabledKey) private var editEnabled = true
 
     private func summaryText(_ timing: PlaybackPrefs.SeriesTiming) -> String {
@@ -1373,6 +1380,45 @@ struct EngineSettingsView: View {
                     Text("播放")
                 } footer: {
                     Text("开启后：横视频自动横屏、竖视频自动竖屏、近似方形跟随设备；关闭则完全跟随设备方向。播放器上的锁形按钮可临时解锁旋转。全屏时钟仅在控制条隐藏时显示在右上角（点一下屏幕出现的控制条顶部本来就显示完整日期时间）。")
+                }
+                Section {
+                    Toggle("朗读字幕（TTS）", isOn: $ttsEnabled)
+                    if ttsEnabled {
+                        Picker("朗读内容", selection: $ttsTrack) {
+                            Text("主字幕").tag(0)
+                            Text("次字幕").tag(1)
+                            Text("主 + 次").tag(2)
+                        }
+                        Picker("朗读策略", selection: $ttsQueue) {
+                            Text("排队（不漏句）").tag(true)
+                            Text("打断（紧跟画面）").tag(false)
+                        }
+                        Picker("语速", selection: $ttsRate) {
+                            Text("慢").tag(0.42)
+                            Text("正常").tag(0.52)
+                            Text("快").tag(0.62)
+                        }
+                        Picker("音色", selection: $ttsVoice) {
+                            Text("自动（跟随语言）").tag("")
+                            ForEach(SubtitleSpeaker.availableVoices(), id: \.identifier) { voice in
+                                Text(voice.name + "（" + voice.language + "）").tag(voice.identifier)
+                            }
+                        }
+                        Toggle("朗读时压低视频音量", isOn: $ttsDuck)
+                        if ttsDuck {
+                            HStack {
+                                Text("压低到")
+                                Slider(value: $ttsDuckLevel, in: 0.2...1.0, step: 0.05)
+                                Text("\(Int(ttsDuckLevel * 100))%")
+                                    .monospacedDigit()
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                } header: {
+                    Text("字幕朗读")
+                } footer: {
+                    Text("开启后，播放时会把当前字幕用系统语音读出来（离线合成）。排队模式不会漏句但可能略微滞后；打断模式始终紧跟画面。朗读期间会临时压低视频音量，读完平滑恢复。若中文无声，请到 设置 → 辅助功能 → 朗读内容 → 声音 下载中文语音。")
                 }
                 Section {
                     Toggle("启用视频编辑功能", isOn: $editEnabled)
