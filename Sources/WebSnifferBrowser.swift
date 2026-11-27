@@ -405,34 +405,62 @@ final class BrowserModel: NSObject, ObservableObject {
 
     var canUndoTitleAffix: Bool { !titleAffixBackup.isEmpty }
 
-    /// 给候选标题批量加前缀/后缀；返回实际修改的条数
-    @discardableResult
-    func applyTitleAffix(prefix: String, suffix: String, onlySelected: Bool) -> Int {
-        let head = prefix.trimmingCharacters(in: .whitespacesAndNewlines)
-        let tail = suffix.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !head.isEmpty || !tail.isEmpty else { return 0 }
+    struct TitleTemplate {
+        var prefix = ""
+        var middle = "{原名}"
+        var suffix = ""
+        var useReplace = false
+        var find = ""
+        var replace = ""
+        var numberStart = 1
 
+        static let variableTokens = ["{原名}", "{集数}", "{序号}", "{域名}"]
+
+        var middleHasVariable: Bool {
+            Self.variableTokens.contains { middle.contains($0) }
+        }
+    }
+
+    /// 计算某条候选套用模板后的标题（预览与真正应用共用同一套逻辑）
+    func titleTemplateResult(for candidate: Candidate, number: Int, template: TitleTemplate) -> String {
+        var base = candidate.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if base.isEmpty { base = candidate.url.host ?? "未命名" }
+        if template.useReplace, !template.find.isEmpty {
+            base = base.replacingOccurrences(of: template.find, with: template.replace)
+        }
+        let episode = EpisodeIndex.parse(candidate.title).episode
+        var middle = template.middle.isEmpty ? "{原名}" : template.middle
+        middle = middle.replacingOccurrences(of: "{原名}", with: base)
+        middle = middle.replacingOccurrences(of: "{集数}", with: episode.map { String(format: "%02d", $0) } ?? "")
+        middle = middle.replacingOccurrences(of: "{序号}", with: String(number))
+        middle = middle.replacingOccurrences(of: "{域名}", with: candidate.url.host ?? "")
+        return (template.prefix + middle + template.suffix)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// 按模板批量修改标题；返回实际修改的条数
+    @discardableResult
+    func applyTitleTemplate(_ template: TitleTemplate, onlySelected: Bool) -> Int {
         titleAffixBackup.removeAll()
         var changed = 0
+        var number = template.numberStart
         for index in candidates.indices {
             guard candidates[index].isSelectable else { continue }
             if onlySelected && !candidates[index].selected { continue }
-
-            var title = candidates[index].title.trimmingCharacters(in: .whitespacesAndNewlines)
-            if title.isEmpty {
-                title = candidates[index].url.host ?? "未命名"
-            }
-            var newTitle = title
-            if !head.isEmpty, !newTitle.hasPrefix(head) { newTitle = head + newTitle }
-            if !tail.isEmpty, !newTitle.hasSuffix(tail) { newTitle = newTitle + tail }
-            guard newTitle != candidates[index].title else { continue }
+            let newTitle = titleTemplateResult(for: candidates[index], number: number, template: template)
+            number += 1
+            guard !newTitle.isEmpty, newTitle != candidates[index].title else { continue }
 
             titleAffixBackup[candidates[index].id] = candidates[index].title
             candidates[index].title = newTitle
             candidates[index].titleEditedByUser = true
             changed += 1
         }
-        DiagnosticsLog.write("[候选] 批量标题 前缀=" + head + " 后缀=" + tail
+        DiagnosticsLog.write("[候选] 批量标题 前缀=" + template.prefix
+                             + " 中间=" + template.middle
+                             + " 后缀=" + template.suffix
+                             + (template.useReplace ? " 替换「" + template.find + "」→「" + template.replace + "」" : "")
+                             + " 起始=" + String(template.numberStart)
                              + " 范围=" + (onlySelected ? "已勾选" : "全部未加入")
                              + " 修改=" + String(changed) + " 条")
         return changed
@@ -1623,36 +1651,67 @@ struct BrowserHistorySheet: View {
         }
     }
 }
-// MARK: - 批量标题
+
+// MARK: - 批量标题（三段式模板）
 
 private struct TitleAffixSheet: View {
     @ObservedObject var model: BrowserModel
     @Environment(\.dismiss) private var dismiss
 
     @State private var prefix = ""
+    @State private var middle = "{原名}"
     @State private var suffix = ""
+    @State private var useReplace = false
+    @State private var find = ""
+    @State private var replace = ""
+    @State private var numberStart = 1
     @State private var onlySelected = true
     @State private var applied = 0
+    @State private var showSameNameWarning = false
 
-    private var targetCount: Int {
-        onlySelected ? model.selectedCount : model.availableCount
+    private var template: BrowserModel.TitleTemplate {
+        BrowserModel.TitleTemplate(prefix: prefix,
+                                   middle: middle,
+                                   suffix: suffix,
+                                   useReplace: useReplace,
+                                   find: find,
+                                   replace: replace,
+                                   numberStart: numberStart)
     }
 
-    private var sampleText: String {
-        let base = model.candidates.first(where: { $0.isSelectable })?.title ?? "第01集"
-        return prefix + base + suffix
+    private var targets: [BrowserModel.Candidate] {
+        model.candidates.filter { $0.isSelectable && (!onlySelected || $0.selected) }
+    }
+
+    private var preview: [(before: String, after: String)] {
+        Array(targets.prefix(3)).enumerated().map { offset, candidate in
+            (candidate.title,
+             model.titleTemplateResult(for: candidate, number: numberStart + offset, template: template))
+        }
     }
 
     var body: some View {
         NavigationStack {
             Form {
                 Section {
-                    TextField("前缀（加在标题前）", text: $prefix)
-                    TextField("后缀（加在标题后）", text: $suffix)
+                    TextField("前缀", text: $prefix)
+                    TextField("中间（支持变量）", text: $middle)
+                    TextField("后缀", text: $suffix)
+                    Stepper("序号起始：\(numberStart)", value: $numberStart, in: 0...999)
                 } header: {
-                    Text("标题前后缀")
+                    Text("标题模板")
                 } footer: {
-                    Text("预览：" + sampleText)
+                    Text("可用变量：{原名} {集数} {序号} {域名}。中间留空等同于 {原名}（即只加前后缀）。")
+                }
+
+                Section {
+                    Toggle("启用查找替换", isOn: $useReplace)
+                    if useReplace {
+                        TextField("查找", text: $find)
+                        TextField("替换为", text: $replace)
+                    }
+                } header: {
+                    Text("查找替换（先作用于原标题）")
                 }
 
                 Section {
@@ -1667,13 +1726,29 @@ private struct TitleAffixSheet: View {
                 }
 
                 Section {
-                    Button("应用（\(targetCount) 条）") {
-                        applied = model.applyTitleAffix(prefix: prefix,
-                                                        suffix: suffix,
-                                                        onlySelected: onlySelected)
+                    if preview.isEmpty {
+                        Text("没有可应用的候选")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(Array(preview.enumerated()), id: \.offset) { _, pair in
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(pair.before)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                Text(pair.after.isEmpty ? "（空）" : pair.after)
+                                    .font(.footnote)
+                                    .lineLimit(1)
+                            }
+                        }
                     }
-                    .disabled(targetCount == 0 || (prefix.isEmpty && suffix.isEmpty))
+                } header: {
+                    Text("预览")
+                }
 
+                Section {
+                    Button("应用（\(targets.count) 条）") { attemptApply() }
+                        .disabled(targets.isEmpty)
                     if model.canUndoTitleAffix {
                         Button("撤销上次批量修改", role: .destructive) {
                             model.undoTitleAffix()
@@ -1683,8 +1758,6 @@ private struct TitleAffixSheet: View {
                 } footer: {
                     if applied > 0 {
                         Text("已修改 \(applied) 条标题")
-                    } else {
-                        Text("相同前后缀不会重复添加；修改后加入下载队列的标题即为新标题。")
                     }
                 }
             }
@@ -1695,6 +1768,26 @@ private struct TitleAffixSheet: View {
                     Button("关闭") { dismiss() }
                 }
             }
+            .confirmationDialog("所有条目将变成同名",
+                                isPresented: $showSameNameWarning,
+                                titleVisibility: .visible) {
+                Button("仍然应用", role: .destructive) {
+                    applied = model.applyTitleTemplate(template, onlySelected: onlySelected)
+                }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("中间段不含任何变量，\(targets.count) 条标题会完全一样。")
+            }
         }
+    }
+
+    private func attemptApply() {
+        let fixedMiddle = !template.middleHasVariable
+            && !middle.trimmingCharacters(in: .whitespaces).isEmpty
+        if targets.count > 1, fixedMiddle {
+            showSameNameWarning = true
+            return
+        }
+        applied = model.applyTitleTemplate(template, onlySelected: onlySelected)
     }
 }
