@@ -59,7 +59,7 @@ struct PlayerView: View {
         ZStack {
             Color.black.ignoresSafeArea()
 
-            PlayerHostView(player: player, model: gestures)
+            PlayerHostView(player: player, model: gestures, gravity: store.gravityMode)
                 .ignoresSafeArea()
 
             if let hud = gestures.hud {
@@ -198,6 +198,7 @@ struct PlayerView: View {
         }
         .onChange(of: store.gravityMode) { mode in
             gestures.show(PlayerHUD(kind: .seek, progress: 0, text: mode.title, detail: mode.detail))
+            gestures.scheduleHide()
         }
         .onChange(of: store.isMarkingPoints) { active in
             if active {

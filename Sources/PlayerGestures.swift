@@ -258,6 +258,7 @@ final class PlayerHostViewController: UIViewController, UIGestureRecognizerDeleg
         case .stretch:
             playerViewController.videoGravity = .resize
         }
+        DiagnosticsLog.write("[播放] 应用画面比例 " + mode.title + " → " + String(describing: playerViewController.videoGravity))
     }
 
     /// 设点模式下，顶部提示条区域不接收我们的单击（完整交给 SwiftUI 的「控制条」「完成」按钮）
@@ -548,13 +549,17 @@ final class PlayerHostViewController: UIViewController, UIGestureRecognizerDeleg
 struct PlayerHostView: UIViewControllerRepresentable {
     let player: AVPlayer
     let model: PlayerGestureModel
+    /// 画面比例（必须是值类型属性，否则 SwiftUI 不会调用 updateUIViewController）
+    let gravity: PlaybackStore.VideoGravityMode
 
     func makeUIViewController(context: Context) -> PlayerHostViewController {
-        PlayerHostViewController(player: player, model: model)
+        let controller = PlayerHostViewController(player: player, model: model)
+        controller.setGravity(gravity)
+        return controller
     }
 
     func updateUIViewController(_ controller: PlayerHostViewController, context: Context) {
-        controller.setGravity(PlaybackStore.shared.gravityMode)
+        controller.setGravity(gravity)
     }
 }
 
