@@ -121,14 +121,32 @@ final class SubtitleSpeaker: NSObject, ObservableObject {
         return text
     }
 
-    /// 可选音色列表（中文 + 英文）
-    static func availableVoices() -> [AVSpeechSynthesisVoice] {
-        AVSpeechSynthesisVoice.speechVoices()
-            .filter { $0.language.hasPrefix("zh") || $0.language.hasPrefix("en") }
-            .sorted { lhs, rhs in
-                if lhs.language == rhs.language { return lhs.name < rhs.name }
-                return lhs.language < rhs.language
-            }
+    /// 可选音色（只计算一次并缓存，避免每次刷新重建列表导致选择页跳动）
+    static let cachedVoices: [AVSpeechSynthesisVoice] = AVSpeechSynthesisVoice.speechVoices()
+        .filter { $0.language.hasPrefix("zh") || $0.language.hasPrefix("en") }
+        .sorted { lhs, rhs in
+            if lhs.language == rhs.language { return lhs.name < rhs.name }
+            return lhs.language < rhs.language
+        }
+
+    static func displayName(for identifier: String) -> String {
+        guard !identifier.isEmpty else { return "自动（跟随语言）" }
+        return cachedVoices.first { $0.identifier == identifier }?.name ?? "已失效（自动）"
+    }
+
+    /// 试听某个音色
+    func preview(voiceID: String) {
+        synthesizer.stopSpeaking(at: .immediate)
+        let text = "这是一段试听，用来感受音色与语速。"
+        let utterance = AVSpeechUtterance(string: text)
+        utterance.rate = Self.rate
+        utterance.volume = 0.95
+        if !voiceID.isEmpty, let voice = AVSpeechSynthesisVoice(identifier: voiceID) {
+            utterance.voice = voice
+        } else {
+            utterance.voice = AVSpeechSynthesisVoice(language: "zh-CN")
+        }
+        synthesizer.speak(utterance)
     }
 }
 

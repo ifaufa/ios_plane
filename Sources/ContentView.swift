@@ -1398,10 +1398,15 @@ struct EngineSettingsView: View {
                             Text("正常").tag(0.52)
                             Text("快").tag(0.62)
                         }
-                        Picker("音色", selection: $ttsVoice) {
-                            Text("自动（跟随语言）").tag("")
-                            ForEach(SubtitleSpeaker.availableVoices(), id: \.identifier) { voice in
-                                Text(voice.name + "（" + voice.language + "）").tag(voice.identifier)
+                        NavigationLink {
+                            VoicePickerView()
+                        } label: {
+                            HStack {
+                                Text("音色")
+                                Spacer()
+                                Text(SubtitleSpeaker.displayName(for: ttsVoice))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
                             }
                         }
                         Toggle("朗读时压低视频音量", isOn: $ttsDuck)
