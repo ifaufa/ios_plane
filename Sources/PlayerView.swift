@@ -498,14 +498,26 @@ struct PlayerView: View {
                 .opacity(0.85)
                 .lineLimit(2)
                 .multilineTextAlignment(.center)
-            Button {
-                store.cancelCountdown()
-            } label: {
-                Text("取消")
-                    .font(.caption.weight(.medium))
-                    .padding(.horizontal, 18)
-                    .padding(.vertical, 6)
-                    .background(.white.opacity(0.18), in: Capsule())
+            HStack(spacing: 10) {
+                Button {
+                    store.skipCountdownNow()
+                } label: {
+                    Text("立即跳转")
+                        .font(.caption.weight(.semibold))
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 6)
+                        .background(.white.opacity(0.9), in: Capsule())
+                        .foregroundStyle(.black)
+                }
+                Button {
+                    store.cancelCountdown()
+                } label: {
+                    Text("取消")
+                        .font(.caption.weight(.medium))
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 6)
+                        .background(.white.opacity(0.18), in: Capsule())
+                }
             }
         }
         .foregroundStyle(.white)

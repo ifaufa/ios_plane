@@ -96,7 +96,12 @@ final class PlaybackStore: ObservableObject {
     @Published private(set) var countdownNext: VideoItem?
     @Published private(set) var countdownRemaining = 0
     @Published private(set) var seriesTiming: PlaybackPrefs.SeriesTiming?
-    let countdownTotal = 7
+    /// 片尾倒计时秒数（2–20，设置里可改）
+    static let countdownSecondsKey = "playback.countdownSeconds"
+    var countdownTotal: Int {
+        let raw = UserDefaults.standard.object(forKey: Self.countdownSecondsKey) as? Int ?? 7
+        return min(20, max(2, raw))
+    }
 
     // MARK: - A-B 循环
 
@@ -601,6 +606,18 @@ final class PlaybackStore: ObservableObject {
         countdownRemaining = 0
         pendingAutoNext = true
         DiagnosticsLog.write("[播放] 连播 → \(next.title)")
+        openEpisodeHandler?(next)
+    }
+
+    /// 用户点「立即跳转」：不等倒计时，马上播下一集
+    func skipCountdownNow() {
+        guard let next = countdownNext else { return }
+        countdownTimer?.invalidate()
+        countdownTimer = nil
+        countdownNext = nil
+        countdownRemaining = 0
+        pendingAutoNext = true
+        DiagnosticsLog.write("[播放] 立即跳转 → " + next.title)
         openEpisodeHandler?(next)
     }
 

@@ -803,16 +803,30 @@ struct ContentView: View {
     @ViewBuilder
     private func recentRow(_ item: VideoItem) -> some View {
         HStack(spacing: 10) {
-            VStack(alignment: .leading, spacing: 2) {
+            RecentThumbnail(item: item, localURL: library.localURL(for: item))
+            VStack(alignment: .leading, spacing: 4) {
                 Text(item.title)
                     .lineLimit(1)
+                // 观看进度条
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(Color.secondary.opacity(0.22))
+                        Capsule()
+                            .fill(Color.accentColor)
+                            .frame(width: max(0, min(1, progressFraction(item))) * geo.size.width)
+                    }
+                }
+                .frame(height: 3)
                 HStack(spacing: 6) {
                     Text("上次看到 " + PlaybackStore.timeText(item.lastPosition ?? 0))
+                    Text("·")
+                    Text("还剩 " + PlaybackStore.timeText(max(0, item.duration - (item.lastPosition ?? 0))))
                     Text("·")
                     Text(Self.relativeTime(item.lastPlayedAt))
                 }
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+                .lineLimit(1)
             }
             Spacer()
             Menu {
@@ -841,6 +855,12 @@ struct ContentView: View {
                 library.dismissRecent(item.id, clearProgress: false)
             }
         }
+    }
+
+    private func progressFraction(_ item: VideoItem) -> Double {
+        guard item.duration > 1 else { return 0 }
+        let value = (item.lastPosition ?? 0) / item.duration
+        return value.isFinite ? max(0, min(1, value)) : 0
     }
 
     private static func relativeTime(_ date: Date?) -> String {
@@ -1277,10 +1297,10 @@ struct EngineSettingsView: View {
     @State private var segmentEnabled =
         (UserDefaults.standard.string(forKey: DownloadManager.engineKey) ?? "segment") == "segment"
     @State private var perTask =
-        max(1, UserDefaults.standard.integer(forKey: SegmentRunner.perTaskKey) > 0
+        max(2, UserDefaults.standard.integer(forKey: SegmentRunner.perTaskKey) > 0
             ? UserDefaults.standard.integer(forKey: SegmentRunner.perTaskKey) : 8)
     @State private var globalLimit =
-        max(5, UserDefaults.standard.integer(forKey: SegmentRunner.globalKey) > 0
+        max(4, UserDefaults.standard.integer(forKey: SegmentRunner.globalKey) > 0
             ? UserDefaults.standard.integer(forKey: SegmentRunner.globalKey) : 20)
     @State private var maxTasks =
         { () -> Int in
@@ -1303,6 +1323,7 @@ struct EngineSettingsView: View {
     @AppStorage(PlayerView.autoLandscapeKey) private var autoLandscape = true
     @AppStorage("playback.clockMode") private var clockMode = 0
     @AppStorage("playback.gravity") private var gravityDefault = 0
+    @AppStorage("playback.countdownSeconds") private var countdownSeconds = 7
     @AppStorage(SubtitleSpeaker.enabledKey) private var ttsEnabled = false
     @AppStorage(SubtitleSpeaker.trackKey) private var ttsTrack = 0
     @AppStorage(SubtitleSpeaker.queueKey) private var ttsQueue = true
@@ -1375,6 +1396,16 @@ struct EngineSettingsView: View {
                         Text("适应（完整画面）").tag(0)
                         Text("填充（铺满裁切）").tag(1)
                         Text("拉伸（铺满变形）").tag(2)
+                    }
+                    HStack {
+                        Text("片尾倒计时")
+                        Slider(value: Binding(get: { Double(countdownSeconds) },
+                                              set: { countdownSeconds = Int($0.rounded()) }),
+                               in: 2...20,
+                               step: 1)
+                        Text("\(countdownSeconds) 秒")
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
                     }
                 } header: {
                     Text("播放")
@@ -1469,13 +1500,13 @@ struct EngineSettingsView: View {
                     }
                     Section {
                         Picker("每任务", selection: $perTask) {
-                            ForEach([1, 4, 6, 8, 10], id: \.self) { Text("\($0)").tag($0) }
+                            ForEach([2, 4, 6, 8, 10], id: \.self) { Text("\($0)").tag($0) }
                         }
                         Picker("全局", selection: $globalLimit) {
-                            ForEach([5, 8, 12, 16, 20, 32], id: \.self) { Text("\($0)").tag($0) }
+                            ForEach([4, 8, 12, 16, 20, 32], id: \.self) { Text("\($0)").tag($0) }
                         }
                     } footer: {
-                        Text("并发越高越快，但更耗电、更容易被源站限流；分片较大时还会增加内存占用。建议 8 / 20，网络好且源不限流时可用 10 / 32。\n\n选 1 / 5 属于极低并发：适合弱网或被限流时保稳，但仍走分片引擎（可续传），速度会明显慢于系统引擎。全局值小于每任务值时，实际以全局为准。")
+                        Text("并发越高越快，但更耗电、更容易被源站限流；分片较大时还会增加内存占用。建议 8 / 20，网络好且源不限流时可用 10 / 32。\n\n最低可选 2 / 4：适合弱网或被限流时保稳，但仍走分片引擎（可续传），速度会明显慢于系统引擎。全局值小于每任务值时，实际以全局为准。")
                     }
                 }
                 Section {
@@ -1702,6 +1733,46 @@ enum LibraryFilter: String, CaseIterable, Identifiable {
         case .mp4Only: return "仅 MP4"
         case .missing: return "文件缺失"
         case .mixed: return "混合参数"
+        }
+    }
+}
+
+// MARK: - 最近在看 缩略图（按观看进度取帧）
+
+private struct RecentThumbnail: View {
+    let item: VideoItem
+    let localURL: URL
+
+    @State private var image: UIImage?
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.secondary.opacity(0.18))
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+            } else {
+                Image(systemName: "film")
+                    .font(.system(size: 16))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(width: 84, height: 48)
+        .clipped()
+        .task(id: item.lastPosition) {
+            if image == nil, let cached = ThumbnailService.cached(for: item.id) {
+                image = cached
+            }
+            guard item.duration > 1, let position = item.lastPosition, position > 0 else { return }
+            let fraction = position / item.duration
+            if let frame = await ThumbnailService.progressThumbnail(for: item,
+                                                                    localURL: localURL,
+                                                                    fraction: fraction) {
+                image = frame
+            }
         }
     }
 }

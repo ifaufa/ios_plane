@@ -123,9 +123,14 @@ enum ThumbnailService {
 
     // MARK: - 生成
 
-    private static func generate(localURL: URL, isHLS: Bool, knownDuration: Double) async -> UIImage? {
+    private static func generate(localURL: URL,
+                                 isHLS: Bool,
+                                 knownDuration: Double,
+                                 overrideFraction: Double? = nil) async -> UIImage? {
+        let fraction = overrideFraction ?? Self.fraction
         if isHLS {
-            return await frameAtFractionFromSegments(dir: localURL.deletingLastPathComponent())
+            return await frameAtFractionFromSegments(dir: localURL.deletingLastPathComponent(),
+                                                     fraction: fraction)
         }
 
         // 非分片：先算目标时间，再用播放链路抓帧（imageGenerator 对这批文件会 Cannot Decode）
@@ -245,9 +250,46 @@ enum ThumbnailService {
         return nil
     }
 
+
+    // MARK: - 进度帧缩略图（"最近在看"用）
+
+    private static var progressDir: URL {
+        let dir = fileURL(for: UUID()).deletingLastPathComponent()
+        let target = dir.appendingPathComponent("Progress", isDirectory: true)
+        try? FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        return target
+    }
+
+    private static func progressURL(id: UUID, bucket: Int) -> URL {
+        progressDir.appendingPathComponent("\(id.uuidString)-\(bucket).jpg")
+    }
+
+    /// 按观看进度取帧；每 10% 一档缓存，最多 10 张/视频
+    static func progressThumbnail(for item: VideoItem, localURL: URL, fraction: Double) async -> UIImage? {
+        let bounded = min(max(fraction.isFinite ? fraction : 0, 0), 1)
+        let bucket = min(10, max(0, Int(bounded * 10)))
+        let url = progressURL(id: item.id, bucket: bucket)
+        if let data = try? Data(contentsOf: url), let image = UIImage(data: data) {
+            return image
+        }
+        let isHLS = localURL.pathExtension.lowercased() == "m3u8"
+        // 取档位中间位置，避免正好落在切点
+        let target = (Double(bucket) + 0.5) / 10.0
+        guard let image = await generate(localURL: localURL,
+                                         isHLS: isHLS,
+                                         knownDuration: item.duration,
+                                         overrideFraction: target) else {
+            return nil
+        }
+        if let data = image.jpegData(compressionQuality: 0.82) {
+            try? data.write(to: url, options: .atomic)
+        }
+        return image
+    }
+
     // MARK: - 分片（HLS）
 
-    private static func frameAtFractionFromSegments(dir: URL) async -> UIImage? {
+    private static func frameAtFractionFromSegments(dir: URL, fraction: Double) async -> UIImage? {
         let playlistURL = dir.appendingPathComponent("index.m3u8")
         let durations = parseDurations(playlistURL)
         let total = durations.reduce(0, +)
