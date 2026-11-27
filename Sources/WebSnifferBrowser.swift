@@ -1679,7 +1679,7 @@ private struct TitleAffixSheet: View {
                                    numberStart: numberStart)
     }
 
-    private var targets: [BrowserModel.Candidate] {
+    private var targets: [Candidate] {
         model.candidates.filter { $0.isSelectable && (!onlySelected || $0.selected) }
     }
 
