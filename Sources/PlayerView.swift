@@ -689,7 +689,7 @@ struct PlayerView: View {
                 ttsEnabled.toggle()
                 if !ttsEnabled { SubtitleSpeaker.shared.stopAll() }
             } label: {
-                ttsEnabled ? Label("朗读字幕（开）", systemImage: "checkmark") : Text("朗读字幕（关）")
+                Text(ttsEnabled ? "朗读字幕：开 ✓" : "朗读字幕：关")
             }
             Divider()
             Button("加载字幕文件…") { showSubtitleImporter = true }
