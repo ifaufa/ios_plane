@@ -18,7 +18,7 @@ struct ImmersivePlayerView: View {
         ZStack {
             Color.black.ignoresSafeArea()
 
-            PlayerHostView(player: store.player, model: gestures)
+            PlayerHostView(player: store.player, model: gestures, gravity: store.gravityMode)
                 .ignoresSafeArea()
 
             if let hud = gestures.hud {
