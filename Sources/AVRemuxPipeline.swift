@@ -8,8 +8,17 @@ import CoreMedia
 enum AVRemuxPipeline {
     struct RemuxError: LocalizedError {
         let message: String
+        /// 是否属于"时间轴偏差"这一类可自我校正的错误
+        var timelineDeviation: Bool = false
         var errorDescription: String? { message }
     }
+
+    /// 时间轴偏差时可尝试的校正帧间隔（由第一次失败时算出）
+    static var suggestedCorrectedStep: Int64?
+    /// 最近一次转换是否使用了校正后的时间轴
+    static var lastTimelineCorrected = false
+    /// 最近一次统计到的视频帧数（诊断用）
+    static var lastFrameCount = 0
 
     /// 最近一次解析到的音频参数（供容器修补使用）
     static var collectedAudioFrames: [Data] = []
@@ -102,7 +111,8 @@ enum AVRemuxPipeline {
                             segmentRange: Range<Int>?,
                             resetAudioSpool: Bool,
                             useDirect: Bool = false,
-                            directUpperBound: Int64 = 0) throws {
+                            directUpperBound: Int64 = 0,
+                            forcedStep: Int64? = nil) throws {
         let fm = FileManager.default
         if fm.fileExists(atPath: destination.path) {
             try fm.removeItem(at: destination)
@@ -164,6 +174,7 @@ enum AVRemuxPipeline {
         var frameStepLocked = false
         var frameStepStable = 0
         var deltaSamples: [Int64] = []
+        var stepChanges: [String] = []
 
         // 先用「EXTINF 分片时长 ÷ 帧数」探测真实帧率并锁定：
         // 有些源把视频时间戳整体压缩（例如 25 倍），PES 与 SPS 会"自洽地一起错"，
@@ -182,6 +193,15 @@ enum AVRemuxPipeline {
         } else {
             DiagnosticsLog.write("[转MP4] 帧率探测(EXTINF) 未取得有效结果，回退 SPS/PES")
         }
+
+        // 自我校正重试：直接使用上次失败时算出的帧间隔，并锁定（不再被 DTS 中位数改写）
+        if let forced = forcedStep, forced > 0 {
+            frameStep = forced
+            frameStepLocked = true
+            DiagnosticsLog.write("[转MP4] 使用校正后的帧间隔 frameStep=" + String(forced)
+                                 + " ticks（≈" + String(format: "%.1f", 90000.0 / Double(forced)) + "fps）")
+        }
+
         var lastRawDTS: Int64 = -1
         struct GopFrame { let data: Data; let isKey: Bool; let poc: Int?; let pts: Int64; let dts: Int64 }
         var baseDTS: Int64 = -1
@@ -658,8 +678,25 @@ enum AVRemuxPipeline {
                                     DiagnosticsLog.write("[转MP4] 帧间隔已锁定 frameStep=" + String(frameStep) + " ticks（中位数稳定120帧）")
                                 }
                             } else {
-                                frameStep = candidate
-                                frameStepStable = 0
+                                // 收紧：只接受与"可信值（EXTINF 探测 / 当前锁定前值）"差异 ≤25% 的候选，
+                                // 避免不规则 DTS（段基重置、B 帧重排、跳变）把帧间隔带偏，最终时长放大数倍
+                                let trusted = probedStep ?? frameStep
+                                let ratio = Double(max(candidate, trusted)) / Double(max(1, min(candidate, trusted)))
+                                if ratio <= 1.25 {
+                                    frameStep = candidate
+                                    frameStepStable = 0
+                                    if stepChanges.count < 5 {
+                                        stepChanges.append(String(trusted) + "→" + String(candidate) + "（DTS中位数，已采用）")
+                                    }
+                                } else {
+                                    if stepChanges.count < 5 {
+                                        stepChanges.append("忽略 " + String(candidate) + "（与可信值 "
+                                                           + String(trusted) + " 相差 "
+                                                           + String(format: "%.0f", (ratio - 1) * 100) + "%）")
+                                    }
+                                    DiagnosticsLog.write("[转MP4] 忽略异常帧间隔 " + String(candidate)
+                                                         + " ticks（可信值 " + String(trusted) + "）")
+                                }
                             }
                         }
                     }
@@ -827,11 +864,31 @@ enum AVRemuxPipeline {
         videoQueue.finish()
         audioQueue.finish()
 
-        // 安全网：视频时间轴与分片总时长严重不符时，宁可失败也不产出错误文件
+        // 安全网：视频时间轴与分片总时长严重不符时，先给出"校正值"供上层自动重试
         let videoSeconds = Double(videoFrames) * Double(frameStep) / 90000.0
+        lastFrameCount = videoFrames
+        if !stepChanges.isEmpty {
+            DiagnosticsLog.write("[转MP4] 帧间隔变更记录：" + stepChanges.joined(separator: " ｜ "))
+        }
         if state.totalDuration > 60, videoSeconds > 0 {
             let deviation = abs(videoSeconds - state.totalDuration) / state.totalDuration
+            DiagnosticsLog.write("[转MP4] 统计 帧数=" + String(videoFrames)
+                                 + " 帧间隔=" + String(frameStep)
+                                 + " 推算=" + String(format: "%.1f", videoSeconds) + "s"
+                                 + " 基准=" + String(format: "%.1f", state.totalDuration) + "s"
+                                 + " 偏差=" + String(format: "%.1f", deviation * 100) + "%")
             if deviation > 0.20 {
+                // 以 EXTINF 基准为准，按真实帧数反推帧间隔（我们写 MP4 时时间轴本来就是"帧序×帧间隔"，
+                // 因此整体换一个系数即可校正，且不改变帧间相对间距 → 不破坏平滑度）
+                if videoFrames > 0 {
+                    let corrected = Int64((state.totalDuration * 90000.0 / Double(videoFrames)).rounded())
+                    if corrected >= 600, corrected <= 9000 {
+                        suggestedCorrectedStep = corrected
+                        DiagnosticsLog.write("[转MP4] 建议校正帧间隔=" + String(corrected)
+                                             + " ticks（≈" + String(format: "%.1f", 90000.0 / Double(corrected))
+                                             + "fps），将在重试时使用")
+                    }
+                }
                 DiagnosticsLog.write("[转MP4] 时间轴校验失败 视频="
                                      + String(format: "%.1f", videoSeconds) + "s 参考="
                                      + String(format: "%.1f", state.totalDuration) + "s 偏差="
@@ -839,7 +896,8 @@ enum AVRemuxPipeline {
                 throw RemuxError(message: "该源时间轴异常：视频 "
                                  + String(format: "%.0f", videoSeconds) + " 秒，分片总时长 "
                                  + String(format: "%.0f", state.totalDuration)
-                                 + " 秒，偏差过大，已停止以免产出错误文件（原分片已保留）")
+                                 + " 秒，偏差过大，已停止以免产出错误文件（原分片已保留）",
+                                 timelineDeviation: true)
             }
         }
 
@@ -970,12 +1028,34 @@ enum AVRemuxPipeline {
                             destination: URL,
                             upperBound: Int64 = 0,
                             onProgress: ((Double) -> Void)? = nil) async throws {
-        try await Task.detached(priority: .userInitiated) {
-            try run(state: state, dir: dir, destination: destination,
-                    progress: onProgress, videoOnly: true, audioFormatFlags: 2,
-                    collectAudio: true, segmentRange: nil, resetAudioSpool: true,
-                    useDirect: true, directUpperBound: upperBound)
-        }.value
+        suggestedCorrectedStep = nil
+        lastTimelineCorrected = false
+        do {
+            try await Task.detached(priority: .userInitiated) {
+                try run(state: state, dir: dir, destination: destination,
+                        progress: onProgress, videoOnly: true, audioFormatFlags: 2,
+                        collectAudio: true, segmentRange: nil, resetAudioSpool: true,
+                        useDirect: true, directUpperBound: upperBound)
+            }.value
+        } catch let error as RemuxError where error.timelineDeviation {
+            guard let corrected = suggestedCorrectedStep else { throw error }
+            suggestedCorrectedStep = nil
+            DiagnosticsLog.write("[转MP4] 时间轴自我校正重试 帧间隔=" + String(corrected) + " ticks")
+            do {
+                try await Task.detached(priority: .userInitiated) {
+                    try run(state: state, dir: dir, destination: destination,
+                            progress: onProgress, videoOnly: true, audioFormatFlags: 2,
+                            collectAudio: true, segmentRange: nil, resetAudioSpool: true,
+                            useDirect: true, directUpperBound: upperBound,
+                            forcedStep: corrected)
+                }.value
+                lastTimelineCorrected = true
+                DiagnosticsLog.write("[转MP4] 校正后转换成功（时间轴已按分片时长校正）")
+            } catch {
+                lastTimelineCorrected = false
+                throw error
+            }
+        }
     }
 
     static func remux(state: SegmentJobState,
@@ -987,11 +1067,32 @@ enum AVRemuxPipeline {
                       collectAudio: Bool = false,
                       segmentRange: Range<Int>? = nil,
                       resetAudioSpool: Bool = true) async throws {
-        try await Task.detached(priority: .userInitiated) {
-            try run(state: state, dir: dir, destination: destination,
-                    progress: onProgress, videoOnly: videoOnly, audioFormatFlags: audioFormatFlags,
-                    collectAudio: collectAudio, segmentRange: segmentRange, resetAudioSpool: resetAudioSpool)
-        }.value
+        suggestedCorrectedStep = nil
+        lastTimelineCorrected = false
+        do {
+            try await Task.detached(priority: .userInitiated) {
+                try run(state: state, dir: dir, destination: destination,
+                        progress: onProgress, videoOnly: videoOnly, audioFormatFlags: audioFormatFlags,
+                        collectAudio: collectAudio, segmentRange: segmentRange, resetAudioSpool: resetAudioSpool)
+            }.value
+        } catch let error as RemuxError where error.timelineDeviation {
+            guard let corrected = suggestedCorrectedStep else { throw error }
+            suggestedCorrectedStep = nil
+            DiagnosticsLog.write("[转MP4] 时间轴自我校正重试 帧间隔=" + String(corrected) + " ticks")
+            do {
+                try await Task.detached(priority: .userInitiated) {
+                    try run(state: state, dir: dir, destination: destination,
+                            progress: onProgress, videoOnly: videoOnly, audioFormatFlags: audioFormatFlags,
+                            collectAudio: collectAudio, segmentRange: segmentRange,
+                            resetAudioSpool: resetAudioSpool, forcedStep: corrected)
+                }.value
+                lastTimelineCorrected = true
+                DiagnosticsLog.write("[转MP4] 校正后转换成功（时间轴已按分片时长校正）")
+            } catch {
+                lastTimelineCorrected = false
+                throw error
+            }
+        }
     }
 
     // MARK: - 样本构造

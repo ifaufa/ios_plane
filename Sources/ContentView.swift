@@ -507,9 +507,17 @@ struct ContentView: View {
                 }
                   library.replace(item, fileName: result.fileName, duration: result.duration, fileSize: result.fileSize, segmentDirName: result.segmentDirName)
                   let keptSegments = result.segmentDirName != nil
-                  backup.alert = .init(title: "转换完成", message: keptSegments ? "已转为 MP4 并校验通过。原分片已保留（可再次转换），空间不足时可在该视频上「删分片」。" : "已转为 MP4 并校验通过，原分片已删除。")
+                  let corrected = AVRemuxPipeline.lastTimelineCorrected
+                  if corrected,
+                     let updated = library.items.first(where: { $0.id == item.id }),
+                     !updated.title.contains("时间轴已校正") {
+                      library.rename(updated, to: updated.title + "（时间轴已校正）")
+                  }
+                  let suffix = corrected ? "\n该源时间轴不规范，已按分片时长自动校正（标题已加「时间轴已校正」）。" : ""
+                  backup.alert = .init(title: "转换完成", message: (keptSegments ? "已转为 MP4 并校验通过。原分片已保留（可再次转换），空间不足时可在该视频上「删分片」。" : "已转为 MP4 并校验通过，原分片已删除。") + suffix)
             } catch {
-                backup.alert = .init(title: "转换失败", message: error.localizedDescription)
+                let hint = "\n若仍失败，可到 设置 → 下载引擎 关闭「自研封装（DirectMuxer）」后用系统引擎再试，或直接以分片状态播放（不影响观看与剪辑）。"
+                backup.alert = .init(title: "转换失败", message: error.localizedDescription + hint)
             }
             convertingID = nil
         }
