@@ -287,6 +287,19 @@ final class VideoLibrary: ObservableObject {
         return Self.directorySize(dir)
     }
 
+    /// 分片占用（纯分片条目也支持：用 fileName 的父目录）
+    func segmentsSize(_ item: VideoItem) -> Int64 {
+        guard let dir = segmentDirectory(item) else { return 0 }
+        return Self.directorySize(dir)
+    }
+
+    /// 分片数量（读 index.m3u8 的条目数）
+    func segmentCount(_ item: VideoItem) -> Int {
+        guard let dir = segmentDirectory(item) else { return 0 }
+        let playlist = dir.appendingPathComponent("index.m3u8")
+        return HLSEditor.parsePlaylist(playlist)?.count ?? 0
+    }
+
     /// 只删除分片（保留 MP4）
     func deleteSegments(for item: VideoItem) {
         guard var target = items.first(where: { $0.id == item.id }),

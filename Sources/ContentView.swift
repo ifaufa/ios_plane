@@ -362,8 +362,8 @@ struct ContentView: View {
                 Text(info.message)
             }
             .alert(item: $pendingLibraryAction) { action in
-                Alert(title: Text(action.title),
-                      message: Text(action.message),
+                Alert(title: Text(dialogTitle(action)),
+                      message: Text(dialogMessage(action)),
                       primaryButton: primaryButton(for: action),
                       secondaryButton: .cancel(Text("取消")))
             }
@@ -1001,6 +1001,93 @@ struct ContentView: View {
                 }
     }
 
+
+    // MARK: - 删除确认文案（带名称与具体内容）
+
+    private func shortTitle(_ title: String) -> String {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "未命名" }
+        return trimmed.count > 18 ? String(trimmed.prefix(18)) + "…" : trimmed
+    }
+
+    private func sizeText(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: max(0, bytes), countStyle: .file)
+    }
+
+    private func dialogTitle(_ action: LibraryAction) -> String {
+        switch action {
+        case .deleteAll(let item):
+            return "删除《\(shortTitle(item.title))》？"
+        case .deleteSegments(let item):
+            return "删除《\(shortTitle(item.title))》的分片？"
+        case .deleteMP4(let item):
+            return "删除《\(shortTitle(item.title))》的 MP4？"
+        case .deleteDownload(let task):
+            return "删除任务《\(shortTitle(task.title))》？"
+        default:
+            return action.title
+        }
+    }
+
+    private func dialogMessage(_ action: LibraryAction) -> String {
+        switch action {
+        case .deleteAll(let item):
+            let hasMP4 = item.fileName.lowercased().hasSuffix(".mp4")
+            let count = library.segmentCount(item)
+            let segSize = library.segmentsSize(item)
+            var parts: [String] = []
+            if count > 0 || segSize > 0 {
+                parts.append("原始分片（\(count) 个 / \(sizeText(segSize))）")
+            }
+            if hasMP4 {
+                parts.append("MP4（\(sizeText(item.fileSize))）")
+            }
+            var text = parts.isEmpty
+                ? "将删除该条目的文件，此操作不可恢复。"
+                : "将删除：" + parts.joined(separator: " 与 ") + "。此操作不可恢复。"
+            if library.isMixedParams(item) {
+                text += "\n⚠ 该条目由不同编码参数合并而成，播放本就可能异常。"
+            }
+            return text
+
+        case .deleteSegments(let item):
+            let count = library.segmentCount(item)
+            let size = library.segmentsSize(item)
+            return "将删除：原始分片（\(count) 个 / \(sizeText(size))）。删除后无法再转 MP4，MP4 成品不受影响。"
+
+        case .deleteMP4(let item):
+            return "将删除：MP4（\(sizeText(item.fileSize))）。原始分片保留，之后仍可再次转换。"
+
+        case .cleanupSegments:
+            let targets = library.items.filter { library.hasPlaylist($0) }
+            return cleanupText(targets: targets, forSegments: true)
+
+        case .cleanupMP4:
+            let targets = library.items.filter { $0.fileName.lowercased().hasSuffix(".mp4") }
+            return cleanupText(targets: targets, forSegments: false)
+
+        default:
+            return action.message
+        }
+    }
+
+    private func cleanupText(targets: [VideoItem], forSegments: Bool) -> String {
+        guard !targets.isEmpty else { return "没有可清理的内容。" }
+        var text = forSegments
+            ? "将删除 \(targets.count) 个条目保留的原始分片。已转换的 MP4 不受影响，但删除后无法再重新转换。"
+            : "将删除 \(targets.count) 个条目的 MP4。原始分片全部保留，可随时再次转换。"
+        // 条目不多时才统计体积（避免批量遍历大量文件导致卡顿）
+        if targets.count <= 30 {
+            let total = targets.reduce(Int64(0)) { sum, item in
+                sum + (forSegments ? library.segmentsSize(item) : item.fileSize)
+            }
+            if total > 0 {
+                text = "预计释放 \(sizeText(total))。\n" + text
+            }
+        }
+        return text
+    }
+
     private func primaryButton(for action: LibraryAction) -> Alert.Button {
         if action.isDestructive {
             return .destructive(Text(action.confirmTitle)) { perform(action) }
@@ -1013,12 +1100,15 @@ struct ContentView: View {
         case .deleteSegments(let item):
             DiagnosticsLog.write("[清理] 执行 删分片 \(item.title)")
             library.deleteSegments(for: item)
+            showToast("已删除《" + shortTitle(item.title) + "》的分片")
         case .deleteMP4(let item):
             DiagnosticsLog.write("[清理] 执行 删MP4 \(item.title)")
             library.deleteMP4KeepingSegments(for: item)
+            showToast("已删除《" + shortTitle(item.title) + "》的 MP4")
         case .deleteAll(let item):
             DiagnosticsLog.write("[清理] 执行 全部删除 \(item.title)")
             library.remove(item)
+            showToast("已删除《" + shortTitle(item.title) + "》")
         case .cleanupSegments:
             let freed = library.cleanupAllSegments()
             showToast("已清理分片，释放 \(freed / (1024 * 1024))MB")
@@ -1028,6 +1118,7 @@ struct ContentView: View {
         case .deleteDownload(let task):
             DiagnosticsLog.write("[清理] 执行 删除下载任务 \(task.title)")
             downloads.remove(task)
+            showToast("已删除任务《" + shortTitle(task.title) + "》")
         case .clipDuplicate(let item, let openEditor, _):
             if case .added(let total) = SegmentEditStore.shared.appendWhole(item, allowDuplicate: true) {
                 showToast("已加入剪辑清单：\(item.title)（共 \(total) 段）")
